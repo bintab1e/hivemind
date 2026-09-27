@@ -9,8 +9,8 @@ curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-server/main/serve
 설치 후 다음 명령으로 공식 커널 Git 태그의 최신 RC·stable을 등록합니다. 서버 설정에는 분석 PC 토큰이 필요하지 않습니다.
 
 ```bash
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" setup
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" status
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh setup
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh status
 ```
 
 분석 PC를 연결할 때만 아래 `agent` 명령을 실행하세요. 해당 분석 PC용 토큰과 설치 명령이 출력됩니다. 팀원에게 두 값을 전달하면 그 PC에서 커널 소스·agentcov·MCP를 설치할 수 있습니다. [에이전트 안내](https://github.com/bintab1e/hivemind-agent#readme)를 참조하세요.
@@ -18,12 +18,12 @@ bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" status
 추가 에이전트와 릴리스 교체:
 
 ```bash
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" agent add jinpyo rc
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" agent add pc02-codex rc
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" agent add pc03-claude mainline
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" track rc
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" track mainline
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" track rc 7.3-rc4
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add jinpyo rc
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc02-codex rc
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc03-claude mainline
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh track rc
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh track mainline
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh track rc 7.3-rc4
 ```
 
 새 릴리스를 등록하면 기존 에이전트의 체크아웃을 덮어쓰지 않습니다. 분석 PC에서 설치 명령을 다시 실행하면 커밋이 다른 기존 폴더 대신 `~/workspace/knfsd-<트랙>-<버전>`에 새 소스를 받습니다. 설치 경로를 직접 지정하려면 서버에서는 `HIVEMIND_SERVER_DIR`, 분석 PC에서는 `HIVEMIND_KERNEL_ROOT` 환경 변수를 설정합니다.
