@@ -212,8 +212,13 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const rotated = await fetch(`${url}/v1/admin/agents/pc5`, { method: 'PUT', headers: { Authorization: 'Bearer test-token' } });
   assert.equal(rotated.status, 200);
   assert.equal((await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${agentTokens.pc5}` } })).status, 401);
-  assert.equal((await fetch(`${url}/`)).status, 200);
+  const dashboardPage = await fetch(`${url}/`);
+  assert.equal(dashboardPage.status, 200);
+  assert.match(await dashboardPage.text(), /id="recent" class="recent-list" role="region" aria-label="최근 기록 목록" tabindex="0"/);
   assert.equal((await fetch(`${url}/app.js`)).status, 200);
+  const dashboardStyle = await fetch(`${url}/style.css`);
+  assert.equal(dashboardStyle.status, 200);
+  assert.match(await dashboardStyle.text(), /\.recent-list\{max-height:360px;overflow-y:auto;scrollbar-gutter:stable/);
 
   const activate = (track, version_id, repo_commit) => fetch(`${url}/v1/admin/tracks/${track}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ version_id, repo_commit }) });
   assert.equal((await activate('mainline', '7.2.5', commit)).status, 200);

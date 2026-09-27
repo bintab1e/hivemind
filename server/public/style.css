@@ -125,6 +125,8 @@ h2{font-size:18px;letter-spacing:-.025em;margin-bottom:0}
 .progress-item{background:#172631;border:1px solid #28404a;border-radius:8px;padding:13px}
 .progress-item strong{display:block;font-size:21px;line-height:1}
 .progress-item span{color:#8da3ab;font-size:11px;display:block;margin-top:7px}
+.recent-list{max-height:360px;overflow-y:auto;scrollbar-gutter:stable;padding-right:8px}
+.recent-list:focus-visible{outline:2px solid #b7f263;outline-offset:4px}
 .recent-row{padding:13px 0;border-bottom:1px solid #20313b}
 .recent-meta{color:#6f8992;font-size:11px;margin-top:5px}
 .empty{padding:68px 24px;text-align:center}
