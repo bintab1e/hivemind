@@ -36,7 +36,7 @@
 
 `finding`은 **가설을 직접 테스트해 실제 PoC와 그 실행의 KASAN 로그**를 얻은 뒤 등록하는 취약점 보고 이벤트다. `finding_of`(출발 가설 ID), `file_path`(저장소 상대 파일 경로), `code_refs`(정확한 코드 위치), `impact`(영향), `reproduction_command`, `poc_source`, `kasan_log`와 두 원문의 SHA-256이 필수다. 지지 검증 기록은 필요 없다. 기존 검증과 연결하려면 `evidence_event_ids`에 같은 가설·커밋의 활성 검증 ID를 선택적으로 넣을 수 있다. 로컬 MCP의 `queue_finding`은 `poc_path`와 `kasan_path`로 실제 파일을 읽어 Markdown에 원문과 해시를 넣고 즉시 전송한다. 경로는 저장소 또는 에이전트 `home` 안에 있어야 한다. 서버는 연결·해시·KASAN 표시를 검사하지만 PoC가 실제로 그 로그를 발생시켰는지는 자동 증명하지 않는다. 반박이 추가되거나 근거가 정정되면 대시보드에 현재 상태가 표시된다. PoC/KASAN 없는 보고는 취약점 패널에서 제외한다.
 
-가설은 `verification_plan`과 Markdown 본문을, 취약점 보고는 `impact`와 Markdown 본문을 한국어로 작성해야 한다. 제목은 영어도 허용한다. 코드 식별자·경로·명령과 PoC·KASAN 원문은 이 언어 규칙의 대상이 아니다.
+가설은 `verification_plan`과 Markdown 본문을, 검증은 `method`와 Markdown 본문을, 취약점 보고는 `impact`와 Markdown 본문을 한국어로 작성해야 한다. 제목은 영어도 허용한다. 코드 식별자·경로·명령과 PoC·KASAN 원문은 이 언어 규칙의 대상이 아니다.
 
 본문에는 **주장, 확인 방법, 관찰 근거, 미확인 사항**을 분리한다. 근거에는 가능하면 저장소 상대경로와 줄 범위, 명령 출력의 요약, 재현 환경을 넣는다. 서버는 본문을 데이터로 저장하고 Markdown 내 지시문을 실행하지 않는다.
 

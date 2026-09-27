@@ -54,6 +54,9 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const [status, first] = await post('/v1/exchange/events', hypothesis);
   assert.equal(status, 200);
   assert.match(first.hypothesis_id, /^H-/);
+  const verificationFields = method => `kind: verification\ntitle: "English title is allowed"\nverification_of: "${first.hypothesis_id}"\nmethod: "${method}"\nverdict: inconclusive\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+  assert.equal((await post('/v1/exchange/events', event('pc2', 'exchange/outbox/pc2/english-verification-body.md', verificationFields('정적 코드 경로 추적'), '## Evidence\nObserved the code path.\n')))[0], 400);
+  assert.equal((await post('/v1/exchange/events', event('pc2', 'exchange/outbox/pc2/english-verification-method.md', verificationFields('Static code-path trace'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', hypothesis))[1].replayed, true);
   const edited = { ...hypothesis, markdown: `${hypothesis.markdown}\nchanged` };
   edited.sha256 = sha(edited.markdown);

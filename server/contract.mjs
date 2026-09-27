@@ -81,6 +81,7 @@ export function validateEvent(input) {
     if (!['supports', 'refutes', 'inconclusive'].includes(data.verdict)) invalid('Invalid verdict');
     if (!['none', 'claim_only', 'summary', 'full'].includes(data.prior_exposure)) invalid('Invalid prior_exposure');
     if (!Array.isArray(data.based_on_event_ids) || data.based_on_event_ids.some(v => typeof v !== 'string')) invalid('Invalid based_on_event_ids');
+    if (!hasKorean(data.method) || !hasKorean(body)) invalid('검증 방법과 Markdown 본문은 한국어로 작성해야 합니다');
   }
   if (data.kind === 'finding') {
     required(data.finding_of, 'finding_of', 32);
