@@ -25,7 +25,7 @@ agent/                          각 분석 PC에 이 폴더만 설치 (Linux / W
 1. **Linux 서버:** [`server/README.md`](server/README.md)에 따라 `server/` 폴더만 복사하고 systemd 서비스를 시작합니다.
 2. **첫 분석 PC:** [`agent/README.md`](agent/README.md)의 Linux 또는 Windows 절차로 커널 소스를 받아 전체 커밋 SHA를 확인합니다.
 3. **Linux 서버:** `rc`, `mainline`(stable) 대상의 버전·SHA를 등록하고 LLM마다 토큰을 발급합니다.
-4. **각 분석 PC:** `agent/` 폴더만 복사해 SSH 터널, agentcov, stdio MCP, 동기화 에이전트를 설정합니다. 각 PC의 대시보드는 터널을 통해 <http://127.0.0.1:8765/>에서 봅니다.
+4. **각 분석 PC:** `agent/` 폴더만 복사해 agentcov, stdio MCP, 동기화 에이전트를 설정합니다. 서버 연결은 SSH 터널 또는 명시적으로 허용한 사설망 직접 연결을 사용합니다.
 
 GitHub 저장소 하나에 두 폴더를 올려도 되고, 폴더별로 별도 저장소에 올려도 됩니다. 한 저장소에서 **한 폴더만** 받을 때는 Git sparse checkout을 사용할 수 있습니다. 아래 `server`를 `agent`로 바꾸면 분석 PC용 파일만 받습니다.
 

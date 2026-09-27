@@ -6,6 +6,7 @@
   "coverage_prefixes": ["fs/nfsd/", "fs/nfs/", "fs/nfs_common/", "fs/lockd/", "net/sunrpc/", "include/uapi/linux/nfsd/"],
   "home": "/path/to/hivemind-agent/runtime",
   "server_url": "http://127.0.0.1:8765",
+  "allow_insecure_lan_http": false,
   "telemetry_interval_seconds": 300,
   "agentcov_bin": "/path/to/agentcov"
 }

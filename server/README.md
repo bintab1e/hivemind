@@ -86,6 +86,24 @@ curl -fsS http://127.0.0.1:8765/healthz
 
 SSH에서 로그아웃한 뒤에도 사용자 서비스를 유지하려면 관리자가 `sudo loginctl enable-linger "$USER"`를 한 번 실행합니다. 로그는 `journalctl --user -u hivemind -f`로 확인합니다. 데이터와 관리자 토큰은 `runtime/server/`에 생기며 이 폴더는 Git에서 제외됩니다. DB를 백업할 때는 `systemctl --user stop hivemind`로 멈춘 뒤 `runtime/server/` 전체를 복사하고 다시 시작합니다. 기본 서버는 `127.0.0.1`에만 바인딩하므로 분석 PC와 대시보드는 SSH 터널을 사용합니다.
 
+같은 사설망에서 터널 없이 쓰려면 서버를 내부망에 바인딩하고 대시보드 비밀번호를 설정합니다. `HIVEMIND_HOST=0.0.0.0`은 서버의 모든 네트워크 인터페이스에서 대기하므로 방화벽에서 8765/tcp를 팀 내부망으로 제한하세요. 공유기 포트 포워딩은 하지 않습니다.
+
+```bash
+mkdir -p "$HOME/.config/hivemind" "$HOME/.config/systemd/user/hivemind.service.d"
+umask 077
+node -e "process.stdout.write('HIVEMIND_DASHBOARD_PASSWORD=' + require('node:crypto').randomBytes(24).toString('hex') + '\n')" > "$HOME/.config/hivemind/server.env"
+cat > "$HOME/.config/systemd/user/hivemind.service.d/lan.conf" <<'EOF'
+[Service]
+Environment=HIVEMIND_HOST=0.0.0.0
+EnvironmentFile=%h/.config/hivemind/server.env
+EOF
+systemctl --user daemon-reload
+systemctl --user restart hivemind
+hostname -I
+```
+
+분석 PC의 에이전트 JSON에는 `server_url`로 `http://서버_내부_IP:8765`, `allow_insecure_lan_http`로 `true`를 설정합니다. 대시보드 로그인 이름은 `viewer`, 비밀번호는 서버의 `~/.config/hivemind/server.env`에 있습니다. HTTP에서는 에이전트 토큰, 대시보드 비밀번호, 분석 내용이 암호화되지 않습니다. 신뢰할 수 없는 네트워크나 인터넷을 통과한다면 HTTPS 또는 SSH 터널을 사용하세요.
+
 ## 2. RC·stable 대상 등록
 
 각 대상의 Linux 체크아웃에서 `git rev-parse HEAD`로 구한 **전체 SHA**를 입력합니다. 서버에는 커널 체크아웃이 필요하지 않습니다. 첫 분석 PC가 소스를 받은 뒤 SHA를 관리자에게 전달하면 됩니다. 다음 명령을 `rc`와 `mainline` 각각 한 번 실행합니다. `mainline`은 대시보드에서 stable을 나타내는 내부 ID입니다.

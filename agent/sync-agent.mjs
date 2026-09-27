@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { isIP } from 'node:net';
 import { parseLcov } from './contract.mjs';
 import { buildCoverageScope } from './coverage-scope.mjs';
 
@@ -75,7 +76,10 @@ export function validateConfig(config) {
   if (config.track_id != null && !['rc', 'mainline'].includes(config.track_id)) throw new Error('track_id must be rc or mainline');
   if (!path.isAbsolute(config.repo_root || '') || !path.isAbsolute(config.home || '')) throw new Error('repo_root and home must be absolute paths');
   const server = new URL(config.server_url);
-  if (!['http:', 'https:'].includes(server.protocol) || server.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(server.hostname)) throw new Error('Use HTTPS or a localhost SSH tunnel');
+  const octets = server.hostname.split('.').map(Number);
+  const privateIp = isIP(server.hostname) === 4 && (octets[0] === 10 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 || octets[0] === 192 && octets[1] === 168);
+  const localHttp = ['127.0.0.1', 'localhost', '[::1]'].includes(server.hostname);
+  if (!['http:', 'https:'].includes(server.protocol) || server.protocol === 'http:' && !localHttp && !(privateIp && config.allow_insecure_lan_http === true)) throw new Error('Use HTTPS or a localhost SSH tunnel; private-LAN HTTP requires allow_insecure_lan_http: true');
   if (!Number.isInteger(config.telemetry_interval_seconds) || config.telemetry_interval_seconds < 60) throw new Error('telemetry_interval_seconds must be at least 60');
   const prefixes = config.coverage_prefixes || ['fs/nfsd/'];
   if (!Array.isArray(prefixes) || !prefixes.length || prefixes.some(value => typeof value !== 'string' || !/^[A-Za-z0-9_.+/-]+\/$/.test(value) || value.startsWith('/') || value.split('/').includes('..'))) throw new Error('Invalid coverage_prefixes');

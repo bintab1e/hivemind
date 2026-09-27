@@ -24,6 +24,11 @@ test('server/ and agent/ run from separate copies', async t => {
 
   const { startServer } = await import(pathToFileURL(path.join(serverDir, 'server.mjs')).href);
   const { handleMessage } = await import(pathToFileURL(path.join(agentDir, 'mcp-agent.mjs')).href);
+  const { validateConfig } = await import(pathToFileURL(path.join(agentDir, 'sync-agent.mjs')).href);
+  const connection = { agent_id: 'pc01', version_id: '7.3-rc4', repo_root: folder, home: folder, telemetry_interval_seconds: 300 };
+  assert.throws(() => validateConfig({ ...connection, server_url: 'http://192.168.1.188:8765' }), /allow_insecure_lan_http/);
+  assert.equal(validateConfig({ ...connection, server_url: 'http://192.168.1.188:8765', allow_insecure_lan_http: true }).server, 'http://192.168.1.188:8765');
+  assert.throws(() => validateConfig({ ...connection, server_url: 'http://8.8.8.8:8765', allow_insecure_lan_http: true }), /Use HTTPS/);
   const running = await startServer({ port: 0, dataDir: path.join(folder, 'data'), apiToken: 'admin' });
   ({ server, db } = running);
   const { url } = running;

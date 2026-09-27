@@ -2,7 +2,7 @@
 
 이 `agent/` 폴더만 분석 PC에 복사하면 **stdio MCP 에이전트**(`mcp-agent.mjs`)와 **5분 간격 동기화 에이전트**(`sync-agent.mjs`)를 실행할 수 있습니다. `server/` 폴더와 서버의 DB는 필요하지 않습니다. 각 PC에는 Node.js 24 이상, Git, Python 3.11 이상, 별도 Linux 소스 체크아웃이 필요합니다. [agentcov](https://github.com/trailofbits/agentcov#install)는 **각 분석 PC**에 따로 설치합니다.
 
-서버 운영자에게 **서버 SSH 주소와 계정, `agent_id`, `track_id`(`rc` 또는 `mainline`), `version_id`, 등록된 40자리 Git SHA, 그 ID의 `.token` 파일**을 받습니다. 토큰은 별도 파일로 받거나 본인에게만 전달된 `agent/runtime/agents/<agent-id>.token`에 포함돼 있어도 됩니다. 첫 PC라면 소스를 받은 뒤 SHA를 관리자에게 보내고 대상 등록·토큰 발급이 끝난 후 계속합니다. `mainline`은 stable 릴리스의 내부 ID입니다. 다른 LLM과 소스 체크아웃이나 `.agentcov/`를 공유하지 마세요.
+서버 운영자에게 **서버 접속 주소(직접 연결 시 내부 IP, 터널 사용 시 SSH 주소와 계정), `agent_id`, `track_id`(`rc` 또는 `mainline`), `version_id`, 등록된 40자리 Git SHA, 그 ID의 `.token` 파일**을 받습니다. 토큰은 별도 파일로 받거나 본인에게만 전달된 `agent/runtime/agents/<agent-id>.token`에 포함돼 있어도 됩니다. 첫 PC라면 소스를 받은 뒤 SHA를 관리자에게 보내고 대상 등록·토큰 발급이 끝난 후 계속합니다. `mainline`은 stable 릴리스의 내부 ID입니다. 다른 LLM과 소스 체크아웃이나 `.agentcov/`를 공유하지 마세요.
 
 ## Linux 분석 PC
 
@@ -55,6 +55,8 @@ TRACK='rc'                        # stable은 mainline
 VERSION='7.3-rc4'                 # 실제 등록 버전
 REGISTERED_COMMIT=''              # 첫 PC는 빈 값, 이후는 서버에 등록된 전체 SHA
 KERNEL_GIT='https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git'
+SERVER_URL='http://127.0.0.1:8765' # 사설망 직접 연결: http://서버_IP:8765
+ALLOW_INSECURE_LAN_HTTP=false    # 사설망 HTTP 직접 연결일 때만 true
 node --version                    # v24 이상
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) process.exit(1)'
 python3 --version                 # 3.11 이상
@@ -67,18 +69,20 @@ git -C "$KERNEL_DIR" status --short
 
 stable은 `KERNEL_GIT='https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'`로 바꿉니다. 등록된 SHA와 다르면 진행하지 않습니다. 새 릴리스에서는 새로운 `KERNEL_DIR`에 체크아웃합니다.
 
-커밋 SHA를 서버 관리자에게 보내 `rc` 또는 `mainline` 대상 등록을 확인하고, 자기 ID의 토큰 파일을 받은 뒤 계속합니다. **터미널 2**에서 `user@SERVER_HOST`를 팀원이 사용할 SSH 계정·주소로 바꾸어 터널을 열고 유지합니다. 서버는 기본적으로 외부 포트에 바인딩하지 않습니다.
+커밋 SHA를 서버 관리자에게 보내 `rc` 또는 `mainline` 대상 등록을 확인하고, 자기 ID의 토큰 파일을 받은 뒤 계속합니다. SSH 터널을 선택했다면 **터미널 2**에서 `user@SERVER_HOST`를 팀원이 사용할 SSH 계정·주소로 바꾸어 터널을 열고 유지합니다. 서버는 기본적으로 외부 포트에 바인딩하지 않습니다.
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 user@SERVER_HOST
 ```
 
-PC의 8765 포트가 이미 사용 중이면 `-L 18765:127.0.0.1:8765`로 열고 아래 JSON의 `server_url`을 `http://127.0.0.1:18765`로 바꿉니다.
+PC의 8765 포트가 이미 사용 중이면 `-L 18765:127.0.0.1:8765`로 열고 `SERVER_URL`을 `http://127.0.0.1:18765`로 바꿉니다.
+
+같은 사설망에서 터널 없이 접속할 때는 서버 운영자에게 LAN 바인딩을 요청하고 위의 `SERVER_URL`을 서버 내부 IP로, `ALLOW_INSECURE_LAN_HTTP`를 `true`로 바꿉니다. 이 설정은 `10.*`, `172.16.*`~`172.31.*`, `192.168.*` IPv4 주소에만 적용됩니다. HTTP는 토큰과 분석 기록을 암호화하지 않으므로 신뢰하는 내부망에서만 사용하고 공유기 포트 포워딩을 하지 마세요. HTTPS 주소에는 이 옵션이 필요하지 않습니다.
 
 터미널 1에서 연결을 확인하고 agentcov를 설치합니다.
 
 ```bash
-curl -fsS http://127.0.0.1:8765/healthz
+curl -fsS "$SERVER_URL/healthz"
 python3 -m venv "$AGENT_DIR/.venv"
 PYTHON_BIN="$AGENT_DIR/.venv/bin/python"
 AGENTCOV="$AGENT_DIR/.venv/bin/agentcov"
@@ -131,7 +135,8 @@ cat > "runtime/agents/$AGENT_ID.json" <<EOF
   "repo_root": "$KERNEL_DIR",
   "coverage_prefixes": ["fs/nfsd/", "fs/nfs/", "fs/nfs_common/", "fs/lockd/", "net/sunrpc/", "include/uapi/linux/nfsd/"],
   "home": "$AGENT_DIR/runtime",
-  "server_url": "http://127.0.0.1:8765",
+  "server_url": "$SERVER_URL",
+  "allow_insecure_lan_http": $ALLOW_INSECURE_LAN_HTTP,
   "telemetry_interval_seconds": 300,
   "agentcov_bin": "$AGENTCOV"
 }
@@ -191,11 +196,11 @@ node "$AGENT_DIR/sync-agent.mjs" "$AGENT_DIR/runtime/agents/$AGENT_ID.json"
 ```bash
 cd "$KERNEL_DIR"
 "$AGENTCOV" summary
-curl -fsS http://127.0.0.1:8765/healthz
+curl -fsS "$SERVER_URL/healthz"
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_versions","arguments":{}}}' | node "$AGENT_DIR/mcp-agent.mjs" "$AGENT_DIR/runtime/agents/$AGENT_ID.json"
 ```
 
-동기화 로그에 `Batch accepted`와 `Coverage scope: ... files`가 나오면 기본 전송이 된 것입니다. 소스를 실제로 읽은 뒤 다음 300초 전송에서 대시보드의 **전체 코드 커버리지 → 해당 에이전트**를 확인합니다. `queue_*` 응답에서는 `accepted: true`와 `event_id`를 확인합니다. 분석하는 동안 터널(터미널 2)과 동기화 에이전트(터미널 3)를 켜 두고, PC를 재부팅하면 두 명령을 다시 실행합니다.
+동기화 로그에 `Batch accepted`와 `Coverage scope: ... files`가 나오면 기본 전송이 된 것입니다. 소스를 실제로 읽은 뒤 다음 300초 전송에서 대시보드의 **전체 코드 커버리지 → 해당 에이전트**를 확인합니다. `queue_*` 응답에서는 `accepted: true`와 `event_id`를 확인합니다. 분석하는 동안 동기화 에이전트를 켜 두고, SSH 터널을 선택했다면 터널도 유지합니다.
 
 ## Windows 분석 PC
 
@@ -228,6 +233,8 @@ $track = 'rc'
 $version = '7.3-rc4'
 $registeredCommit = ''              # 첫 PC는 빈 값, 이후는 서버의 40자리 SHA
 $kernelGit = 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git'
+$serverUrl = 'http://127.0.0.1:8765' # 사설망 직접 연결: http://서버_IP:8765
+$allowInsecureLanHttp = $false     # 사설망 HTTP 직접 연결일 때만 $true
 New-Item -ItemType Directory -Force 'C:\work' | Out-Null
 if (-not (Test-Path (Join-Path $receivedAgentDir 'mcp-agent.mjs'))) { throw "받은 agent 폴더를 찾을 수 없음: $receivedAgentDir" }
 if (Test-Path $agentDir) { throw "설치 폴더가 이미 있음: $agentDir" }
@@ -239,18 +246,18 @@ if ($registeredCommit -and $commit -ne $registeredCommit) { throw "서버 커밋
 $commit                            # 첫 PC라면 이 SHA를 서버에 등록
 ```
 
-stable은 `$track = 'mainline'`과 `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git`을 사용합니다. 커밋 SHA를 서버 관리자에게 보내 대상 등록을 확인하고, 자기 ID의 토큰 파일을 받은 뒤 계속합니다. **PowerShell 터미널 2**에서 `user@SERVER_HOST`를 팀원이 사용할 SSH 계정·주소로 바꾸어 터널을 열어 유지합니다.
+stable은 `$track = 'mainline'`과 `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git`을 사용합니다. 커밋 SHA를 서버 관리자에게 보내 대상 등록을 확인하고, 자기 ID의 토큰 파일을 받은 뒤 계속합니다. SSH 터널을 선택했다면 **PowerShell 터미널 2**에서 `user@SERVER_HOST`를 팀원이 사용할 SSH 계정·주소로 바꾸어 터널을 열어 유지합니다.
 
 ```powershell
 ssh -N -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 user@SERVER_HOST
 ```
 
-PC의 8765 포트가 이미 사용 중이면 `-L 18765:127.0.0.1:8765`로 열고 아래 `$config.server_url`도 `http://127.0.0.1:18765`로 바꿉니다.
+PC의 8765 포트가 이미 사용 중이면 `-L 18765:127.0.0.1:8765`로 열고 `$serverUrl`을 `http://127.0.0.1:18765`로 바꿉니다. 같은 사설망에서 직접 연결할 때는 서버의 내부 IP를 `$serverUrl`에 넣고 `$allowInsecureLanHttp = $true`로 설정합니다.
 
 터미널 1에서 agentcov를 설치하고 커널 체크아웃에 Codex 훅을 설치합니다. `py -3.12`는 위에서 설치한 Python 3.12를 선택합니다.
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/healthz
+Invoke-RestMethod "$serverUrl/healthz"
 $venv = Join-Path $agentDir '.venv'
 py -3.12 -m venv $venv
 $pythonBin = Join-Path $venv 'Scripts\python.exe'
@@ -294,7 +301,8 @@ $config.track_id = $track
 $config.version_id = $version
 $config.repo_root = $kernel
 $config.home = $runtime
-$config.server_url = 'http://127.0.0.1:8765'
+$config.server_url = $serverUrl
+$config.allow_insecure_lan_http = $allowInsecureLanHttp
 $config.agentcov_bin = $agentcovBin
 [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
 
@@ -350,7 +358,7 @@ Set-Location $kernel
 & $agentcovBin summary
 ```
 
-브라우저에서 <http://127.0.0.1:8765/?view=coverage>를 엽니다. Codex가 코드를 읽은 뒤 다음 300초 전송에서 해당 에이전트의 읽은 줄 수가 올라가야 합니다. 터널을 18765로 열었다면 브라우저도 그 포트로 접속합니다. 분석하는 동안 터널(터미널 2)과 동기화 에이전트(터미널 3)를 켜 두고, PC를 재부팅하면 두 명령을 다시 실행합니다.
+브라우저에서 `$serverUrl/?view=coverage`를 엽니다. Codex가 코드를 읽은 뒤 다음 300초 전송에서 해당 에이전트의 읽은 줄 수가 올라가야 합니다. 분석하는 동안 동기화 에이전트를 켜 두고, SSH 터널을 선택했다면 터널도 유지합니다.
 
 ## 다른 LLM 클라이언트와 운영
 
