@@ -238,18 +238,24 @@ function setActiveTrack(db, trackId, input) {
 }
 
 function coverageState(db, versionId, commit) {
-  const latest = db.prepare(`
+  const candidates = db.prepare(`
+    WITH ranked AS (
+      SELECT id, agent_id,
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC) AS latest_rank,
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY worktree_clean DESC, generated_at DESC, received_at DESC) AS clean_rank
+      FROM batches WHERE version_id = ? AND repo_commit = ?
+    )
     SELECT b.id, b.agent_id, b.version_id, b.repo_commit, b.scope_hash,
            b.worktree_clean, b.generated_at, b.received_at, b.files_json,
-           b.progress_md, b.missing_includes
-    FROM batches b JOIN (
-      SELECT id FROM (
-        SELECT id, ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC) AS rn
-        FROM batches WHERE version_id = ? AND repo_commit = ?
-      ) WHERE rn = 1
-    ) current ON current.id = b.id
-    ORDER BY b.agent_id
+           b.progress_md, b.missing_includes, ranked.latest_rank, ranked.clean_rank
+    FROM ranked JOIN batches b ON b.id = ranked.id
+    WHERE ranked.latest_rank = 1 OR ranked.clean_rank = 1
+    ORDER BY b.agent_id, ranked.latest_rank
   `).all(versionId, commit);
+  const observedLatest = candidates.filter(row => row.latest_rank === 1);
+  const cleanByAgent = new Map(candidates.filter(row => row.clean_rank === 1 && row.worktree_clean).map(row => [row.agent_id, row]));
+  const latest = observedLatest.map(row => row.worktree_clean ? row : cleanByAgent.get(row.agent_id) || row);
+  const fallbackAgents = new Set(observedLatest.filter(row => !row.worktree_clean && cleanByAgent.has(row.agent_id) && cleanByAgent.get(row.agent_id).id !== row.id).map(row => row.agent_id));
   const canonical = latest.find(row => row.worktree_clean)?.scope_hash;
   const accepted = [];
   const excluded = [];
@@ -265,7 +271,7 @@ function coverageState(db, versionId, commit) {
     else if (row.scope_hash !== canonical) exclusionReason = 'scope_mismatch';
     else if (fileShape.size && (Object.keys(files).length !== fileShape.size || Object.entries(files).some(([name, file]) => fileShape.get(name) !== JSON.stringify(file.eligible)))) exclusionReason = 'file_shape_mismatch';
     const included = exclusionReason === null;
-    coverageAgents.push({ agent_id: row.agent_id, read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, included_in_team: included, exclusion_reason: exclusionReason });
+    coverageAgents.push({ agent_id: row.agent_id, read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, included_in_team: included, exclusion_reason: exclusionReason, using_clean_fallback: fallbackAgents.has(row.agent_id), latest_batch_exclusion_reason: fallbackAgents.has(row.agent_id) ? 'worktree_dirty' : null });
     if (!included) {
       excluded.push(row.agent_id);
       continue;
@@ -298,7 +304,7 @@ function coverageState(db, versionId, commit) {
   }
   const files = [...combined.values()].map(file => ({ path: file.path, total: file.eligible.length, read: file.read.size, agents: file.agents, percent: file.eligible.length ? Math.round(file.read.size / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
   const missingIncludes = accepted[0]?.row.missing_includes ?? 0;
-  return { latest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes };
+  return { latest, observedLatest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes };
 }
 
 function hypothesisState(db, event, commit, checks) {
@@ -332,7 +338,7 @@ function dashboard(db, requested = {}) {
   if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], recent: [], progress: {} };
   const { version_id: versionId, repo_commit: commit } = selected;
   const trackId = selected.track_id || null;
-  const { latest, excluded, coverageAgents, frequency, agents, files, missingIncludes } = coverageState(db, versionId, commit);
+  const { latest, observedLatest, excluded, coverageAgents, frequency, agents, files, missingIncludes } = coverageState(db, versionId, commit);
   const lastSeen = new Map(db.prepare('SELECT agent_id, last_seen_at FROM agents').all().map(row => [row.agent_id, row.last_seen_at]));
   const totalLines = files.reduce((sum, file) => sum + file.total, 0);
   const readLines = files.reduce((sum, file) => sum + file.read, 0);
@@ -362,7 +368,7 @@ function dashboard(db, requested = {}) {
   const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis').slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
   return {
     tracks, versions, selected: { track_id: trackId, version_id: versionId, repo_commit: commit },
-    metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: latest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
+    metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: observedLatest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
     agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), coverage_agents: coverageAgents, files, hypotheses, verifications, findings, recent, progress,
   };
 }
@@ -387,17 +393,22 @@ function coverageDetails(db, args) {
   let missingIncludes = state.missingIncludes;
   let includedInTeam = true;
   let exclusionReason = null;
+  let usingCleanFallback = false;
+  let latestBatchExclusionReason = null;
   if (agentId) {
     const snapshot = state.latest.find(row => row.agent_id === agentId);
     if (!snapshot) invalid('Unknown agent for this version and commit', 404);
     files = Object.entries(JSON.parse(snapshot.files_json)).map(([name, file]) => ({ path: name, total: file.eligible.length, read: file.read.length, percent: file.eligible.length ? Math.round(file.read.length / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
     missingIncludes = snapshot.missing_includes ?? 0;
     includedInTeam = !state.excluded.includes(agentId);
-    exclusionReason = state.coverageAgents.find(agent => agent.agent_id === agentId)?.exclusion_reason || null;
+    const coverageAgent = state.coverageAgents.find(agent => agent.agent_id === agentId);
+    exclusionReason = coverageAgent?.exclusion_reason || null;
+    usingCleanFallback = coverageAgent?.using_clean_fallback || false;
+    latestBatchExclusionReason = coverageAgent?.latest_batch_exclusion_reason || null;
   }
   const totalLines = files.reduce((sum, file) => sum + file.total, 0);
   const readLines = files.reduce((sum, file) => sum + file.read, 0);
-  return { version_id: versionId, repo_commit: commit, agent_id: agentId, included_in_team: includedInTeam, exclusion_reason: exclusionReason, files, metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, read_files: files.filter(file => file.read > 0).length, missing_includes: missingIncludes } };
+  return { version_id: versionId, repo_commit: commit, agent_id: agentId, included_in_team: includedInTeam, exclusion_reason: exclusionReason, using_clean_fallback: usingCleanFallback, latest_batch_exclusion_reason: latestBatchExclusionReason, files, metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, read_files: files.filter(file => file.read > 0).length, missing_includes: missingIncludes } };
 }
 
 function lineRanges(lines) {

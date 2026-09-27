@@ -261,19 +261,19 @@ test('coverage exclusions report the exact failed merge condition', async t => {
   const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const tokens = {};
-  for (const agent of ['pc1', 'pc2', 'pc3', 'pc4']) {
+  for (const agent of ['pc1', 'pc2', 'pc3', 'pc4', 'pc5']) {
     const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: agent }) });
     assert.equal(response.status, 201);
     tokens[agent] = (await response.json()).token;
   }
-  const batch = (agent, { clean = true, scope = 'shared-scope', eligible = [10, 20] } = {}) => {
+  const batch = (agent, { clean = true, scope = 'shared-scope', eligible = [10, 20], generatedAt = stamp } = {}) => {
     const lcov = `TN:\nSF:/repo/src/app.py\n${eligible.map(line => `DA:${line},${line === 10 ? 1 : 0}`).join('\n')}\nLF:${eligible.length}\nLH:1\nend_of_record\n`;
     const coverage_json = '{}';
     const progress_md = `---\nschema_version: 1\nversion_id: 7.2.5\nrepo_commit: ${commit}\nupdated_at: "${stamp}"\n---\n`;
     const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
     const coverage_scope_hash = sha(scope);
-    const batch_id = sha(['7.2.5', agent, commit, coverage_scope_hash, String(clean), stamp, ...Object.values(hashes)].join('\0'));
-    return { manifest: { schema_version: 1, batch_id, agent_id: agent, version_id: '7.2.5', repo_commit: commit, repo_root: '/repo', coverage_scope_hash, worktree_clean: clean, generated_at: stamp, hashes }, lcov, coverage_json, progress_md };
+    const batch_id = sha(['7.2.5', agent, commit, coverage_scope_hash, String(clean), generatedAt, ...Object.values(hashes)].join('\0'));
+    return { manifest: { schema_version: 1, batch_id, agent_id: agent, version_id: '7.2.5', repo_commit: commit, repo_root: '/repo', coverage_scope_hash, worktree_clean: clean, generated_at: generatedAt, hashes }, lcov, coverage_json, progress_md };
   };
   const upload = async payload => {
     const response = await fetch(`${url}/v1/telemetry/batches`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[payload.manifest.agent_id]}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -283,16 +283,26 @@ test('coverage exclusions report the exact failed merge condition', async t => {
   await upload(batch('pc2', { clean: false }));
   await upload(batch('pc3', { scope: 'different-scope' }));
   await upload(batch('pc4', { eligible: [10, 20, 30] }));
+  await upload(batch('pc5'));
+  await upload(batch('pc5', { clean: false, scope: 'temporary-dirty-scope', generatedAt: '2026-09-23T01:00:01Z' }));
   const dashboard = await (await fetch(`${url}/api/dashboard`)).json();
   assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.included_in_team, agent.exclusion_reason]), [
     ['pc1', true, null],
     ['pc2', false, 'worktree_dirty'],
     ['pc3', false, 'scope_mismatch'],
     ['pc4', false, 'file_shape_mismatch'],
+    ['pc5', true, null],
   ]);
+  assert.deepEqual(dashboard.coverage_agents.find(agent => agent.agent_id === 'pc5'), {
+    agent_id: 'pc5', read_lines: 1, total_lines: 2, read_percent: 50,
+    included_in_team: true, exclusion_reason: null, using_clean_fallback: true,
+    latest_batch_exclusion_reason: 'worktree_dirty',
+  });
   assert.deepEqual(dashboard.metrics.excluded_agents, ['pc2', 'pc3', 'pc4']);
   const detail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc2`)).json();
   assert.deepEqual([detail.included_in_team, detail.exclusion_reason], [false, 'worktree_dirty']);
+  const fallbackDetail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc5`)).json();
+  assert.deepEqual([fallbackDetail.included_in_team, fallbackDetail.using_clean_fallback, fallbackDetail.latest_batch_exclusion_reason], [true, true, 'worktree_dirty']);
 });
 
 test('gzip telemetry accepts detailed coverage above the legacy 10 MB limit', async t => {

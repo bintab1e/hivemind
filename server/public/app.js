@@ -87,12 +87,16 @@ function render(data) {
     const stats = node('span', 'agent-stats');
     stats.append(node('strong', '', coverage?.read_percent == null ? '—' : `${coverage.read_percent}%`), document.createTextNode(` · ${agent.read_lines.toLocaleString()}/${coverage?.total_lines.toLocaleString() || '—'}줄 · 고유 ${agent.unique_lines.toLocaleString()}줄`));
     head.append(node('span', 'agent-name', agent.agent_id), stats);
-    row.append(head, node('div', 'agent-sub', `마지막 보고 ${date(agent.generated_at)}${agent.last_seen_at ? ` · 최근 서버 통신 ${date(agent.last_seen_at)}` : ''}`));
+    row.append(head, node('div', 'agent-sub', `마지막 보고 ${date(agent.generated_at)}${agent.last_seen_at ? ` · 최근 서버 통신 ${date(agent.last_seen_at)}` : ''}${coverage?.using_clean_fallback ? ' · 직전 정상 배치 사용' : ''}`));
     $('agents').append(row);
   }
   if (!data.agents.length) empty($('agents'), '병합 가능한 에이전트 자료가 없습니다.');
   const excludedCoverage = data.coverage_agents.filter(agent => !agent.included_in_team);
-  $('exclusions').textContent = excludedCoverage.length ? `병합 제외: ${excludedCoverage.map(agent => `${agent.agent_id} · ${exclusionReason(agent.exclusion_reason)}`).join(' / ')}` : '';
+  const fallbackCoverage = data.coverage_agents.filter(agent => agent.using_clean_fallback);
+  $('exclusions').textContent = [
+    excludedCoverage.length ? `병합 제외: ${excludedCoverage.map(agent => `${agent.agent_id} · ${exclusionReason(agent.exclusion_reason)}`).join(' / ')}` : '',
+    fallbackCoverage.length ? `최근 변경 중 배치를 제외하고 직전 정상 배치 사용: ${fallbackCoverage.map(agent => agent.agent_id).join(', ')}` : '',
+  ].filter(Boolean).join(' / ');
 
   reviewData = data;
   if (new URLSearchParams(location.search).get('view') === 'reviews') renderReviews(data);
@@ -276,7 +280,7 @@ function renderAgentChoices(data, selectedAgent) {
     button.append(
       node('span', 'choice-name', agent.agent_id || '전체 합집합'),
       node('strong', '', agent.read_percent == null ? '—' : `${agent.read_percent}%`),
-      node('span', 'choice-meta', `${agent.read_lines.toLocaleString()}/${agent.total_lines.toLocaleString()}줄 관측${agent.included_in_team ? '' : ' · 병합 제외'}`),
+      node('span', 'choice-meta', `${agent.read_lines.toLocaleString()}/${agent.total_lines.toLocaleString()}줄 관측${agent.included_in_team ? '' : ' · 병합 제외'}${agent.using_clean_fallback ? ' · 직전 정상 배치' : ''}`),
       bar,
     );
     button.addEventListener('click', () => {
@@ -322,8 +326,8 @@ function renderCoverage(report) {
     metric('열람된 파일', readFiles.toLocaleString(), `선택 범위 ${files.length.toLocaleString()}개 파일`),
     metric('미열람 소스 줄', (totalLines - readLines).toLocaleString(), '추가 조사 후보'),
   );
-  $('coverage-exclusion').hidden = report.included_in_team;
-  $('coverage-exclusion').textContent = report.included_in_team ? '' : `병합 제외 · ${exclusionReason(report.exclusion_reason)}`;
+  $('coverage-exclusion').hidden = report.included_in_team && !report.using_clean_fallback;
+  $('coverage-exclusion').textContent = report.using_clean_fallback ? '최근 변경 중 배치를 제외하고 직전 정상 배치를 표시합니다.' : report.included_in_team ? '' : `병합 제외 · ${exclusionReason(report.exclusion_reason)}`;
   clear($('files'));
   for (const file of files) {
     const row = node('div', 'file-row');
