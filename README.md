@@ -1,45 +1,39 @@
 # knfsd Hivemind Server
 
-여러 분석 PC의 knfsd 가설·검증·PoC/KASAN 보고와 [agentcov](https://github.com/trailofbits/agentcov) 열람 기록을 받는 중앙 서버입니다. 웹 대시보드, MCP 조회 API, SQLite 저장소가 포함됩니다. 분석 PC에 설치하는 코드는 별도 저장소 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent)에 있습니다.
+가설·반박·PoC/KASAN 보고와 agentcov 코드 열람 기록을 모으는 Linux 중앙 서버입니다. 분석 PC에는 별도 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent)를 설치합니다.
 
-```text
-server/server.mjs       HTTP API·SQLite·대시보드 서버
-server/contract.mjs     이벤트·커버리지 입력 검증
-server/public/          웹 대시보드
-server/README.md        Linux 설치·서비스·토큰 발급 안내
-docs/                   서버 데이터 계약·검증 모델
-server.test.mjs         서버 API 통합 검사
-```
+## 1. Linux 서버 PC
 
-## Linux 서버 설치
-
-Node.js 24 이상과 Git이 필요합니다. 서버에는 agentcov나 커널 소스를 설치할 필요가 없습니다.
+다음 한 줄이 저장소, Node.js 24, 웹 대시보드와 사용자 systemd 서비스를 설치합니다. Git·curl·xz가 없으면 Ubuntu/Debian에서 설치를 시도합니다.
 
 ```bash
-git clone https://github.com/bintab1e/hivemind-server.git "$HOME/hivemind-server"
-cd "$HOME/hivemind-server/server"
-node --version
-node server.mjs
+curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-server/main/server/install.sh | bash
 ```
 
-다른 터미널에서 `curl -fsS http://127.0.0.1:8765/healthz`로 확인합니다. systemd 상시 실행, 내부망 접속, RC·mainline 등록, 팀원별 토큰 발급은 [서버 설치 안내](server/README.md)에 명령어로 정리했습니다.
-
-기존 `~/Desktop/workspace/hivemind` 체크아웃을 계속 쓰는 서버라면 설치 경로를 옮길 필요가 없습니다.
+최신 RC와 stable의 공식 커널 Git 태그를 조회해 두 분석 대상을 등록하고 첫 에이전트 토큰을 발급합니다. `jinpyo`를 원하는 에이전트 ID로 바꾸세요.
 
 ```bash
-cd "$HOME/Desktop/workspace/hivemind"
-git remote set-url origin https://github.com/bintab1e/hivemind-server.git
-git pull --ff-only
-systemctl --user restart hivemind
-curl -fsS http://127.0.0.1:8765/healthz
+bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" setup jinpyo
 ```
 
-서버의 데이터와 관리자 토큰은 `server/runtime/server/`에 저장되며 Git에서 제외됩니다. 분석 PC에는 [`hivemind-agent` 설치 안내](https://github.com/bintab1e/hivemind-agent#readme)를 전달하세요.
+명령 출력에 **토큰**과 **분석 PC 설치 명령**이 나타납니다. 토큰은 분석 PC에만 전달하세요. `setup`은 RC와 stable을 각각 공식 Git 태그가 가리키는 커밋 SHA로 등록합니다. 다른 LLM을 추가할 때는 `bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent <새_ID> rc`를 실행합니다. 대상 갱신은 `.../manage.sh track rc` 또는 `.../manage.sh track mainline`입니다.
 
-## 개발 확인
+서버 설치기가 대시보드 주소와 `viewer` 비밀번호도 출력합니다. 상태 확인은 `curl -fsS http://127.0.0.1:8765/healthz`, 로그 확인은 `journalctl --user -u hivemind -f`입니다.
+
+## 2. Linux/WSL 분석 PC
+
+서버에서 출력한 설치 명령을 분석 PC에서 실행하고 토큰을 한 번 입력합니다. 예:
 
 ```bash
-node --test server.test.mjs
+curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-agent/main/install.sh | bash -s -- http://192.168.1.188:8765 rc
 ```
 
-기록 형식과 집계 규칙: [데이터 계약](docs/data-contract.md) · [검증 모델](docs/review-model.md) · [아키텍처](docs/architecture.md).
+설치기는 등록된 커널 태그를 `~/workspace/knfsd`에 내려받아 서버의 SHA와 비교하고, 에이전트 코드·agentcov·Codex 프로젝트 MCP·5분 동기화를 설정합니다. 기존 커널 체크아웃이 있다면 SHA가 일치할 때만 사용합니다. 설치 후 그 커널 폴더에서 새 Codex 세션을 열어 프로젝트와 훅을 신뢰하세요. 분석 PC 세부 안내: [hivemind-agent README](https://github.com/bintab1e/hivemind-agent#readme).
+
+## 가설 처리
+
+LLM이 가설을 등록하면 직접 테스트할 수 있습니다. PoC와 그 실행의 KASAN 로그가 있으면 **지지 검증 기록 없이 바로 취약점 보고**를 보냅니다. 반례를 찾으면 `refutes` 검증을 보냅니다. 같은 커밋에서 서로 다른 에이전트 두 명의 반박이 쌓이면 해당 가설은 재시도 보류 상태가 됩니다. 같은 에이전트의 반복 기록은 한 명으로 셉니다. 과거 검증과 보고는 삭제되지 않으며, 새 커밋에서는 상태를 다시 계산합니다.
+
+커버리지는 agentcov가 관측한 **코드 열람률**입니다. 가설의 참·거짓이나 분석 완료율을 뜻하지 않습니다.
+
+개발 확인: `node --test server.test.mjs server/manage.test.mjs`. 자세한 서버 명령은 [server/README.md](server/README.md), 입력 형식은 [데이터 계약](docs/data-contract.md)을 보세요.

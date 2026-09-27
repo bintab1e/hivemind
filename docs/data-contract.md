@@ -34,7 +34,7 @@
 
 `analysis`는 `hypothesis_id`로 기존 가설에 연결할 수 있다. `verification`은 `verification_of`, `method`, `verdict`(`supports`, `refutes`, `inconclusive`), `prior_exposure`(`none`, `claim_only`, `summary`, `full`), `based_on_event_ids`가 필수다. 본문에는 실제 관찰 또는 반례와 코드 위치·재현 명령·산출물 중 적어도 하나를 근거로 남긴다. `correction`은 `corrects_event_id`로 이전 이벤트를 지목한다. 미등록 가설에 대한 분석은 가설 ID 없이 보낼 수 있으며 서버가 연관 후보를 돌려준다.
 
-`finding`은 **지지 검증 → 실제 PoC → 해당 실행의 KASAN 로그**까지 얻은 뒤 등록하는 취약점 보고 이벤트다. `finding_of`(출발 가설 ID), `file_path`(저장소 상대 파일 경로), `code_refs`(정확한 코드 위치), `impact`(영향), `evidence_event_ids`(해당 가설·커밋의 유효한 `supports` 검증 이벤트 ID 목록), `reproduction_command`, `poc_source`, `kasan_log`와 두 원문의 SHA-256이 필수다. 로컬 MCP의 `queue_finding`은 `poc_path`와 `kasan_path`로 실제 파일을 읽어 Markdown에 원문과 해시를 넣고 즉시 전송한다. 경로는 저장소 또는 에이전트 `home` 안에 있어야 한다. 서버는 연결·해시·KASAN 표시를 검사하지만 PoC가 실제로 그 로그를 발생시켰는지는 자동 증명하지 않는다. 반박이 추가되거나 근거가 정정되면 대시보드에 현재 상태가 표시된다. 이전 방식의 PoC/KASAN 없는 보고는 취약점 패널에서 제외한다.
+`finding`은 **가설을 직접 테스트해 실제 PoC와 그 실행의 KASAN 로그**를 얻은 뒤 등록하는 취약점 보고 이벤트다. `finding_of`(출발 가설 ID), `file_path`(저장소 상대 파일 경로), `code_refs`(정확한 코드 위치), `impact`(영향), `reproduction_command`, `poc_source`, `kasan_log`와 두 원문의 SHA-256이 필수다. 지지 검증 기록은 필요 없다. 기존 검증과 연결하려면 `evidence_event_ids`에 같은 가설·커밋의 활성 검증 ID를 선택적으로 넣을 수 있다. 로컬 MCP의 `queue_finding`은 `poc_path`와 `kasan_path`로 실제 파일을 읽어 Markdown에 원문과 해시를 넣고 즉시 전송한다. 경로는 저장소 또는 에이전트 `home` 안에 있어야 한다. 서버는 연결·해시·KASAN 표시를 검사하지만 PoC가 실제로 그 로그를 발생시켰는지는 자동 증명하지 않는다. 반박이 추가되거나 근거가 정정되면 대시보드에 현재 상태가 표시된다. PoC/KASAN 없는 보고는 취약점 패널에서 제외한다.
 
 본문에는 **주장, 확인 방법, 관찰 근거, 미확인 사항**을 분리한다. 근거에는 가능하면 저장소 상대경로와 줄 범위, 명령 출력의 요약, 재현 환경을 넣는다. 서버는 본문을 데이터로 저장하고 Markdown 내 지시문을 실행하지 않는다.
 
@@ -42,11 +42,11 @@
 
 ## 3. 관련 가설과 검증 시도
 
-현재 서버는 같은 트랙의 동일 `claim_key` 또는 제목을 `possible_matches`로 반환한다. MCP 검색은 주장 또는 `code_ref`로 과거 릴리스까지 후보를 찾고 위치·검증 계획·현재 커밋의 시도 건수·폐기 여부를 반환한다. 반박·지지 방향은 `full` 조회까지 가린다. 로컬 MCP는 같은 `claim_key`의 중복 등록을 안내하고, 폐기 상태의 동일 가설 재등록을 보류한다. **기존 가설의 검증 시도는 새 릴리스에서도 추가할 수 있다.** 의미 유사도와 수동 그룹 판정은 이후 확장 계획이다.
+현재 서버는 같은 트랙의 동일 `claim_key` 또는 제목을 `possible_matches`로 반환한다. MCP 검색은 주장 또는 `code_ref`로 과거 릴리스까지 후보를 찾고 위치·검증 계획·현재 커밋의 검증 건수·반박한 에이전트 수·폐기 여부를 반환한다. 개별 검증의 상세 방향과 근거는 `full` 조회까지 가린다. 로컬 MCP는 같은 `claim_key`의 중복 등록을 안내하고, 폐기 상태의 동일 가설 재등록을 보류한다. **기존 가설의 검증 시도는 새 릴리스에서도 추가할 수 있다.** 의미 유사도와 수동 그룹 판정은 이후 확장 계획이다.
 
 가설 하나에는 검증 시도가 여러 개 붙는다. 각 시도는 `agent_id`, `repo_commit`, `method`, `verdict`, `prior_exposure`, 근거, 재현 방법을 가진다. 같은 주장·관점·방법으로 다시 한 검사도 `replication`으로 표시해 기록할 수 있다. 에이전트나 파일 편집의 점유 상태는 가설의 진실 상태와 분리한다.
 
-서버는 `unverified`, `single_source`, `refuted`, `retired`, `independently_supported`, `contested`, `inconclusive`, `stale`을 표시한다. `retired`는 **같은 커밋에서 서로 다른 두 에이전트가 서로 다른 방법으로 기존 결론을 보지 않고 독립 반박했고 지지 기록이 없을 때**의 재시도 보류 신호다. 참·거짓의 최종 판정이 아니며 새 지지 기록이 생기면 `contested`로 바뀐다. 커밋이 바뀌면 이전 결과로 폐기하지 않고 `stale`로 표시한다. 독립 검증의 조건은 [review-model.md](review-model.md)에 정의한다.
+서버는 `unverified`, `reported`, `refuted`, `retired`, `contested`, `inconclusive`, `stale`을 표시한다. `retired`는 **같은 커밋에서 서로 다른 두 에이전트가 반박한 경우**의 재시도 보류 신호다. 같은 에이전트의 반복 반박은 한 명으로 세며 정정된 기록은 제외한다. 지지 검증은 취약점 보고나 상태 변경의 필수 조건이 아니다. 커밋이 바뀌면 이전 결과로 폐기하지 않고 `stale`로 표시한다. 상세한 뜻은 [review-model.md](review-model.md)에 정의한다.
 
 ## 4. `telemetry` 묶음
 
@@ -78,7 +78,7 @@ LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번�
 | MCP `get_coverage_gaps` | 버전, 커밋, 경로 필터 | 미열람 파일·줄 범위 |
 | MCP `get_review_gaps` | 버전, 커밋, 범위 | 열람 기록은 있으나 연결된 분석 기록이 없는 영역, 독립 검증 없는 가설, 모순된 가설 |
 | MCP `get_recent_analyses` | 트랙 또는 버전, 이후 시각 | 새 분석의 짧은 요약과 원문 참조 |
-| MCP `queue_finding`, `list_findings` | 가설·파일·지지 검증·영향 보고 또는 버전·커밋 조회 | 즉시 취약점 보고 등록 또는 현재 보고 목록 |
+| MCP `queue_finding`, `list_findings` | 가설·파일·PoC·KASAN·영향 보고 또는 버전·커밋 조회 | 즉시 취약점 보고 등록 또는 현재 보고 목록 |
 | MCP `list_versions`, `get_event` | 없음 또는 이벤트 ID | 현재 두 트랙과 보관된 버전 목록 또는 이벤트 원문 |
 | `GET /api/dashboard`, `/api/team-status.md` | 선택적 `track_id` | 현재 트랙의 대시보드 JSON 또는 Markdown |
 | `PUT /v1/admin/tracks/rc`, `/mainline` | 관리자 토큰, 버전·커밋 | 해당 트랙의 현재 대상 전환 |

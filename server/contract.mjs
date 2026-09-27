@@ -86,7 +86,7 @@ export function validateEvent(input) {
     required(data.reproduction_command, 'reproduction_command', 1000);
     const file = required(data.file_path, 'file_path', 300);
     if (file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Invalid file_path');
-    if (!Array.isArray(data.evidence_event_ids) || !data.evidence_event_ids.length || data.evidence_event_ids.length > 30 || new Set(data.evidence_event_ids).size !== data.evidence_event_ids.length || data.evidence_event_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id))) invalid('Invalid evidence_event_ids');
+    if (data.evidence_event_ids != null && (!Array.isArray(data.evidence_event_ids) || data.evidence_event_ids.length > 30 || new Set(data.evidence_event_ids).size !== data.evidence_event_ids.length || data.evidence_event_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id)))) invalid('Invalid evidence_event_ids');
     if (typeof data.poc_source !== 'string' || !data.poc_source.trim() || Buffer.byteLength(data.poc_source) > evidenceLimits.poc || hash(data.poc_source) !== data.poc_sha256) invalid('Invalid PoC source or hash');
     if (typeof data.kasan_log !== 'string' || !/^[ \t]*(?:\[[^\]\r\n]{1,40}\][ \t]*)?BUG:[ \t]*KASAN:/im.test(data.kasan_log) || Buffer.byteLength(data.kasan_log) > evidenceLimits.kasan || hash(data.kasan_log) !== data.kasan_sha256) invalid('Invalid KASAN log or hash');
   }

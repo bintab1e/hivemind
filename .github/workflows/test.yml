@@ -1,0 +1,12 @@
+name: test
+on: [push, pull_request]
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: bash -n server/install.sh server/manage.sh
+      - run: node --test server.test.mjs server/manage.test.mjs

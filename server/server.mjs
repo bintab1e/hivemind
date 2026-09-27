@@ -106,10 +106,10 @@ function addEvent(db, input, agentId) {
       if (!target || (target.version_id !== data.version_id && (!trackFor(db, data.version_id, data.repo_commit) || trackFor(db, data.version_id, data.repo_commit) !== trackFor(db, target.version_id, target.repo_commit)))) invalid('Unknown hypothesis', 422);
     }
     if (data.kind === 'finding') {
-      const support = new Set(db.prepare("SELECT v.id FROM events v WHERE v.kind = 'verification' AND v.verification_of = ? AND v.repo_commit = ? AND v.verdict = 'supports' AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = v.id)").all(data.finding_of, data.repo_commit).map(row => row.id));
-      if (data.evidence_event_ids.some(id => !support.has(id))) {
-        if (data.evidence_event_ids.some(id => !db.prepare('SELECT 1 FROM events WHERE id = ?').get(id))) invalid('Unknown supporting verification', 422);
-        invalid('Finding evidence must reference active supporting verifications', 422);
+      const linked = new Set(db.prepare("SELECT v.id FROM events v WHERE v.kind = 'verification' AND v.verification_of = ? AND v.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = v.id)").all(data.finding_of, data.repo_commit).map(row => row.id));
+      if ((data.evidence_event_ids || []).some(id => !linked.has(id))) {
+        if (data.evidence_event_ids.some(id => !db.prepare('SELECT 1 FROM events WHERE id = ?').get(id))) invalid('Unknown verification', 422);
+        invalid('Finding evidence must reference active verifications of the same hypothesis and commit', 422);
       }
     }
     if (data.kind === 'correction') {
@@ -282,23 +282,16 @@ function coverageState(db, versionId, commit) {
 
 function hypothesisState(db, event, commit, checks) {
   const current = checks.filter(item => item.repo_commit === commit);
-  const support = current.filter(item => item.verdict === 'supports');
-  const refute = current.filter(item => item.verdict === 'refutes');
-  const independentAttempts = rows => rows.filter(item =>
-    ['none', 'claim_only'].includes(item.prior_exposure)
-    && JSON.parse(item.based_on_json).length === 0
-    && !exposedModes(db, item.agent_id, event.hypothesis_id, item.received_at).some(mode => ['full', 'summary'].includes(mode))
-  );
-  const independent = rows => new Set(independentAttempts(rows).map(item => item.agent_id)).size;
+  const refutationCount = new Set(current.filter(item => item.verdict === 'refutes').map(item => item.agent_id)).size;
+  const findingCount = db.prepare("SELECT COUNT(*) AS count FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = f.id)").get(event.hypothesis_id, commit).count;
   let status = 'unverified';
-  if (support.length && refute.length) status = 'contested';
-  else if (refute.length && independent(refute) >= 2 && new Set(independentAttempts(refute).map(item => item.method.trim().toLowerCase())).size >= 2) status = 'retired';
-  else if (refute.length) status = 'refuted';
-  else if (support.length && independent(support) >= 2) status = 'independently_supported';
-  else if (support.length) status = 'single_source';
+  if (refutationCount >= 2) status = 'retired';
+  else if (refutationCount && findingCount) status = 'contested';
+  else if (refutationCount) status = 'refuted';
+  else if (findingCount) status = 'reported';
   else if (current.length) status = 'inconclusive';
   else if (event.repo_commit !== commit) status = 'stale';
-  return { status, current };
+  return { status, current, refutation_count: refutationCount, finding_count: findingCount };
 }
 
 function activeChecks(db, hypothesisId) {
@@ -329,18 +322,18 @@ function dashboard(db, requested = {}) {
   const attempts = allEvents.filter(e => e.kind === 'verification' && !corrected.has(e.id));
   const hypotheses = allEvents.filter(e => e.kind === 'hypothesis' && !corrected.has(e.id)).map(event => {
     const checks = attempts.filter(item => item.verification_of === event.hypothesis_id);
-    const { status, current } = hypothesisState(db, event, commit, checks);
-    return { id: event.hypothesis_id, event_id: event.id, title: event.title, agent_id: event.agent_id, status, scope: JSON.parse(event.scope_json), code_refs: readFrontMatter(event.markdown).data.code_refs || [], claim_key: event.claim_key, created_at: event.created_at, checks: current.map(item => ({ event_id: item.id, agent_id: item.agent_id, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, exposure_conflict: exposedModes(db, item.agent_id, event.hypothesis_id, item.received_at).some(mode => ['full', 'summary'].includes(mode)) && ['none', 'claim_only'].includes(item.prior_exposure) })) };
+    const { status, current, refutation_count, finding_count } = hypothesisState(db, event, commit, checks);
+    return { id: event.hypothesis_id, event_id: event.id, title: event.title, agent_id: event.agent_id, status, refutation_count, finding_count, scope: JSON.parse(event.scope_json), code_refs: readFrontMatter(event.markdown).data.code_refs || [], claim_key: event.claim_key, created_at: event.created_at, checks: current.map(item => ({ event_id: item.id, agent_id: item.agent_id, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, exposure_conflict: exposedModes(db, item.agent_id, event.hypothesis_id, item.received_at).some(mode => ['full', 'summary'].includes(mode)) && ['none', 'claim_only'].includes(item.prior_exposure) })) };
   });
   const titles = new Map(hypotheses.map(item => [item.id, item.title]));
   const verifications = attempts.filter(item => item.repo_commit === commit).map(item => ({ event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.verification_of, hypothesis_title: titles.get(item.verification_of) || item.verification_of, verdict: item.verdict, method: item.method, code_refs: readFrontMatter(item.markdown).data.code_refs || [], created_at: item.created_at }));
   const byHypothesis = new Map(hypotheses.map(item => [item.id, item]));
-  const activeSupport = new Map(verifications.filter(item => item.verdict === 'supports').map(item => [item.event_id, item]));
+  const activeVerification = new Map(verifications.map(item => [item.event_id, item]));
   const findings = allEvents.filter(item => item.kind === 'finding' && item.repo_commit === commit && !corrected.has(item.id) && readFrontMatter(item.markdown).data.poc_sha256 && readFrontMatter(item.markdown).data.kasan_sha256).map(item => {
     const data = readFrontMatter(item.markdown).data;
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
-    return { event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeSupport.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeSupport.has(id)), created_at: item.created_at };
+    return { event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
   });
   const taskMap = new Map();
   for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
@@ -418,7 +411,7 @@ function reviewGaps(db, args) {
   const withoutRecord = report.files.filter(file => file.read && !eventScopes.some(scope => file.path === scope || file.path.startsWith(scope.endsWith('/') ? scope : `${scope}/`))).slice(0, 20).map(file => ({ path: file.path, read_lines: file.read }));
   return {
     version_id: versionId, repo_commit: commit,
-    hypotheses: report.hypotheses.filter(item => ['unverified', 'single_source', 'refuted', 'contested', 'stale', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs }) => ({ id, title, status, scope, code_refs })),
+    hypotheses: report.hypotheses.filter(item => ['unverified', 'refuted', 'contested', 'stale', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs, refutation_count }) => ({ id, title, status, scope, code_refs, refutation_count })),
     observed_files_without_exchange_record: withoutRecord,
     note: '기록의 공백만 보여줍니다. 열람 여부로 검토 완료나 가설의 진실을 판단하지 않습니다.',
   };
@@ -435,8 +428,8 @@ function teamStatusMarkdown(report) {
     `- 작업: 완료 ${progress.done}, 진행 ${progress.in_progress}, 차단 ${progress.blocked}, 대기 ${progress.todo}`,
     '', '## 에이전트', '', '| 에이전트 | 열람 줄 | 고유 기여 줄 |', '| --- | ---: | ---: |',
     ...agents.map(item => `| ${safe(item.agent_id)} | ${item.read_lines} | ${item.unique_lines} |`),
-    '', '## 가설', '', '| ID | 주장 | 잠정 상태 | 검증 시도 |', '| --- | --- | --- | ---: |',
-    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(item.status)} | ${item.checks.length} |`),
+    '', '## 가설', '', '| ID | 주장 | 잠정 상태 | 반박 에이전트 |', '| --- | --- | --- | ---: |',
+    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(item.status)} | ${item.refutation_count} |`),
     '', '## 취약점 보고', '', '| 보고 | 연결 가설 | 보고 에이전트 | 코드 위치 |', '| --- | --- | --- | --- |',
     ...findings.map(item => `| ${safe(item.title)} | ${safe(item.hypothesis_id)} | ${safe(item.agent_id)} | ${safe(item.file_path)} |`),
     '', 'agentcov 열람률은 관측된 코드 노출 범위이며 코드 이해도·검토 완료율·가설의 참거짓이 아닙니다.', '',
@@ -480,7 +473,8 @@ function searchHypotheses(db, agentId, args) {
     return { id: row.hypothesis_id, title: row.title, claim_key: row.claim_key, scope, code_refs: codeRefs, verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', repo_commit: row.repo_commit, score, row };
   }).filter(item => item.score).sort((a, b) => b.score - a.score).slice(0, limit).map(({ row, ...item }) => {
     const checks = activeChecks(db, row.hypothesis_id);
-    return { ...item, status: claimStatus(hypothesisState(db, row, commit || row.repo_commit, checks).status), verification_count: checks.filter(check => check.repo_commit === (commit || row.repo_commit)).length };
+    const state = hypothesisState(db, row, commit || row.repo_commit, checks);
+    return { ...item, status: claimStatus(state.status), verification_count: state.current.length, refutation_count: state.refutation_count, finding_count: state.finding_count };
   });
   for (const item of found) logExposure(db, agentId, item.id, 'claim_only');
   return { matches: found, note: '문자열 기반 후보입니다. 일치 여부와 참거짓은 직접 검증해야 합니다.' };
@@ -495,11 +489,12 @@ function getHypothesis(db, agentId, args) {
   logExposure(db, agentId, hypothesisId, mode);
   const commit = args.repo_commit == null ? row.repo_commit : required(args.repo_commit, 'repo_commit', 64);
   if (!/^[a-f0-9]{40,64}$/i.test(commit)) invalid('Invalid repo_commit');
-  const status = hypothesisState(db, row, commit, activeChecks(db, hypothesisId)).status;
-  const basic = { id: row.hypothesis_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, claim: claimSection(row.markdown) || row.title, scope: JSON.parse(row.scope_json), code_refs: readFrontMatter(row.markdown).data.code_refs || [], verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', status: claimStatus(status), verification_count: activeChecks(db, hypothesisId).filter(check => check.repo_commit === commit).length };
+  const checks = activeChecks(db, hypothesisId);
+  const state = hypothesisState(db, row, commit, checks);
+  const basic = { id: row.hypothesis_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, claim: claimSection(row.markdown) || row.title, scope: JSON.parse(row.scope_json), code_refs: readFrontMatter(row.markdown).data.code_refs || [], verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', status: claimStatus(state.status), verification_count: state.current.length, refutation_count: state.refutation_count, finding_count: state.finding_count };
   if (mode === 'claim_only') return basic;
-  const checks = activeChecks(db, hypothesisId).map(item => ({ event_id: item.id, agent_id: item.agent_id, repo_commit: item.repo_commit, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, code_refs: readFrontMatter(item.markdown).data.code_refs || [] }));
-  return { ...basic, status, markdown: row.markdown, checks, note: '폐기는 현재 커밋에서 서로 다른 두 에이전트가 다른 방법으로 독립 반박했고 지지가 없을 때의 자동 상태입니다. 새 증거가 있으면 검증 이벤트로 반박할 수 있습니다.' };
+  const details = checks.map(item => ({ event_id: item.id, agent_id: item.agent_id, repo_commit: item.repo_commit, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, code_refs: readFrontMatter(item.markdown).data.code_refs || [] }));
+  return { ...basic, status: state.status, markdown: row.markdown, checks: details, note: '현재 커밋에서 서로 다른 두 에이전트의 반박이 있으면 재시도 보류 상태가 됩니다. 새 근거는 기존 가설에 계속 기록할 수 있습니다.' };
 }
 
 function getEvent(db, agentId, args) {

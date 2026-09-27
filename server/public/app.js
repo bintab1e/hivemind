@@ -3,7 +3,7 @@ const date = value => value ? new Intl.DateTimeFormat('ko-KR', { dateStyle: 'sho
 const node = (tag, className, value) => { const element = document.createElement(tag); if (className) element.className = className; if (value !== undefined) element.textContent = value; return element; };
 const clear = element => element.replaceChildren();
 const empty = (element, message) => element.append(node('p', 'placeholder', message));
-const statuses = { unverified: '검증 대기', inconclusive: '미결', single_source: '단일 근거', refuted: '반박 기록', retired: '폐기 · 재시도 보류', independently_supported: '독립 시도에서 지지', contested: '의견 충돌', stale: '커밋 변경' };
+const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: 'PoC·KASAN 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '보고·반박 충돌', stale: '커밋 변경' };
 const verdicts = { supports: '지지', refutes: '반박', inconclusive: '미결' };
 const kinds = { hypothesis: '가설', analysis: '분석', verification: '검증', finding: '취약점 보고', correction: '정정' };
 let refreshSequence = 0;
@@ -69,7 +69,7 @@ function render(data) {
     metric('미열람 소스 줄', metrics.unread_lines.toLocaleString(), '추가 조사 후보'),
     metric('중복 열람 줄', metrics.overlap_lines.toLocaleString(), '2개 이상 에이전트가 관측'),
     metric('의견 충돌', metrics.contested_count.toLocaleString(), `전체 가설 ${metrics.hypothesis_count}개`, metrics.contested_count ? 'warn' : ''),
-    metric('폐기 상태', (metrics.retired_count || 0).toLocaleString(), '현재 커밋의 독립 반박 2건 이상'),
+    metric('폐기 상태', (metrics.retired_count || 0).toLocaleString(), '현재 커밋에서 서로 다른 에이전트 2명 반박'),
   );
 
   clear($('agents'));
@@ -137,7 +137,7 @@ function renderReviews(data) {
     choose.setAttribute('aria-pressed', String(hypothesis.id === selected?.id));
     choose.addEventListener('click', () => selectHypothesis(hypothesis.id));
     const left = node('span');
-    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `${hypothesis.id} · ${hypothesis.agent_id} · ${(hypothesis.code_refs || []).join(', ') || hypothesis.scope.join(', ')} · 검증 ${hypothesis.checks.length}건`));
+    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `${hypothesis.id} · ${hypothesis.agent_id} · ${(hypothesis.code_refs || []).join(', ') || hypothesis.scope.join(', ')} · 반박 ${hypothesis.refutation_count}/2명 · 검증 ${hypothesis.checks.length}건`));
     choose.append(left, node('span', `badge ${hypothesis.status}`, statuses[hypothesis.status] || hypothesis.status));
     const source = node('button', 'source-link', '가설 원문 보기');
     source.type = 'button';
@@ -184,7 +184,7 @@ function renderFindings(data) {
     refs.append(node('strong', '', '발견 파일'), node('code', '', finding.file_path), node('strong', '', '코드 위치'));
     for (const ref of finding.code_refs) refs.append(node('code', '', ref));
     const meta = node('p', 'finding-meta', `출발 가설 ${finding.hypothesis_id} · ${finding.hypothesis_title} (제안 LLM: ${finding.hypothesis_agent_id || '—'})`);
-    const evidence = node('p', 'finding-meta', `발견·보고 LLM: ${finding.agent_id} · 지지 검증 ${finding.evidence_event_ids.length}건 (${finding.evidence_agents.join(', ') || '유효한 근거 없음'})`);
+    const evidence = node('p', 'finding-meta', `발견·보고 LLM: ${finding.agent_id} · 연결 검증 ${finding.evidence_event_ids.length}건 (${finding.evidence_agents.join(', ') || '없음'})`);
     const kasan = node('p', 'finding-kasan', finding.kasan_summary);
     const actions = node('div', 'finding-actions');
     const poc = node('button', 'evidence-button', 'PoC 보기');
