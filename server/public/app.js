@@ -3,7 +3,7 @@ const date = value => value ? new Intl.DateTimeFormat('ko-KR', { dateStyle: 'sho
 const node = (tag, className, value) => { const element = document.createElement(tag); if (className) element.className = className; if (value !== undefined) element.textContent = value; return element; };
 const clear = element => element.replaceChildren();
 const empty = (element, message) => element.append(node('p', 'placeholder', message));
-const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: 'PoC·KASAN 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '보고·반박 충돌', stale: '커밋 변경' };
+const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: '취약점 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '취약점 보고·반박 충돌', stale: '커밋 변경' };
 const verdicts = { supports: '지지', refutes: '반박', inconclusive: '미결' };
 const kinds = { hypothesis: '가설', analysis: '분석', verification: '검증', finding: '취약점 보고', correction: '정정' };
 let refreshSequence = 0;
@@ -137,12 +137,24 @@ function renderReviews(data) {
     choose.setAttribute('aria-pressed', String(hypothesis.id === selected?.id));
     choose.addEventListener('click', () => selectHypothesis(hypothesis.id));
     const left = node('span');
-    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `${hypothesis.id} · ${hypothesis.agent_id} · ${(hypothesis.code_refs || []).join(', ') || hypothesis.scope.join(', ')} · 반박 ${hypothesis.refutation_count}/2명 · 검증 ${hypothesis.checks.length}건`));
+    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `${hypothesis.id} · ${hypothesis.agent_id} · ${(hypothesis.code_refs || []).join(', ') || hypothesis.scope.join(', ')} · 반박 ${hypothesis.refutation_count}/2명 · 검증 ${hypothesis.checks.length}건${hypothesis.finding_count ? ` · 취약점 보고 ${hypothesis.finding_count}건` : ''}`));
     choose.append(left, node('span', `badge ${hypothesis.status}`, statuses[hypothesis.status] || hypothesis.status));
     const source = node('button', 'source-link', '가설 원문 보기');
     source.type = 'button';
     source.addEventListener('click', () => detail(hypothesis.event_id).catch(showError));
     row.append(choose, source);
+    if (hypothesis.finding_count) {
+      const finding = node('button', 'source-link', '취약점 보고 보기');
+      finding.type = 'button';
+      finding.addEventListener('click', () => {
+        const query = new URLSearchParams(location.search);
+        query.set('view', 'findings');
+        query.set('hypothesis_id', hypothesis.id);
+        history.replaceState(null, '', `?${query}`);
+        refresh();
+      });
+      row.append(finding);
+    }
     $('hypotheses').append(row);
   }
   if (!hypotheses.length) empty($('hypotheses'), search ? '검색과 일치하는 가설이 없습니다.' : '등록된 가설이 없습니다.');
@@ -168,9 +180,21 @@ function renderReviews(data) {
 }
 
 function renderFindings(data) {
-  const findings = data.findings || [];
-  $('finding-count').textContent = `${findings.length}건`;
+  const selectedId = new URLSearchParams(location.search).get('hypothesis_id');
+  const findings = selectedId ? (data.findings || []).filter(item => item.hypothesis_id === selectedId) : data.findings || [];
+  $('finding-count').textContent = `${findings.length}건${selectedId ? ' · 선택한 가설' : ''}`;
   clear($('findings'));
+  if (selectedId) {
+    const all = node('button', 'source-link', '전체 취약점 보고 보기');
+    all.type = 'button';
+    all.addEventListener('click', () => {
+      const query = new URLSearchParams(location.search);
+      query.delete('hypothesis_id');
+      history.replaceState(null, '', `?${query}`);
+      renderFindings(data);
+    });
+    $('findings').append(all);
+  }
   for (const finding of findings) {
     const row = node('div', 'finding-row');
     const head = node('div', 'finding-head');
@@ -352,6 +376,7 @@ $('version').addEventListener('change', () => {
 for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => {
   const query = new URLSearchParams(location.search);
   query.set('view', button.dataset.view);
+  if (button.dataset.view === 'findings') query.delete('hypothesis_id');
   history.replaceState(null, '', `?${query}`);
   refresh();
 });
