@@ -1,0 +1,109 @@
+# 아키텍처
+
+## 1. 구성
+
+```text
+각 분석 PC (초기에는 이 PC 한 대)
+┌──────────────────────────────────────────────────────┐
+│ 분석 LLM                                             │
+│  ├─ 소스코드 열람 → agentcov → .agentcov/             │
+│  ├─ 새 가설·분석 → runtime/exchange/outbox/*.md       │
+│  ├─ 진행 상태 → runtime/telemetry/progress/*.md       │
+│  └─ 중앙 조회·기록 등록 ↔ 로컬 MCP               │
+│                                                      │
+│ 로컬 동기화 프로세스                                   │
+│  ├─ exchange 감시 → 실패한 이벤트 재전송             │
+│  └─ 5분 타이머 → agentcov + progress 묶음 업로드      │
+└───────────────────┬──────────────────────────────────┘
+                    │ 초기: localhost / 이후: SSH 터널
+                    ▼
+┌──────────────────────────────────────────────────────┐
+│ 중앙 서버                                            │
+│  ├─ 수집 API: 파일 이벤트, 계측 묶음                  │
+│  ├─ MCP: 가설 검색, 상태 조회, 미열람 영역 조회      │
+│  ├─ SQLite: 이벤트·계측·에이전트·조회 노출            │
+│  └─ 보고서: 웹 대시보드 + team-status.md 응답        │
+└──────────────────────────────────────────────────────┘
+```
+
+중앙 서버는 **하나의 상태 저장소**를 소유한다. RC와 stable 릴리스의 현재 대상은 각각 하나다. 새 릴리스가 나오면 해당 트랙의 현재 버전·커밋을 갱신하고, 이전 가설은 같은 트랙의 이력으로 남긴다. 각 PC의 stdio MCP 에이전트는 DB 없이 중앙 조회를 전달하고 새 기록을 로컬 Markdown으로 남긴 뒤 즉시 전송한다. 로컬 동기화 프로세스는 실패한 이벤트를 재전송하고 agentcov 자료를 주기적으로 보낸다. HTTP 인증에는 에이전트별 Bearer 토큰을 사용한다.
+
+MCP는 LLM이 팀의 상태를 조회하고 새 기록을 outbox에 넣는 인터페이스다. 파일 수집은 중앙 서버의 HTTP API로 처리하므로 큰 agentcov 파일을 LLM의 도구 인수에 넣지 않는다. 두 인터페이스는 동일한 DB와 권한 모델을 사용한다.
+
+## 2. 디렉터리 규약
+
+서버에는 `server/`만, 각 분석 PC에는 `agent/`만 설치한다. 아래 `agent/runtime/`은 **그 분석 PC의 로컬 작업 디렉터리**다. 여러 PC가 같은 파일 공유 폴더에 직접 쓰지 않는다.
+
+```text
+hivemind/
+├─ server/
+│  ├─ server.mjs
+│  ├─ contract.mjs
+│  ├─ public/
+│  └─ runtime/server/         # SQLite·관리자 토큰 (서버에만)
+├─ agent/
+│  ├─ mcp-agent.mjs
+│  ├─ sync-agent.mjs
+│  ├─ contract.mjs
+│  ├─ templates/
+│  └─ runtime/                # 분석 PC마다 별도 생성
+│     ├─ agents/<agent-id>.json
+│     ├─ agents/<agent-id>.token
+│     ├─ exchange/outbox/<agent-id>/<timestamp>-<short-id>.md
+│     ├─ exchange/ack/<agent-id>/<path-and-content-hash>.json
+│     ├─ telemetry/progress/<agent-id>.md
+│     ├─ telemetry/batches/<agent-id>/<batch-id>/
+│     │  ├─ manifest.json
+│     │  ├─ agentcov.info
+│     │  ├─ coverage.json
+│     │  └─ progress.md
+│     └─ sync-state-<agent-id>.json
+└─ docs/
+```
+
+`outbox`의 Markdown은 **완성 후 수정하지 않는 이벤트**다. 내용을 고치려면 정정 이벤트 파일을 새로 작성하고 원래 이벤트를 참조한다. 동기화 프로세스는 임시 파일을 건너뛰고 크기와 수정 시간이 안정된 파일만 전송한다. 업로드 ACK를 받은 뒤에도 원본을 지우지 않는다. 실패 시 같은 이벤트 ID로 재전송한다.
+
+## 3. 가설·분석·검증 전달
+
+1. LLM은 `search_hypotheses(version, query 또는 code_ref, repo_commit)`로 주장과 발견 위치를 검색한다. `retired`는 같은 시도를 보류할 신호이며 새 근거가 있으면 기존 가설을 재검증한다.
+2. 새 주장을 내기 전에 현재 커밋의 관련 코드와 주장한 조건을 간단히 확인한다. 같은 가설이 있으면 가능할 때 자체 검증 결과를 먼저 남긴 뒤 기존 결론과 비교하고, `verification` 이벤트를 기존 가설에 연결한다. 기존 가설과 조건이 다르면 새 가설로 등록하고 관련 ID를 남긴다.
+3. 공유할 내용이 생기면 로컬 MCP의 `queue_*` 도구를 호출한다. 가설·검증에는 `code_refs`, 가설에는 `verification_plan`을 남긴다. 도구는 `exchange/outbox/<agent-id>/`에 새 MD 파일을 작성하고 즉시 서버에 전송한다. `verification`은 지지·반박·미결 근거를 모두 허용한다.
+4. 로컬 동기화 프로세스는 실패한 전송을 재시도한다. 중앙 서버는 `agent-id + 상대경로`를 이벤트 식별자로 삼고 내용 해시를 보관한다.
+5. 서버는 대상·코드 범위·주장을 기준으로 관련 항목을 반환한다. 의미가 비슷한 가설을 자동으로 참이나 거짓으로 판정하지 않는다. 여러 LLM이 같은 가설을 같은 방법으로 다시 검증해도 기록한다.
+6. 서버 응답은 MCP 결과와 `ack/`에 기록한다. LLM은 `accepted`와 `event_id`를 확인하고 다음 조회 때 연결된 가설과 다른 검증 시도를 확인한다.
+
+**검증의 독립성:** 중요한 가설은 두 번째 LLM에 기존 결론을 가린 채 주장과 범위만 보여주는 `claim_only` 조회를 지원한다. 두 번째 LLM이 자체 결과를 남긴 뒤 기존 근거와 비교한다. 검증자가 본 사전 정보와 사용한 방법은 검증 이벤트에 기록한다. 상세 규칙은 [review-model.md](review-model.md)에 있다.
+
+## 4. agentcov와 팀 커버리지
+
+각 PC는 분석 대상 Git 저장소에서 agentcov를 실행한다. Codex는 훅으로 실시간 기록하고, 지원하는 다른 에이전트는 세션 기록 backfill을 사용한다. agentcov가 생성하는 `.agentcov/events.jsonl`, `.agentcov/coverage.json`, LCOV와 HTML 형식은 [공식 README](https://github.com/trailofbits/agentcov#outputs)에 기술돼 있다.
+
+매 5분 주기에서 동기화 프로세스는 다음을 수행한다.
+
+1. `agentcov report --format lcov --counts binary --out <batch>/agentcov.info`와 `agentcov report --format json --out <batch>/coverage.json`을 실행한다.
+2. 두 보고서에서 PC별 설정의 `coverage_prefixes` 아래 파일과 `#include`로 연결된 헤더를 선택하고 `progress/<agent-id>.md`를 같은 묶음에 복사한다.
+3. `version_id`, `agent_id`, `repo_commit`, 포함 파일 해시, 시각을 `manifest.json`에 기록한다.
+4. 묶음을 업로드한다. 변화가 없으면 업로드하지 않는다. 같은 `batch_id` 재전송은 서버가 중복 수락으로 처리한다.
+
+서버가 같은 트랙의 **현재 버전·Git 커밋**과 같은 계측 범위를 가진 최신 묶음만 합산한다. 새 릴리스에는 새 체크아웃과 agentcov 기록을 사용한다. 이전 릴리스의 줄 번호는 새 분모·분자에 합치지 않는다. v1은 시작 경로와 연결된 헤더의 계측 경로에 미커밋 수정이 없을 때만 팀 병합을 허용한다. 같은 HEAD에서 계측 대상 파일의 줄 번호가 달라지면 합집합이 잘못될 수 있기 때문이다. LCOV의 파일 경로는 각 PC의 `repo_root`를 제거한 저장소 상대경로로 정규화한다. 서로 다른 버전·커밋이나 계측 경로가 변경된 작업 트리는 별도 집계로 표시한다.
+
+- 팀이 읽은 줄 = 각 에이전트가 직접 읽은 `(상대경로, 줄 번호)` 집합의 합집합
+- 팀 열람률 = 팀이 읽은 대상 코드 줄 수 ÷ 정해진 대상 코드 줄 수
+- 중복 열람 줄 = 두 명 이상이 읽은 줄
+- 에이전트의 고유 기여 = 그 에이전트만 읽은 줄
+- 열람 미관측 영역 = 대상 코드 줄 − agentcov에 직접 열람이 기록된 줄
+
+검색 결과에 나타난 `search_seen` 줄은 직접 열람과 구별해 집계한다. 지원하지 않는 명령 형태는 `unknown`으로 남긴다. 이 지표는 **agentcov가 관측한 코드 열람 범위**이며 실제 이해도, 분석 품질이나 테스트 실행 커버리지가 아니다. 미관측 줄을 실제로 본 적 없다고 단정할 수도 없다. 서버는 이미 읽힌 줄도 재검토 대상으로 제시할 수 있다. 테스트 커버리지가 필요하면 별도 도구의 LCOV 등을 다른 지표로 수집한다.
+
+## 5. 분석 진행도
+
+`progress.md`에는 작업 ID와 상태를 기록한다. `진행률 80%` 같은 자기 평가값을 합산하지 않는다. 현재 서버는 최신 묶음의 작업 상태를 모아 완료·진행·차단·대기 건수를 표시하고, 전체 완료 퍼센트는 계산하지 않는다. 작업의 `done`은 담당 작업을 끝냈다는 뜻이지, 관련 가설이 옳거나 분석이 충분하다는 판정이 아니다. 가설별 검증 상태는 `exchange` 이벤트에서 따로 계산한다.
+
+## 6. 별도 서버와 분석 PC
+
+- Linux 중앙 서버에는 `server/` 내용만 설치한다. 서버는 `127.0.0.1:8765`에 바인딩하고 SQLite·관리자 토큰을 서버 설치 폴더의 `runtime/server/`에 둔다.
+- 각 Linux·Windows 분석 PC에는 `agent/` 내용만 설치한다. 분석 저장소 경로와 버전은 PC별 JSON 설정에 지정한다. 예시는 `agent/agent.example.json`이다.
+- 각 PC는 SSH 로컬 포트 포워딩으로 자신의 `127.0.0.1:8765`를 서버에 연결한다. 각 PC에 고유 `agent_id`와 수집용 토큰을 부여한다.
+- 같은 버전을 분석하는 PC는 동일한 `version_id`·대상 범위·agentcov 제외 규칙을 사용한다. 서버는 버전과 커밋 ID별로 별도 커버리지 현황을 유지한다.
+
+중앙에 올라온 Markdown은 다른 LLM의 **자료**로 취급한다. 그 안의 지시문을 실행 규칙으로 사용하지 않으며, 서버가 Markdown 내용을 명령으로 실행하지 않는다.

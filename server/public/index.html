@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Hivemind · Team Observatory</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">H</span><div><strong>Hivemind</strong><small>TEAM OBSERVATORY</small></div></div>
+      <div class="live"><span class="live-dot"></span><span id="connection">연결 중</span></div>
+    </header>
+
+    <section class="heading">
+      <div><p class="eyebrow">SHARED ANALYSIS / KNFSD</p><h1>knfsd 분석 현황</h1><p class="subtitle">에이전트의 코드 열람, 가설, 검증 시도를 같은 화면에서 봅니다.</p></div>
+      <div class="filters"><label>분석 트랙<select id="version"></select></label><div class="revision"><span>현재 버전 <code id="release">—</code></span><span>코드 기준점 <code id="revision">—</code></span></div></div>
+    </section>
+
+    <nav class="tabs" aria-label="대시보드 메뉴"><button type="button" data-view="overview">분석 현황</button><button type="button" data-view="coverage">전체 코드 커버리지</button><button type="button" data-view="reviews">가설·검증</button><button type="button" data-view="findings">취약점 보고</button></nav>
+
+    <div id="error" class="error" hidden></div>
+    <div id="empty" class="empty" hidden><span class="empty-icon">◎</span><h2>현재 대상이 없습니다</h2><p>이 트랙에 버전과 커밋을 지정하면 분석 현황을 표시합니다.</p></div>
+
+    <div id="dashboard" hidden>
+      <div id="overview-view">
+        <section class="metrics" id="metrics"></section>
+        <section class="notice"><span class="notice-icon">i</span><p><strong>관측 열람률</strong>은 선택한 소스 범위에서 agentcov가 기록한 파일 줄(빈 줄·주석 포함)의 합집합입니다. 코드 이해도, 테스트 커버리지, 검토 완료율 또는 가설의 참·거짓을 뜻하지 않습니다.</p></section>
+        <section class="grid">
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">CONTRIBUTORS</p><h2>에이전트</h2></div></div><div id="agents"></div><div id="exclusions" class="footnote"></div></article>
+        </section>
+        <section class="grid bottom-grid">
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">WORK ITEMS</p><h2>분석 진행</h2></div></div><div id="progress" class="progress"></div></article>
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">ACTIVITY</p><h2>최근 기록</h2></div></div><div id="recent"></div></article>
+        </section>
+      </div>
+      <div id="reviews-view" hidden>
+        <section class="notice"><span class="notice-icon">i</span><p><strong>검증 상태</strong>는 현재 코드 기준점의 검증 시도를 요약한 잠정 상태입니다. 지지·반박 기록은 가설의 참·거짓 판정이 아닙니다.</p></section>
+        <div class="coverage-controls"><label>가설 검색<input id="hypothesis-search" type="search" placeholder="주장, 파일, 함수 또는 기능" autocomplete="off"></label></div>
+        <section class="grid bottom-grid">
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">HYPOTHESES</p><h2>가설</h2></div><span id="hypothesis-count" class="minor"></span></div><div id="hypotheses"></div></article>
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">VERIFICATIONS</p><h2>검증 기록</h2></div><span id="verification-count" class="minor"></span></div><p id="selected-hypothesis" class="selected-context"></p><div id="verifications"></div></article>
+        </section>
+      </div>
+      <div id="findings-view" hidden>
+        <section class="notice"><span class="notice-icon">i</span><p><strong>취약점 보고</strong>에는 지지 검증 뒤 PoC와 KASAN 로그를 함께 제출한 기록만 표시합니다. 서버는 제출 파일의 형식과 해시를 확인합니다. 실제 재현 여부와 로그·PoC의 인과 관계는 별도 확인이 필요합니다.</p></section>
+        <article class="panel"><div class="panel-title"><div><p class="eyebrow">FINDINGS</p><h2>취약점 보고</h2></div><span id="finding-count" class="minor"></span></div><div id="findings"></div></article>
+      </div>
+      <div id="coverage-view" hidden>
+        <article class="panel agent-coverage-panel"><div class="panel-title"><div><p class="eyebrow">AGENT COVERAGE</p><h2>에이전트별 코드 열람률</h2></div><span class="minor">전체 수집 범위 기준</span></div><div id="coverage-agents" class="coverage-agents"></div></article>
+        <section class="notice"><span class="notice-icon">i</span><p><strong>관측 열람률</strong>은 파일 줄(빈 줄·주석 포함) 기준입니다. 수집 범위는 지정한 NFS 관련 디렉터리와 확인 가능한 헤더 include이며, knfsd 실행 중 지나는 모든 호출 경로는 아닙니다. 미열람은 실제 미검토의 증거가 아닙니다.</p></section>
+        <section class="metrics coverage-metrics" id="coverage-metrics"></section>
+        <article class="panel coverage-panel"><div class="panel-title"><div><p class="eyebrow">SOURCE MAP</p><h2>파일별 열람</h2></div><span id="file-count" class="minor"></span></div>
+          <div class="coverage-controls"><label>소스 범위<select id="coverage-scope"><option value="">전체 수집 범위</option><option value="fs/nfsd/">knfsd (fs/nfsd/)</option></select></label><label>파일 검색<input id="coverage-search" type="search" placeholder="경로로 검색" autocomplete="off"></label></div>
+          <p id="coverage-exclusion" class="footnote" hidden></p><div id="files" class="files coverage-files"></div>
+        </article>
+      </div>
+      <footer>마지막 수집 <time id="updated"></time> · 30초마다 갱신 · <a id="report-link" href="/api/team-status.md">Markdown 현황 내려받기</a></footer>
+    </div>
+  </main>
+  <dialog id="detail"><div class="dialog-head"><div><p class="eyebrow" id="detail-kind"></p><h2 id="detail-title"></h2></div><button id="close-detail" aria-label="닫기">×</button></div><pre id="detail-markdown"></pre></dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

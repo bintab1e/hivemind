@@ -1,0 +1,8 @@
+runtime/
+*.bak-*
+__pycache__/
+.venv/
+.agentcov/
+*.token
+api-token.txt
+*.sqlite3*

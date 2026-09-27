@@ -1,0 +1,254 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import test from 'node:test';
+import { startServer } from './server/server.mjs';
+import { assertFreshCheckout, makeBatch, selectCoverage } from './agent/sync-agent.mjs';
+import { buildCoverageScope } from './agent/coverage-scope.mjs';
+
+const sha = value => createHash('sha256').update(value).digest('hex');
+const commit = 'a'.repeat(40);
+const rcCommit = 'b'.repeat(40);
+const alternateCommit = 'c'.repeat(40);
+const stamp = '2026-09-23T01:00:00Z';
+
+test('coverage scope follows NFS source includes through shared headers', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'hivemind-scope-'));
+  try {
+    for (const directory of ['fs/nfsd', 'net/sunrpc', 'include/linux/sunrpc', 'include/linux']) mkdirSync(path.join(root, directory), { recursive: true });
+    writeFileSync(path.join(root, 'fs/nfsd/main.c'), '#include <linux/sunrpc/svc.h>\n');
+    writeFileSync(path.join(root, 'include/linux/sunrpc/svc.h'), '#include "../types.h"\n#include <net/missing.h>\n');
+    writeFileSync(path.join(root, 'include/linux/types.h'), '/* types */\n');
+    writeFileSync(path.join(root, 'include/linux/unrelated.h'), '/* unrelated */\n');
+    writeFileSync(path.join(root, 'net/sunrpc/svc.c'), '/* RPC source */\n');
+    const scope = await buildCoverageScope(root, ['fs/nfsd/', 'net/sunrpc/']);
+    assert.deepEqual([...scope.files].sort(), ['fs/nfsd/main.c', 'include/linux/sunrpc/svc.h', 'include/linux/types.h', 'net/sunrpc/svc.c']);
+    assert.deepEqual([...scope.missingIncludes], ['net/missing.h']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('new commit needs a fresh agentcov checkout', () => {
+  assert.doesNotThrow(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit', commit));
+  assert.doesNotThrow(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit-next', rcCommit));
+  assert.throws(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit', rcCommit), /fresh repo_root/);
+});
+
+test('events remain immutable; conflicting checks and overlapping coverage stay visible', async t => {
+  const filtered = selectCoverage('TN:\nSF:fs/nfsd/main.c\nDA:1,1\nDA:2,0\nLF:2\nLH:1\nend_of_record\nTN:\nSF:fs/other/main.c\nDA:1,1\nLF:1\nLH:1\nend_of_record\n', JSON.stringify({ files: { 'fs/nfsd/main.c': { line_count: 2, read_lines: 1 }, 'fs/other/main.c': { line_count: 1, read_lines: 1 } }, summary: {}, unknown_events: [] }), ['fs/nfsd/'], 'C:\\audit');
+  assert(!filtered.lcov.includes('fs/other/'));
+  assert.deepEqual(Object.keys(JSON.parse(filtered.coverageJson).files), ['fs/nfsd/main.c']);
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-test-'));
+  const oldDb = new DatabaseSync(path.join(dataDir, 'hivemind.sqlite3'));
+  oldDb.exec('CREATE TABLE batches (id TEXT PRIMARY KEY, agent_id TEXT, version_id TEXT, repo_commit TEXT, scope_hash TEXT, worktree_clean INTEGER, generated_at TEXT, received_at TEXT, files_json TEXT, coverage_json TEXT, progress_md TEXT)');
+  oldDb.close();
+  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const agentTokens = {};
+  for (const agent of ['pc1', 'pc2', 'pc3', 'pc4', 'pc5']) {
+    const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ agent_id: agent }) });
+    assert.equal(response.status, 201);
+    agentTokens[agent] = (await response.json()).token;
+  }
+  const post = async (endpoint, body, token = agentTokens[body.agent_id || body.manifest?.agent_id]) => {
+    const response = await fetch(`${url}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    return [response.status, await response.json()];
+  };
+  const mcp = async (agent, method, args = {}) => {
+    const response = await fetch(`${url}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25', Authorization: `Bearer ${agentTokens[agent]}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: method === 'tools/call' ? args : args }) });
+    assert.equal(response.status, 200);
+    return (await response.json()).result;
+  };
+  const tool = (agent, name, args) => mcp(agent, 'tools/call', { name, arguments: args }).then(result => result.structuredContent);
+  const event = (agent_id, source_path, fields, body = '## 근거\n코드 위치와 조건을 확인함.\n', version = '7.2.5', revision = commit) => {
+    const base = `schema_version: 1\nversion_id: ${version}\nrepo_commit: ${revision}\n`;
+    const markdown = `---\n${base}${fields}${fields.includes('kind: hypothesis') ? 'verification_plan: "반례 입력으로 분기 확인"\n' : ''}scope:\n  - "src/app.py"\ncode_refs:\n  - "src/app.py#parse_request"\nangle: static-trace\ncreated_at: "${stamp}"\n---\n\n${body}`;
+    return { agent_id, source_path, markdown, sha256: sha(markdown) };
+  };
+  const hypothesis = event('pc1', 'exchange/outbox/pc1/h1.md', 'kind: hypothesis\ntitle: "경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n');
+  assert.equal((await post('/v1/exchange/events', hypothesis, 'wrong'))[0], 401);
+  assert.equal((await post('/v1/exchange/events', hypothesis, agentTokens.pc2))[0], 403);
+  const [status, first] = await post('/v1/exchange/events', hypothesis);
+  assert.equal(status, 200);
+  assert.match(first.hypothesis_id, /^H-/);
+  assert.equal((await post('/v1/exchange/events', hypothesis))[1].replayed, true);
+  const edited = { ...hypothesis, markdown: `${hypothesis.markdown}\nchanged` };
+  edited.sha256 = sha(edited.markdown);
+  assert.equal((await post('/v1/exchange/events', edited))[0], 409);
+  const analysis = event('pc1', 'exchange/outbox/pc1/a1.md', `kind: analysis\ntitle: "조건 추적"\nhypothesis_id: "${first.hypothesis_id}"\n`);
+  const [analysisStatus, analysisResult] = await post('/v1/exchange/events', analysis);
+  assert.equal(analysisStatus, 200);
+  assert.equal(db.prepare('SELECT related_hypothesis_id FROM events WHERE id = ?').get(analysisResult.event_id).related_hypothesis_id, first.hypothesis_id);
+  const secondHypothesis = event('pc4', 'exchange/outbox/pc4/h1.md', 'kind: hypothesis\ntitle: "경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n');
+  const [secondStatus, second] = await post('/v1/exchange/events', secondHypothesis);
+  assert.equal(secondStatus, 200);
+  assert.notEqual(second.hypothesis_id, first.hypothesis_id);
+  assert.equal(second.possible_matches[0].hypothesis_id, first.hypothesis_id);
+
+  const verificationIds = {};
+  for (const [agent, verdict] of [['pc2', 'supports'], ['pc3', 'refutes']]) {
+    const fields = `kind: verification\ntitle: "독립 검증 ${agent}"\nverification_of: "${first.hypothesis_id}"\nmethod: "경계값 실행"\nverdict: ${verdict}\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+    const [code, result] = await post('/v1/exchange/events', event(agent, `exchange/outbox/${agent}/v.md`, fields));
+    assert.equal(code, 200);
+    verificationIds[verdict] = result.event_id;
+  }
+  assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${commit}`)).json()).findings.length, 0);
+  const poc = 'int main(void) { return trigger_boundary(); }\n';
+  const kasan = 'BUG: KASAN: slab-out-of-bounds in parse_request\nCall Trace:\n parse_request\n';
+  const findingFields = ids => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nimpact: "경계값 입력이 검사를 우회함"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\nevidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n`;
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-poc.md', findingFields([verificationIds.supports]).replace(/^poc_source:.*\n/m, ''))))[0], 400);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-kasan.md', findingFields([verificationIds.supports]).replace(/^kasan_log:.*\n/m, ''))))[0], 400);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-finding.md', findingFields([verificationIds.refutes]))))[0], 422);
+  const [findingStatus, finding] = await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/finding.md', findingFields([verificationIds.supports])));
+  assert.equal(findingStatus, 200);
+  assert.equal(finding.hypothesis_id, first.hypothesis_id);
+  assert.equal(await (await fetch(`${url}/api/events/${finding.event_id}/poc`)).text(), poc);
+  assert.equal(await (await fetch(`${url}/api/events/${finding.event_id}/kasan`)).text(), kasan);
+  assert(!(await (await fetch(`${url}/api/events/${finding.event_id}`)).json()).markdown.includes('poc_source'));
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/finding.md', findingFields([verificationIds.supports]))))[1].hypothesis_id, first.hypothesis_id);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/wrong-commit.md', findingFields([verificationIds.supports]), undefined, '7.2.5', alternateCommit)))[0], 422);
+  const listed = await tool('pc5', 'list_findings', { version_id: '7.2.5', repo_commit: commit });
+  assert.deepEqual(listed.findings.map(item => [item.event_id, item.hypothesis_id, item.file_path, item.agent_id, item.evidence_agents]), [[finding.event_id, first.hypothesis_id, 'src/app.py', 'pc4', ['pc2']]]);
+  assert.match(listed.findings[0].kasan_summary, /BUG: KASAN:/);
+  const byLocation = await tool('pc5', 'search_hypotheses', { version_id: '7.2.5', repo_commit: commit, code_ref: 'src/app.py#parse_request' });
+  assert(byLocation.matches.some(item => item.id === first.hypothesis_id && item.status === 'active' && item.verification_count === 2 && item.code_refs.includes('src/app.py#parse_request')));
+  assert(byLocation.matches.some(item => item.id === first.hypothesis_id && item.verification_plan.includes('반례 입력')));
+  const retiredHypothesis = event('pc1', 'exchange/outbox/pc1/retired.md', 'kind: hypothesis\ntitle: "잘못된 캐시 가설"\nclaim_key: "cache-failure"\npreflight: checked\n');
+  const [, retired] = await post('/v1/exchange/events', retiredHypothesis);
+  for (const agent of ['pc2', 'pc3']) {
+    const fields = `kind: verification\ntitle: "반례 ${agent}"\nverification_of: "${retired.hypothesis_id}"\nmethod: "${agent}의 독립 추적"\nverdict: refutes\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+    assert.equal((await post('/v1/exchange/events', event(agent, `exchange/outbox/${agent}/retired-v.md`, fields)))[0], 200);
+  }
+  assert.equal((await tool('pc5', 'search_hypotheses', { version_id: '7.2.5', repo_commit: commit, query: 'cache-failure' })).matches[0].status, 'retired');
+  assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: commit, mode: 'claim_only' })).status, 'retired');
+  assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: alternateCommit, mode: 'claim_only' })).status, 'stale');
+  assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${commit}`)).json()).metrics.retired_count, 1);
+  const newEvidence = `kind: verification\ntitle: "새 재현"\nverification_of: "${retired.hypothesis_id}"\nmethod: "새 입력 재현"\nverdict: supports\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/reopen.md', newEvidence)))[0], 200);
+  assert.equal((await tool('pc5', 'search_hypotheses', { version_id: '7.2.5', repo_commit: commit, query: 'cache-failure' })).matches[0].status, 'active');
+  assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: commit, mode: 'full' })).status, 'contested');
+
+  const batch = (agent_id, read, version = '7.2.5', revision = commit, generatedAt = stamp) => {
+    const source = agent_id === 'pc1' ? 'C:\\audit\\src\\app.py' : 'src/app.py';
+    const lcov = `TN:\nSF:${source}\nDA:10,${read.includes(10) ? 1 : 0}\nDA:20,${read.includes(20) ? 1 : 0}\nDA:30,${read.includes(30) ? 1 : 0}\nDA:40,${read.includes(40) ? 1 : 0}\nLF:4\nLH:${read.length}\nend_of_record\n`;
+    const coverage_json = '{}';
+    const progress_md = `---\nschema_version: 1\nversion_id: ${version}\nrepo_commit: ${revision}\nupdated_at: "${stamp}"\n---\n\n| task_id | status |\n| --- | --- |\n| T-001 | in_progress |\n`;
+    return makeBatch({ agentId: agent_id, versionId: version, repoRoot: 'C:\\audit', commit: revision, clean: true, generatedAt, lcov, coverageJson: coverage_json, progressMd: progress_md, agentcovConfig: '' });
+  };
+  const firstBatch = batch('pc1', [10, 20]);
+  assert.equal((await post('/v1/telemetry/batches', firstBatch))[0], 200);
+  assert.equal((await post('/v1/telemetry/batches', firstBatch))[1].replayed, true);
+  const rawBatch = await fetch(`${url}/v1/admin/batches/${firstBatch.manifest.batch_id}`, { headers: { Authorization: 'Bearer test-token' } });
+  assert.equal((await rawBatch.json()).lcov, firstBatch.lcov);
+  assert.equal((await post('/v1/telemetry/batches', batch('pc2', [20, 30])))[0], 200);
+  assert.equal((await post('/v1/telemetry/batches', batch('pc1', [40], '7.2.5', commit, new Date(Date.parse(stamp) - 1000).toISOString())))[0], 200);
+  const broken = batch('pc3', [40]); broken.manifest.hashes['agentcov.info'] = 'wrong';
+  assert.equal((await post('/v1/telemetry/batches', broken))[0], 400);
+  const mismatched = batch('pc3', [40]); mismatched.progress_md = mismatched.progress_md.replace('7.2.5', '7.2.5-rc1');
+  mismatched.manifest.hashes['progress.md'] = sha(mismatched.progress_md);
+  assert.equal((await post('/v1/telemetry/batches', mismatched))[0], 400);
+  const response = await fetch(`${url}/api/dashboard`);
+  assert.equal(response.status, 200);
+  const dashboard = await response.json();
+  assert.deepEqual([dashboard.metrics.read_lines, dashboard.metrics.total_lines, dashboard.metrics.overlap_lines], [3, 4, 1]);
+  assert.equal(dashboard.metrics.read_percent, 75);
+  assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.read_lines, agent.total_lines, agent.read_percent, agent.included_in_team]), [['pc1', 2, 4, 50, true], ['pc2', 2, 4, 50, true]]);
+  assert.equal(dashboard.hypotheses.find(item => item.id === first.hypothesis_id).status, 'contested');
+  assert.equal(dashboard.findings[0].hypothesis_status, 'contested');
+  assert.deepEqual(dashboard.verifications.filter(item => item.hypothesis_id === first.hypothesis_id).map(item => [item.agent_id, item.verdict, item.hypothesis_id]).sort(), [['pc2', 'supports', first.hypothesis_id], ['pc3', 'refutes', first.hypothesis_id]]);
+  assert.equal(dashboard.agents.find(agent => agent.agent_id === 'pc1').unique_lines, 1);
+  assert.equal(dashboard.progress.in_progress, 1);
+  const coverageUrl = `${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}`;
+  const teamCoverage = await (await fetch(coverageUrl)).json();
+  const pc1Coverage = await (await fetch(`${coverageUrl}&agent_id=pc1`)).json();
+  const pc2Coverage = await (await fetch(`${coverageUrl}&agent_id=pc2`)).json();
+  assert.deepEqual([teamCoverage.metrics.read_lines, pc1Coverage.metrics.read_lines, pc2Coverage.metrics.read_lines], [3, 2, 2]);
+  assert.deepEqual([teamCoverage.files[0].read, pc1Coverage.files[0].read, pc2Coverage.files[0].read], [3, 2, 2]);
+  assert.equal((await fetch(`${coverageUrl}&agent_id=pc5`)).status, 404);
+  assert.equal((await mcp('pc1', 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } })).protocolVersion, '2025-11-25');
+  assert((await mcp('pc1', 'tools/list')).tools.some(tool => tool.name === 'get_coverage_gaps'));
+  const gaps = await tool('pc1', 'get_coverage_gaps', { version_id: '7.2.5', repo_commit: commit });
+  assert.deepEqual(gaps.files[0].ranges, [{ start: 40, end: 40 }]);
+  const reviews = await tool('pc1', 'get_review_gaps', { version_id: '7.2.5', repo_commit: commit });
+  assert(reviews.hypotheses.some(item => item.id === first.hypothesis_id && item.status === 'contested'));
+  assert.equal((await tool('pc1', 'get_team_status', { version_id: '7.2.5', repo_commit: commit })).metrics.read_lines, 3);
+  assert((await tool('pc1', 'get_recent_analyses', { version_id: '7.2.5' })).events.length >= 2);
+  const claim = await tool('pc5', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'claim_only' });
+  assert(!Object.hasOwn(claim, 'checks'));
+  assert((await tool('pc2', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'full' })).checks.length >= 2);
+  const exposedFields = `kind: verification\ntitle: "노출 이후 재검증"\nverification_of: "${first.hypothesis_id}"\nmethod: "독립 추적 주장"\nverdict: supports\nprior_exposure: none\nbased_on_event_ids: []\n`;
+  const [, exposedResult] = await post('/v1/exchange/events', event('pc2', 'exchange/outbox/pc2/exposed.md', exposedFields));
+  assert.deepEqual(exposedResult.warnings, ['prior_exposure_differs_from_server_log']);
+  const [, summaryHypothesis] = await post('/v1/exchange/events', event('pc1', 'exchange/outbox/pc1/summary.md', 'kind: hypothesis\ntitle: "요약 노출 가설"\nclaim_key: "summary-exposure"\npreflight: checked\n'));
+  await tool('pc2', 'get_team_status', { version_id: '7.2.5', repo_commit: commit });
+  for (const [agent, method] of [['pc2', '정적 추적'], ['pc3', '실행 재현']]) {
+    const fields = `kind: verification\ntitle: "요약 노출 검증 ${agent}"\nverification_of: "${summaryHypothesis.hypothesis_id}"\nmethod: "${method}"\nverdict: refutes\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+    const [, outcome] = await post('/v1/exchange/events', event(agent, `exchange/outbox/${agent}/summary-v.md`, fields));
+    if (agent === 'pc2') assert.deepEqual(outcome.warnings, ['prior_exposure_differs_from_server_log']);
+  }
+  assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: summaryHypothesis.hypothesis_id, repo_commit: commit, mode: 'full' })).status, 'refuted');
+  assert((await (await fetch(`${url}/api/team-status.md?version_id=7.2.5&repo_commit=${commit}`)).text()).includes('버전: 7.2.5'));
+  const badOrigin = await fetch(`${url}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example', Authorization: `Bearer ${agentTokens.pc1}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
+  assert.equal(badOrigin.status, 403);
+  const rcHypothesis = event('pc1', 'exchange/outbox/pc1/h1.md', 'kind: hypothesis\ntitle: "RC 경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n', undefined, '7.2.5-rc1', rcCommit);
+  const [rcStatus, rcEvent] = await post('/v1/exchange/events', rcHypothesis);
+  assert.equal(rcStatus, 200);
+  assert.notEqual(rcEvent.hypothesis_id, first.hypothesis_id);
+  assert.deepEqual(rcEvent.possible_matches, []);
+  assert.equal((await post('/v1/telemetry/batches', batch('pc1', [40], '7.2.5-rc1', rcCommit)))[0], 200);
+  const rcDashboard = await (await fetch(`${url}/api/dashboard?version_id=7.2.5-rc1&repo_commit=${rcCommit}`)).json();
+  assert.deepEqual([rcDashboard.selected.version_id, rcDashboard.metrics.read_lines, rcDashboard.metrics.total_lines], ['7.2.5-rc1', 1, 4]);
+  assert.equal(rcDashboard.hypotheses.length, 1);
+  assert.equal(rcDashboard.verifications.length, 0);
+  assert.equal(rcDashboard.findings.length, 0);
+  assert.equal(rcDashboard.versions.length, 2);
+  assert.equal((await post('/v1/telemetry/batches', batch('pc5', [10], '7.2.5', alternateCommit)))[0], 200);
+  const alternate = await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${alternateCommit}`)).json();
+  assert.equal(alternate.metrics.read_lines, 1);
+  assert.equal(alternate.versions.length, 3);
+  const nextSupportFields = `kind: verification\ntitle: "새 커밋 재검증"\nverification_of: "${first.hypothesis_id}"\nmethod: "새 커밋 런타임 재현"\nverdict: supports\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+  const [nextSupportStatus, nextSupport] = await post('/v1/exchange/events', event('pc2', 'exchange/outbox/pc2/next-support.md', nextSupportFields, undefined, '7.2.5', alternateCommit));
+  assert.equal(nextSupportStatus, 200);
+  const [nextFindingStatus] = await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/next-finding.md', findingFields([nextSupport.event_id]), undefined, '7.2.5', alternateCommit));
+  assert.equal(nextFindingStatus, 200);
+  assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${alternateCommit}`)).json()).findings.length, 1);
+  const rotated = await fetch(`${url}/v1/admin/agents/pc5`, { method: 'PUT', headers: { Authorization: 'Bearer test-token' } });
+  assert.equal(rotated.status, 200);
+  assert.equal((await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${agentTokens.pc5}` } })).status, 401);
+  assert.equal((await fetch(`${url}/`)).status, 200);
+  assert.equal((await fetch(`${url}/app.js`)).status, 200);
+
+  const activate = (track, version_id, repo_commit) => fetch(`${url}/v1/admin/tracks/${track}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ version_id, repo_commit }) });
+  assert.equal((await activate('mainline', '7.2.5', commit)).status, 200);
+  assert.equal((await activate('rc', '7.2.5-rc1', rcCommit)).status, 200);
+  const nextRc = 'd'.repeat(40);
+  assert.equal((await activate('rc', '7.2.5-rc2', nextRc)).status, 200);
+  const moved = await (await fetch(`${url}/api/dashboard?track_id=rc`)).json();
+  assert.equal(moved.tracks.length, 2);
+  assert.deepEqual([moved.selected.track_id, moved.selected.version_id, moved.metrics.total_lines], ['rc', '7.2.5-rc2', 0]);
+  assert(moved.hypotheses.some(item => item.id === rcEvent.hypothesis_id && item.status === 'stale'));
+  assert(!moved.hypotheses.some(item => item.id === first.hypothesis_id));
+  assert.equal((await tool('pc1', 'get_team_status', { track_id: 'rc' })).selected.version_id, '7.2.5-rc2');
+  assert.deepEqual((await tool('pc1', 'get_coverage_gaps', { track_id: 'rc' })).files, []);
+  const staleEvent = event('pc1', 'exchange/outbox/pc1/stale-after-rollover.md', 'kind: hypothesis\ntitle: "이전 RC에서 늦게 도착한 가설"\nclaim_key: "late-rc"\npreflight: checked\n', undefined, '7.2.5-rc1', rcCommit);
+  const [staleStatus, staleResult] = await post('/v1/exchange/events', staleEvent);
+  assert.equal(staleStatus, 200);
+  assert.deepEqual(staleResult.warnings, ['inactive_track_target']);
+  assert.deepEqual((await post('/v1/exchange/events', staleEvent))[1].warnings, ['inactive_track_target']);
+  const [staleBatchStatus, staleBatchResult] = await post('/v1/telemetry/batches', batch('pc3', [10], '7.2.5-rc1', rcCommit));
+  assert.equal(staleBatchStatus, 200);
+  assert.deepEqual(staleBatchResult.warnings, ['inactive_track_target']);
+  const carried = await tool('pc1', 'search_hypotheses', { track_id: 'rc', repo_commit: nextRc, query: 'boundary-bypass' });
+  assert(carried.matches.some(item => item.id === rcEvent.hypothesis_id && item.status === 'stale'));
+  assert(!carried.matches.some(item => item.id === first.hypothesis_id));
+  const rcCheckFields = `kind: verification\ntitle: "다음 RC 재검증"\nverification_of: "${rcEvent.hypothesis_id}"\nmethod: "새 RC 실행 재현"\nverdict: supports\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
+  const [rcCheckStatus, rcCheck] = await post('/v1/exchange/events', event('pc2', 'exchange/outbox/pc2/rc2-check.md', rcCheckFields, undefined, '7.2.5-rc2', nextRc));
+  assert.equal(rcCheckStatus, 200);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/rc2-finding.md', findingFields([rcCheck.event_id]).replace(first.hypothesis_id, rcEvent.hypothesis_id), undefined, '7.2.5-rc2', nextRc)))[0], 200);
+  const currentRc = await (await fetch(`${url}/api/dashboard?track_id=rc`)).json();
+  assert.equal(currentRc.hypotheses.find(item => item.id === rcEvent.hypothesis_id).status, 'single_source');
+  assert.equal(currentRc.findings.length, 1);
+  assert.equal((await (await fetch(`${url}/api/dashboard?track_id=mainline`)).json()).selected.version_id, '7.2.5');
+});
