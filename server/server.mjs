@@ -429,7 +429,7 @@ function teamStatusMarkdown(report) {
     '', '## 에이전트', '', '| 에이전트 | 열람 줄 | 고유 기여 줄 |', '| --- | ---: | ---: |',
     ...agents.map(item => `| ${safe(item.agent_id)} | ${item.read_lines} | ${item.unique_lines} |`),
     '', '## 가설', '', '| ID | 주장 | 잠정 상태 | 반박 에이전트 |', '| --- | --- | --- | ---: |',
-    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(item.status)} | ${item.refutation_count} |`),
+    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(item.status === 'reported' ? '취약점 보고' : item.status)} | ${item.refutation_count} |`),
     '', '## 취약점 보고', '', '| 보고 | 연결 가설 | 보고 에이전트 | 코드 위치 |', '| --- | --- | --- | --- |',
     ...findings.map(item => `| ${safe(item.title)} | ${safe(item.hypothesis_id)} | ${safe(item.agent_id)} | ${safe(item.file_path)} |`),
     '', 'agentcov 열람률은 관측된 코드 노출 범위이며 코드 이해도·검토 완료율·가설의 참거짓이 아닙니다.', '',
