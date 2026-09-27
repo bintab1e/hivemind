@@ -124,7 +124,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const batch = (agent_id, read, version = '7.2.5', revision = commit, generatedAt = stamp) => {
     const source = agent_id === 'pc1' ? 'C:\\audit\\src\\app.py' : 'src/app.py';
     const lcov = `TN:\nSF:${source}\nDA:10,${read.includes(10) ? 1 : 0}\nDA:20,${read.includes(20) ? 1 : 0}\nDA:30,${read.includes(30) ? 1 : 0}\nDA:40,${read.includes(40) ? 1 : 0}\nLF:4\nLH:${read.length}\nend_of_record\n`;
-    const coverage_json = '{}';
+    const coverage_json = JSON.stringify({ hivemind_scope: { missing_includes: ['include/linux/example.h', 'include/net/example.h'] } });
     const progress_md = `---\nschema_version: 1\nversion_id: ${version}\nrepo_commit: ${revision}\nupdated_at: "${stamp}"\n---\n\n| task_id | status |\n| --- | --- |\n| T-001 | in_progress |\n`;
     const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
     const coverage_scope_hash = sha('test-scope');
@@ -148,6 +148,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const dashboard = await response.json();
   assert.deepEqual([dashboard.metrics.read_lines, dashboard.metrics.total_lines, dashboard.metrics.overlap_lines], [3, 4, 1]);
   assert.equal(dashboard.metrics.read_percent, 75);
+  assert.equal(dashboard.metrics.missing_includes, 2);
   assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.read_lines, agent.total_lines, agent.read_percent, agent.included_in_team]), [['pc1', 2, 4, 50, true], ['pc2', 2, 4, 50, true]]);
   assert.equal(dashboard.hypotheses.find(item => item.id === first.hypothesis_id).status, 'contested');
   assert.equal(dashboard.findings[0].hypothesis_status, 'contested');
@@ -159,6 +160,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const pc1Coverage = await (await fetch(`${coverageUrl}&agent_id=pc1`)).json();
   const pc2Coverage = await (await fetch(`${coverageUrl}&agent_id=pc2`)).json();
   assert.deepEqual([teamCoverage.metrics.read_lines, pc1Coverage.metrics.read_lines, pc2Coverage.metrics.read_lines], [3, 2, 2]);
+  assert.deepEqual([teamCoverage.metrics.missing_includes, pc1Coverage.metrics.missing_includes, pc2Coverage.metrics.missing_includes], [2, 2, 2]);
   assert.deepEqual([teamCoverage.files[0].read, pc1Coverage.files[0].read, pc2Coverage.files[0].read], [3, 2, 2]);
   assert.equal((await fetch(`${coverageUrl}&agent_id=pc5`)).status, 404);
   assert.equal((await mcp('pc1', 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } })).protocolVersion, '2025-11-25');

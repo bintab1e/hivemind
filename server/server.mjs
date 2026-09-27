@@ -38,7 +38,8 @@ function openDatabase(file) {
       worktree_clean INTEGER NOT NULL, generated_at TEXT NOT NULL,
       received_at TEXT NOT NULL, files_json TEXT NOT NULL,
       manifest_json TEXT NOT NULL, lcov TEXT NOT NULL,
-      coverage_json TEXT NOT NULL, progress_md TEXT NOT NULL
+      coverage_json TEXT NOT NULL, progress_md TEXT NOT NULL,
+      missing_includes INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS batches_version ON batches(version_id, repo_commit, generated_at);
     CREATE TABLE IF NOT EXISTS agents (
@@ -60,6 +61,7 @@ function openDatabase(file) {
   const batchColumns = new Set(db.prepare('PRAGMA table_info(batches)').all().map(column => column.name));
   if (!batchColumns.has('manifest_json')) db.exec('ALTER TABLE batches ADD COLUMN manifest_json TEXT');
   if (!batchColumns.has('lcov')) db.exec('ALTER TABLE batches ADD COLUMN lcov TEXT');
+  if (!batchColumns.has('missing_includes')) db.exec('ALTER TABLE batches ADD COLUMN missing_includes INTEGER');
   return db;
 }
 
@@ -167,7 +169,9 @@ function addBatch(db, input, agentId) {
   if (Buffer.byteLength(coverageJson) > telemetryLimits.coverage_json) invalid('coverage.json is too large', 413);
   if (typeof progressMd !== 'string' || Buffer.byteLength(progressMd) > 1_000_000) invalid('Invalid progress.md');
   const files = parseLcov(lcov, manifest.repo_root);
-  try { JSON.parse(coverageJson); } catch { invalid('Invalid coverage.json'); }
+  let coverage;
+  try { coverage = JSON.parse(coverageJson); } catch { invalid('Invalid coverage.json'); }
+  const missingIncludes = Array.isArray(coverage?.hivemind_scope?.missing_includes) ? coverage.hivemind_scope.missing_includes.length : 0;
   const progressMeta = readFrontMatter(progressMd).data;
   if (progressMeta.schema_version !== 1 || progressMeta.version_id !== manifest.version_id || progressMeta.repo_commit !== manifest.repo_commit) invalid('Progress file version or commit mismatch');
   const hashes = { 'agentcov.info': hash(lcov), 'coverage.json': hash(coverageJson), 'progress.md': hash(progressMd) };
@@ -177,10 +181,10 @@ function addBatch(db, input, agentId) {
   const warning = targetWarning(db, manifest.version_id, manifest.repo_commit);
   const warnings = warning ? [warning] : [];
   if (db.prepare('SELECT 1 FROM batches WHERE id = ?').get(id)) return { batch_id: id, accepted: true, replayed: true, warnings };
-  db.prepare('INSERT INTO batches (id, agent_id, version_id, repo_commit, scope_hash, worktree_clean, generated_at, received_at, files_json, manifest_json, lcov, coverage_json, progress_md) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+  db.prepare('INSERT INTO batches (id, agent_id, version_id, repo_commit, scope_hash, worktree_clean, generated_at, received_at, files_json, manifest_json, lcov, coverage_json, progress_md, missing_includes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
     id, manifest.agent_id, manifest.version_id, manifest.repo_commit,
     manifest.coverage_scope_hash, Number(manifest.worktree_clean), manifest.generated_at,
-    now(), JSON.stringify(files), JSON.stringify(manifest), lcov, coverageJson, progressMd,
+    now(), JSON.stringify(files), JSON.stringify(manifest), lcov, coverageJson, progressMd, missingIncludes,
   );
   return { batch_id: id, accepted: true, replayed: false, warnings };
 }
@@ -235,7 +239,10 @@ function setActiveTrack(db, trackId, input) {
 
 function coverageState(db, versionId, commit) {
   const latest = db.prepare(`
-    SELECT b.* FROM batches b JOIN (
+    SELECT b.id, b.agent_id, b.version_id, b.repo_commit, b.scope_hash,
+           b.worktree_clean, b.generated_at, b.received_at, b.files_json,
+           b.progress_md, b.missing_includes
+    FROM batches b JOIN (
       SELECT id FROM (
         SELECT id, ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC) AS rn
         FROM batches WHERE version_id = ? AND repo_commit = ?
@@ -290,8 +297,8 @@ function coverageState(db, versionId, commit) {
     for (const [name, file] of Object.entries(files)) for (const line of file.read) if (frequency.get(`${name}\0${line}`) === 1) agent.unique_lines++;
   }
   const files = [...combined.values()].map(file => ({ path: file.path, total: file.eligible.length, read: file.read.size, agents: file.agents, percent: file.eligible.length ? Math.round(file.read.size / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
-  const scope = JSON.parse(accepted[0]?.row.coverage_json || '{}').hivemind_scope;
-  return { latest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes: scope?.missing_includes?.length || 0 };
+  const missingIncludes = accepted[0]?.row.missing_includes ?? 0;
+  return { latest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes };
 }
 
 function hypothesisState(db, event, commit, checks) {
@@ -384,7 +391,7 @@ function coverageDetails(db, args) {
     const snapshot = state.latest.find(row => row.agent_id === agentId);
     if (!snapshot) invalid('Unknown agent for this version and commit', 404);
     files = Object.entries(JSON.parse(snapshot.files_json)).map(([name, file]) => ({ path: name, total: file.eligible.length, read: file.read.length, percent: file.eligible.length ? Math.round(file.read.length / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
-    missingIncludes = JSON.parse(snapshot.coverage_json).hivemind_scope?.missing_includes?.length || 0;
+    missingIncludes = snapshot.missing_includes ?? 0;
     includedInTeam = !state.excluded.includes(agentId);
     exclusionReason = state.coverageAgents.find(agent => agent.agent_id === agentId)?.exclusion_reason || null;
   }
