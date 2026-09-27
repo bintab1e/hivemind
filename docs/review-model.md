@@ -61,6 +61,6 @@
 1. 아무도 읽지 않은 코드 영역
 2. 기존 가설에 반박이 하나만 있거나 PoC/KASAN 보고와 반박이 충돌하는 영역
 
-열람 기록은 1번을 찾는 데 유용하지만 분석 완료 여부를 뜻하지 않는다. `get_coverage_gaps`와 `get_review_gaps`는 분리해 두며, 이미 읽은 영역도 다시 검토할 수 있다.
+열람 기록은 1번을 찾는 데 유용하지만 분석 완료 여부를 뜻하지 않는다. `get_coverage_gaps`와 `get_review_gaps`는 분리해 두며, 이전 커밋의 `stale` 가설은 자동 재검증 후보로 제시하지 않는다. 이미 읽은 영역도 다시 검토할 수 있다.
 
 참고: [agentcov는 코드 열람을 측정한다](https://github.com/trailofbits/agentcov#what-it-captures). [Trail of Bits는 취약점 탐색과 커버리지 달성을 하나의 목표로 섞었을 때 탐색이 치우쳤다고 설명한다](https://blog.trailofbits.com/2026/07/28/how-we-use-goal-to-find-bugs-in-patch-the-planet/).

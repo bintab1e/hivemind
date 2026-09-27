@@ -409,7 +409,7 @@ function reviewGaps(db, args) {
   const report = dashboard(db, { version_id: versionId, repo_commit: commit });
   return {
     version_id: versionId, repo_commit: commit,
-    hypotheses: report.hypotheses.filter(item => ['unverified', 'refuted', 'contested', 'stale', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs, refutation_count }) => ({ id, title, status, scope, code_refs, refutation_count })),
+    hypotheses: report.hypotheses.filter(item => ['unverified', 'refuted', 'contested', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs, refutation_count }) => ({ id, title, status, scope, code_refs, refutation_count })),
     note: '추가 검증 후보만 보여줍니다. 코드 열람 여부로 가설의 진실을 판단하지 않습니다.',
   };
 }

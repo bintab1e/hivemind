@@ -209,6 +209,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal(moved.tracks.length, 2);
   assert.deepEqual([moved.selected.track_id, moved.selected.version_id, moved.metrics.total_lines], ['rc', '7.2.5-rc2', 0]);
   assert(moved.hypotheses.some(item => item.id === rcEvent.hypothesis_id && item.status === 'stale'));
+  assert(!(await tool('pc1', 'get_review_gaps', { track_id: 'rc' })).hypotheses.some(item => item.id === rcEvent.hypothesis_id));
   assert(!moved.hypotheses.some(item => item.id === first.hypothesis_id));
   assert.equal((await tool('pc1', 'get_team_status', { track_id: 'rc' })).selected.version_id, '7.2.5-rc2');
   assert.deepEqual((await tool('pc1', 'get_coverage_gaps', { track_id: 'rc' })).files, []);
