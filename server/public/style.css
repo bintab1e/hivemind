@@ -93,6 +93,9 @@ h2{font-size:18px;letter-spacing:-.025em;margin-bottom:0}
 .hyp-title,.recent-title{color:#dce9ec;font-size:13px;font-weight:700;border:0;background:transparent;padding:0;text-align:left;line-height:1.45}
 .hyp-title:hover,.recent-title:hover{text-decoration:underline;color:#b7f263}
 .hyp-id{display:block;font-family:Consolas,monospace;color:#6e8790;font-size:10px;margin:6px 0 0;overflow-wrap:anywhere}
+.hyp-select .hyp-title{font-size:15px}
+.hyp-stats{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:11px;color:#9eb4bb;font-size:12px}
+.hyp-stat strong{color:#e5f1eb;font-size:16px;margin-left:4px}
 .source-link{border:0;background:transparent;color:#8ec8bd;font-size:11px;padding:0;margin-top:8px}
 .hyp-row>.source-link+.source-link{margin-left:16px}
 .source-link:hover{text-decoration:underline}

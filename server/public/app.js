@@ -137,7 +137,15 @@ function renderReviews(data) {
     choose.setAttribute('aria-pressed', String(hypothesis.id === selected?.id));
     choose.addEventListener('click', () => selectHypothesis(hypothesis.id));
     const left = node('span');
-    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `${hypothesis.id} · ${hypothesis.agent_id} · ${(hypothesis.code_refs || []).join(', ') || hypothesis.scope.join(', ')} · 반박 ${hypothesis.refutation_count}/2명 · 검증 ${hypothesis.checks.length}건${hypothesis.finding_count ? ` · 취약점 보고 ${hypothesis.finding_count}건` : ''}`));
+    const stats = node('span', 'hyp-stats');
+    const counts = [['반박', `${hypothesis.refutation_count}/2명`], ['검증', `${hypothesis.checks.length}건`]];
+    if (hypothesis.finding_count) counts.push(['취약점 보고', `${hypothesis.finding_count}건`]);
+    for (const [label, count] of counts) {
+      const stat = node('span', 'hyp-stat', `${label} `);
+      stat.append(node('strong', '', count));
+      stats.append(stat);
+    }
+    left.append(node('span', 'hyp-title', hypothesis.title), stats);
     choose.append(left, node('span', `badge ${hypothesis.status}`, statuses[hypothesis.status] || hypothesis.status));
     const source = node('button', 'source-link', '가설 원문 보기');
     source.type = 'button';
