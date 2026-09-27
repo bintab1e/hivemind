@@ -85,7 +85,8 @@ LAN_IP="${LAN_IP:-$(hostname -I 2>/dev/null | awk '{ print $1 }')}"
 echo "서버 설치 완료: $REPO"
 echo "대시보드: http://${LAN_IP:-SERVER_IP}:8765/ (계정 viewer)"
 echo "대시보드 비밀번호: $(sed -n 's/^HIVEMIND_DASHBOARD_PASSWORD=//p' "$CONFIG_DIR/server.env")"
-echo "대상 등록·첫 에이전트 토큰 발급: bash '$REPO/server/manage.sh' setup jinpyo"
+echo "최신 RC·stable 대상 등록: bash '$REPO/server/manage.sh' setup"
+echo "분석 PC를 연결할 때만 토큰 발급 (jinpyo를 이름으로 교체): bash '$REPO/server/manage.sh' agent add jinpyo rc"
 if ! loginctl show-user "$USER" -p Linger --value 2>/dev/null | grep -qx yes; then
   echo "로그아웃 후에도 유지하려면 한 번 실행: sudo loginctl enable-linger '$USER'"
 fi

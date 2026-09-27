@@ -10,13 +10,13 @@
 curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-server/main/server/install.sh | bash
 ```
 
-최신 RC와 stable의 공식 커널 Git 태그를 조회해 두 분석 대상을 등록하고 첫 에이전트 토큰을 발급합니다. `jinpyo`를 원하는 에이전트 ID로 바꾸세요.
+최신 RC와 stable의 공식 커널 Git 태그를 조회해 두 분석 대상을 등록합니다. 서버 설정에는 분석 PC 토큰이 필요하지 않습니다.
 
 ```bash
-bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" setup jinpyo
+bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" setup
 ```
 
-명령 출력에 **토큰**과 **분석 PC 설치 명령**이 나타납니다. 토큰은 분석 PC에만 전달하세요. `setup`은 RC와 stable을 각각 공식 Git 태그가 가리키는 커밋 SHA로 등록합니다. 다른 LLM을 추가할 때는 `bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent <새_ID> rc`를 실행합니다. 대상 갱신은 `.../manage.sh track rc` 또는 `.../manage.sh track mainline`입니다.
+분석 PC를 연결할 때만 `bash "$HOME/Desktop/workspace/hivemind-server/server/manage.sh" agent add jinpyo rc`를 실행하세요. `jinpyo`를 지정한 에이전트 이름으로 바꾸면 **해당 에이전트용 토큰**과 **분석 PC 설치 명령**이 출력됩니다. 토큰은 그 분석 PC에만 전달합니다. 대상 갱신은 `.../manage.sh track rc` 또는 `.../manage.sh track mainline`입니다.
 
 서버 설치기가 대시보드 주소와 `viewer` 비밀번호도 출력합니다. 상태 확인은 `curl -fsS http://127.0.0.1:8765/healthz`, 로그 확인은 `journalctl --user -u hivemind -f`입니다.
 

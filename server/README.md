@@ -6,21 +6,22 @@ Linux 서버에서 한 줄로 설치합니다. 기본 경로는 `~/Desktop/works
 curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-server/main/server/install.sh | bash
 ```
 
-설치 후 다음 명령으로 공식 커널 Git 태그의 최신 RC·stable을 등록하고 첫 분석 에이전트의 토큰을 만듭니다.
+설치 후 다음 명령으로 공식 커널 Git 태그의 최신 RC·stable을 등록합니다. 서버 설정에는 분석 PC 토큰이 필요하지 않습니다.
 
 ```bash
 CTL="$HOME/Desktop/workspace/hivemind-server/server/manage.sh"
-bash "$CTL" setup jinpyo          # 첫 에이전트 ID를 원하는 값으로 교체
+bash "$CTL" setup
 bash "$CTL" status                # 현재 트랙과 연결된 에이전트 확인
 ```
 
-`setup`이 출력한 토큰과 분석 PC 설치 명령을 해당 팀원에게 전달합니다. 분석 PC는 그 명령 한 줄과 토큰 입력으로 커널 소스·agentcov·MCP까지 설치합니다. [에이전트 안내](https://github.com/bintab1e/hivemind-agent#readme)를 참조하세요.
+분석 PC를 연결할 때만 아래 `agent` 명령을 실행하세요. 해당 분석 PC용 토큰과 설치 명령이 출력됩니다. 팀원에게 두 값을 전달하면 그 PC에서 커널 소스·agentcov·MCP를 설치할 수 있습니다. [에이전트 안내](https://github.com/bintab1e/hivemind-agent#readme)를 참조하세요.
 
 추가 에이전트와 릴리스 교체:
 
 ```bash
-bash "$CTL" agent pc02-codex rc       # 새 ID의 토큰과 설치 명령
-bash "$CTL" agent pc03-claude mainline
+bash "$CTL" agent add jinpyo rc           # jinpyo 토큰과 설치 명령
+bash "$CTL" agent add pc02-codex rc       # 다른 PC의 토큰과 설치 명령
+bash "$CTL" agent add pc03-claude mainline
 bash "$CTL" track rc                   # 최신 RC 태그·SHA로 갱신
 bash "$CTL" track mainline             # 최신 stable 태그·SHA로 갱신
 bash "$CTL" track rc 7.3-rc4           # 특정 버전 지정도 가능

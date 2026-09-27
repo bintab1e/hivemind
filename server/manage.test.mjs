@@ -34,7 +34,7 @@ test('management command issues a reusable token and an agent install command', 
   const active = await fetch(`${url}/v1/admin/tracks/rc`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version_id: '7.3-rc4', repo_commit: 'a'.repeat(40) }) });
   assert.equal(active.status, 200);
   const env = { ...process.env, HIVEMIND_DATA_DIR: dataDir, HIVEMIND_PORT: new URL(url).port, HIVEMIND_SERVER_URL: 'http://192.168.1.188:8765' };
-  const command = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'manage.mjs'), 'agent', 'jinpyo', 'rc'];
+  const command = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'manage.mjs'), 'agent', 'add', 'jinpyo', 'rc'];
   const first = await run(process.execPath, command, { env });
   const token = readFileSync(path.join(temp, 'agents', 'jinpyo.token'), 'utf8').trim();
   assert.match(token, /^[a-f0-9]{64}$/);

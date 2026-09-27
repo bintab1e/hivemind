@@ -75,23 +75,22 @@ async function issueAgent(token, id, track) {
 }
 
 async function main() {
-  const [command, first, second] = process.argv.slice(2);
+  const [command, first, second, third] = process.argv.slice(2);
   const tokenFile = path.join(dataDir, 'api-token.txt');
   if (!fs.existsSync(tokenFile)) throw new Error('서버를 먼저 설치·시작하세요. 관리자 토큰 파일이 없습니다.');
   const adminToken = fs.readFileSync(tokenFile, 'utf8').trim();
-  if (command === 'setup' && first) {
+  if (command === 'setup' && !first && !second) {
     await registerTrack(adminToken, 'rc');
     await registerTrack(adminToken, 'mainline');
-    await issueAgent(adminToken, first, second || 'rc');
   } else if (command === 'track' && sources[first]) {
     await registerTrack(adminToken, first, second);
-  } else if (command === 'agent' && first) {
-    await issueAgent(adminToken, first, second || 'rc');
+  } else if (command === 'agent' && first === 'add' && second) {
+    await issueAgent(adminToken, second, third || 'rc');
   } else if (command === 'status') {
     console.log(JSON.stringify(await request('/v1/admin/tracks', 'GET', null, adminToken), null, 2));
     console.log(JSON.stringify(await request('/v1/admin/agents', 'GET', null, adminToken), null, 2));
   } else {
-    console.log('사용법: node manage.mjs setup <agent_id> [rc|mainline]\n        node manage.mjs agent <agent_id> [rc|mainline]\n        node manage.mjs track <rc|mainline> [version]\n        node manage.mjs status');
+    console.log('사용법: node manage.mjs setup\n        node manage.mjs agent add <agent_id> [rc|mainline]\n        node manage.mjs track <rc|mainline> [version]\n        node manage.mjs status');
     process.exitCode = 1;
   }
 }
