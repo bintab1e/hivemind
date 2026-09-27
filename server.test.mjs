@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { gzipSync } from 'node:zlib';
 import test from 'node:test';
 import { startServer } from './server/server.mjs';
 
@@ -282,6 +283,39 @@ test('coverage exclusions report the exact failed merge condition', async t => {
   assert.deepEqual(dashboard.metrics.excluded_agents, ['pc2', 'pc3', 'pc4']);
   const detail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc2`)).json();
   assert.deepEqual([detail.included_in_team, detail.exclusion_reason], [false, 'worktree_dirty']);
+});
+
+test('gzip telemetry accepts detailed coverage above the legacy 10 MB limit', async t => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-gzip-'));
+  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const created = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: 'gzip-agent' }) });
+  const token = (await created.json()).token;
+  const health = await (await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${token}` } })).json();
+  assert(health.telemetry.content_encodings.includes('gzip'));
+
+  const lcov = 'TN:\nSF:src/app.py\nDA:1,1\nLF:1\nLH:1\nend_of_record\n';
+  const coverage_json = JSON.stringify({ files: {}, padding: 'x'.repeat(10_000_000) });
+  const progress_md = `---\nschema_version: 1\nversion_id: 7.2.5\nrepo_commit: ${commit}\nupdated_at: "${stamp}"\n---\n`;
+  const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
+  const coverage_scope_hash = sha('gzip-scope');
+  const batch_id = sha(['7.2.5', 'gzip-agent', commit, coverage_scope_hash, 'true', stamp, ...Object.values(hashes)].join('\0'));
+  const payload = { manifest: { schema_version: 1, batch_id, agent_id: 'gzip-agent', version_id: '7.2.5', repo_commit: commit, repo_root: '/repo', coverage_scope_hash, worktree_clean: true, generated_at: stamp, hashes }, lcov, coverage_json, progress_md };
+  const response = await fetch(`${url}/v1/telemetry/batches`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+    body: gzipSync(JSON.stringify(payload)),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).accepted, true);
+  assert.equal(db.prepare('SELECT length(coverage_json) AS length FROM batches WHERE id = ?').get(batch_id).length, coverage_json.length);
+
+  const malformed = await fetch(`${url}/v1/telemetry/batches`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+    body: Buffer.from('not gzip'),
+  });
+  assert.equal(malformed.status, 413);
 });
 
 test('PoC and KASAN can be reported directly from an unverified hypothesis', async t => {

@@ -65,7 +65,9 @@
 
 LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번호`다. `SF`가 절대경로라면 `repo_root` 아래 경로만 상대경로로 변환하고, 바깥 경로는 거절한다. Windows 경로 구분자와 저장소의 대소문자 정책을 정규화한다. 각 에이전트의 `DA` 값이 1인 줄을 집합으로 다룬다. 팀 열람률은 이 집합의 합집합을 동일 범위의 전체 대상 코드 줄 수로 나눈다. 분모에는 대상 파일의 미열람 줄도 포함한다. 다른 버전·커밋·`coverage_scope_hash`는 하나의 퍼센트로 섞지 않는다. v1은 `worktree_clean=true`인 묶음만 팀 수치에 병합하고, 다른 묶음은 개별 수치로만 보여준다.
 
-`coverage.json`의 상세 구조는 agentcov 버전에 종속될 수 있다. 로컬 에이전트는 전체 보고서에서 `coverage_prefixes` 아래 파일과 이 파일들이 `#include`하는 헤더를 LCOV와 JSON 양쪽에서 선택하고, 이 선택 결과의 원문을 서버에 보관한다. v1의 줄 합산은 LCOV에 의존한다. `search_seen`은 직접 열람률에 합치지 않는다. 서버는 각 에이전트의 최신 묶음을 사용한다. 계측 경로의 작업 트리가 변경됐거나 범위·파일 줄 목록이 다르면 병합에서 제외한다.
+`coverage.json`의 상세 구조는 agentcov 버전에 종속될 수 있다. 로컬 에이전트는 `coverage_prefixes` 아래 파일과 이 파일들이 `#include`하는 헤더만 대상으로 agentcov 보고서를 생성한다. agentcov의 줄별 `lines` 맵은 같은 attribution을 매 줄에 반복하므로 전송본에서 생략하고, 명령·세션·시간·검색 근거를 담은 `read_ranges`와 `search_seen_ranges`를 보존한다. `hivemind_compaction`은 생략된 필드와 재구성 근거를 명시한다. v1의 줄 합산은 LCOV에 의존한다. `search_seen`은 직접 열람률에 합치지 않는다. 서버는 각 에이전트의 최신 묶음을 사용한다. 계측 경로의 작업 트리가 변경됐거나 범위·파일 줄 목록이 다르면 병합에서 제외한다.
+
+`GET /v1/sync/health`의 `telemetry.content_encodings`에 `gzip`이 있으면 에이전트는 telemetry JSON 요청 전체를 gzip으로 압축하고 `Content-Encoding: gzip`으로 보낼 수 있다. manifest의 해시와 `batch_id`는 압축 전 네 파일 원문을 기준으로 계산하므로 동일 배치의 압축·비압축 재전송은 같은 ID를 유지한다. 에이전트는 서버가 이 capability를 공개하지 않으면 기존 비압축 요청을 사용한다. 서버는 압축 요청 8 MB, 해제된 요청 128 MB, `coverage.json` 64 MB를 각각 상한으로 검증한다.
 
 ## 5. 수집 API와 MCP 조회 도구
 
@@ -73,7 +75,7 @@ LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번�
 | --- | --- | --- |
 | `POST /v1/exchange/events` | MD 원문, 상대경로, SHA-256 | `event_id`, 연결된 가설, `possible_matches` |
 | `POST /v1/telemetry/batches` | 네 파일의 묶음 | `batch_id`, 반영 커밋·시각 |
-| `GET /v1/sync/health` | 인증된 호출 | 서버 상태와 시간 |
+| `GET /v1/sync/health` | 인증된 호출 | 서버 상태·시간과 telemetry 압축 capability·크기 제한 |
 | MCP `search_hypotheses` | 트랙 또는 버전, 선택적 커밋, 주장 질의 또는 `code_ref` | 같은 트랙의 과거 가설과 현재 커밋 검증 상태 |
 | MCP `get_hypothesis` | 가설 ID, 선택적 커밋, `claim_only` 또는 `full` 조회 모드 | `claim_only`는 주장·위치·계획·건수·폐기 여부, `full`은 검증 결과와 근거까지 |
 | MCP `get_team_status` | 버전, 커밋 | 팀 진행·계측 요약 |

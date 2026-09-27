@@ -2,6 +2,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { gunzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { hash, evidenceLimits, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools } from './contract.mjs';
 export { evidenceLimits, validateEvent, parseLcov, mcpTools } from './contract.mjs';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
 const now = () => new Date().toISOString();
+const gunzipAsync = promisify(gunzip);
+const telemetryLimits = Object.freeze({ compressed_request: 8_000_000, decompressed_request: 128_000_000, coverage_json: 64_000_000 });
 function openDatabase(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
@@ -159,7 +163,9 @@ function addBatch(db, input, agentId) {
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(manifest.agent_id) || !/^[a-f0-9]{40,64}$/i.test(manifest.repo_commit)) invalid('Invalid agent or commit');
   if (manifest.worktree_clean !== true && manifest.worktree_clean !== false) invalid('worktree_clean must be boolean');
   if (!Number.isFinite(Date.parse(manifest.generated_at))) invalid('Invalid generated_at');
-  if (typeof coverageJson !== 'string' || coverageJson.length > 10_000_000 || typeof progressMd !== 'string' || progressMd.length > 1_000_000) invalid('Invalid batch content');
+  if (typeof coverageJson !== 'string') invalid('Invalid coverage.json');
+  if (Buffer.byteLength(coverageJson) > telemetryLimits.coverage_json) invalid('coverage.json is too large', 413);
+  if (typeof progressMd !== 'string' || Buffer.byteLength(progressMd) > 1_000_000) invalid('Invalid progress.md');
   const files = parseLcov(lcov, manifest.repo_root);
   try { JSON.parse(coverageJson); } catch { invalid('Invalid coverage.json'); }
   const progressMeta = readFrontMatter(progressMd).data;
@@ -566,14 +572,23 @@ function send(res, status, value, contentType = 'application/json; charset=utf-8
 
 async function readJson(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) invalid('Content-Type must be application/json', 415);
+  const encoding = String(req.headers['content-encoding'] || 'identity').trim().toLowerCase();
+  if (!['identity', 'gzip'].includes(encoding)) invalid('Unsupported Content-Encoding', 415);
+  const wireLimit = encoding === 'gzip' ? telemetryLimits.compressed_request : 24_000_000;
   let length = 0;
   const chunks = [];
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > 24_000_000) invalid('Request too large', 413);
+    if (length > wireLimit) invalid('Request too large', 413);
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  let payload = Buffer.concat(chunks);
+  if (encoding === 'gzip') {
+    try { payload = await gunzipAsync(payload, { maxOutputLength: telemetryLimits.decompressed_request }); }
+    catch { invalid('Invalid or oversized gzip request', 413); }
+  }
+  if (payload.length > telemetryLimits.decompressed_request) invalid('Request too large after decompression', 413);
+  try { return JSON.parse(payload.toString('utf8')); }
   catch { invalid('Invalid JSON'); }
 }
 
@@ -640,7 +655,12 @@ export async function startServer(options = {}) {
       }
       if (req.method === 'POST' && url.pathname === '/v1/exchange/events') return send(res, 200, addEvent(db, await readJson(req), agentId));
       if (req.method === 'POST' && url.pathname === '/v1/telemetry/batches') return send(res, 200, addBatch(db, await readJson(req), agentId));
-      if (req.method === 'GET' && url.pathname === '/v1/sync/health') return send(res, 200, { ok: true, agent_id: agentId, server_time: now() });
+      if (req.method === 'GET' && url.pathname === '/v1/sync/health') return send(res, 200, {
+        ok: true,
+        agent_id: agentId,
+        server_time: now(),
+        telemetry: { content_encodings: ['identity', 'gzip'], limits: telemetryLimits },
+      });
       if (url.pathname === '/mcp' && req.method === 'GET') return send(res, 405, { error: 'SSE stream not supported' });
       if (url.pathname === '/mcp' && req.method === 'POST') {
         if (req.headers['mcp-protocol-version'] && !['2025-03-26', '2025-11-25'].includes(req.headers['mcp-protocol-version'])) invalid('Unsupported MCP protocol version');
