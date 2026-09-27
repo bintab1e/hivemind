@@ -5,7 +5,7 @@ const clear = element => element.replaceChildren();
 const empty = (element, message) => element.append(node('p', 'placeholder', message));
 const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: '취약점 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '취약점 보고·반박 충돌', stale: '커밋 변경' };
 const verdicts = { supports: '지지', refutes: '반박', inconclusive: '미결' };
-const kinds = { hypothesis: '가설', analysis: '분석', verification: '검증', finding: '취약점 보고', correction: '정정' };
+const kinds = { hypothesis: '가설', verification: '검증', finding: '취약점 보고', correction: '정정' };
 let refreshSequence = 0;
 let coverageFileCount = 0;
 let coverageAllFileCount = 0;

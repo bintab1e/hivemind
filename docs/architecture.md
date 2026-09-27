@@ -7,7 +7,7 @@
 ┌──────────────────────────────────────────────────────┐
 │ 분석 LLM                                             │
 │  ├─ 소스코드 열람 → agentcov → .agentcov/             │
-│  ├─ 새 가설·분석 → runtime/exchange/outbox/*.md       │
+│  ├─ 가설·검증·취약점 보고 → exchange/outbox/*.md      │
 │  ├─ 진행 상태 → runtime/telemetry/progress/*.md       │
 │  └─ 중앙 조회·기록 등록 ↔ 로컬 MCP               │
 │                                                      │
@@ -52,11 +52,11 @@ hivemind-agent/                # 별도 Git 저장소, 분석 PC에 설치
 
 `outbox`의 Markdown은 **완성 후 수정하지 않는 이벤트**다. 내용을 고치려면 정정 이벤트 파일을 새로 작성하고 원래 이벤트를 참조한다. 동기화 프로세스는 임시 파일을 건너뛰고 크기와 수정 시간이 안정된 파일만 전송한다. 업로드 ACK를 받은 뒤에도 원본을 지우지 않는다. 실패 시 같은 이벤트 ID로 재전송한다.
 
-## 3. 가설·분석·검증 전달
+## 3. 가설·검증 전달
 
-1. LLM은 `search_hypotheses(version, query 또는 code_ref, repo_commit)`로 주장과 발견 위치를 검색한다. `retired`는 같은 시도를 보류할 신호이며 새 근거가 있으면 기존 가설을 재검증한다.
+1. LLM은 구체적인 가설이 생겼을 때 `search_hypotheses(version, query 또는 code_ref, repo_commit)`로 주장과 발견 위치를 검색한다. 같은 커밋에서 `retired`면 그 가설의 재등록·재검증을 중단한다. 잘못된 반박 기록은 정정할 수 있다.
 2. 새 주장을 내기 전에 현재 커밋의 관련 코드와 주장한 조건을 간단히 확인한다. 같은 가설이 있으면 기존 ID에서 직접 테스트한다. 조건이 다르면 새 가설로 등록하고 관련 ID를 남긴다.
-3. 공유할 내용이 생기면 로컬 MCP의 `queue_*` 도구를 호출한다. 가설·검증에는 `code_refs`, 가설에는 `verification_plan`을 남긴다. 도구는 `exchange/outbox/<agent-id>/`에 새 MD 파일을 작성하고 즉시 서버에 전송한다. PoC와 KASAN 로그가 있으면 지지 검증 없이 `queue_finding`으로 보고하고, 반례는 `queue_verification`의 `refutes`로 기록한다.
+3. 중간 분석 메모는 MCP로 보내지 않는다. 새 가설·검증 결과·PoC/KASAN 보고·정정이 있을 때만 해당 `queue_*` 도구를 호출한다. 가설·검증에는 `code_refs`, 가설에는 `verification_plan`을 남긴다. 도구는 `exchange/outbox/<agent-id>/`에 새 MD 파일을 작성하고 즉시 서버에 전송한다. PoC와 KASAN 로그가 있으면 지지 검증 없이 `queue_finding`으로 보고하고, 반례는 `queue_verification`의 `refutes`로 기록한다.
 4. 로컬 동기화 프로세스는 실패한 전송을 재시도한다. 중앙 서버는 `agent-id + 상대경로`를 이벤트 식별자로 삼고 내용 해시를 보관한다.
 5. 서버는 대상·코드 범위·주장을 기준으로 관련 항목을 반환한다. 의미가 비슷한 가설을 자동으로 참이나 거짓으로 판정하지 않는다. 여러 LLM이 같은 가설을 같은 방법으로 다시 검증해도 기록한다.
 6. 서버 응답은 MCP 결과와 `ack/`에 기록한다. LLM은 `accepted`와 `event_id`를 확인하고 다음 조회 때 연결된 가설과 다른 검증 시도를 확인한다.

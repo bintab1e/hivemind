@@ -58,7 +58,7 @@ export function validateEvent(input) {
   const digest = hash(markdown);
   if (required(input.sha256, 'sha256', 64).toLowerCase() !== digest) invalid('Markdown hash mismatch');
   const { data, body } = readFrontMatter(markdown);
-  if (data.schema_version !== 1 || !['hypothesis', 'analysis', 'verification', 'finding', 'correction'].includes(data.kind)) invalid('Unsupported event schema or kind');
+  if (data.schema_version !== 1 || !['hypothesis', 'verification', 'finding', 'correction'].includes(data.kind)) invalid('Unsupported event schema or kind');
   for (const key of ['version_id', 'repo_commit', 'title', 'angle', 'created_at']) required(data[key], key, key === 'title' ? 300 : 200);
   if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(data.version_id)) invalid('Invalid version_id');
   if (!/^[a-f0-9]{40,64}$/i.test(data.repo_commit)) invalid('Invalid repo_commit');
@@ -72,7 +72,6 @@ export function validateEvent(input) {
     required(data.verification_plan, 'verification_plan', 1000);
     if (!['checked', 'unavailable'].includes(data.preflight)) invalid('Invalid preflight');
   }
-  if (data.kind === 'analysis' && data.hypothesis_id != null) required(data.hypothesis_id, 'hypothesis_id', 32);
   if (data.kind === 'verification') {
     required(data.verification_of, 'verification_of', 32);
     required(data.method, 'method', 300);
@@ -144,7 +143,6 @@ export const mcpTools = [
   { name: 'get_event', description: '이벤트 ID의 원본 Markdown을 조회합니다.', inputSchema: { type: 'object', properties: { event_id: { type: 'string' } }, required: ['event_id'] } },
   { name: 'get_team_status', description: '현재 트랙 또는 지정한 버전·커밋의 팀 열람·작업·가설 현황을 조회합니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, repo_commit: { type: 'string' } } } },
   { name: 'get_coverage_gaps', description: 'agentcov에서 열람이 관측되지 않은 파일과 줄 범위를 조회합니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, repo_commit: { type: 'string' }, path_prefix: { type: 'string' }, limit: { type: 'integer' } } } },
-  { name: 'get_review_gaps', description: '검증이 부족하거나 충돌하는 가설, 열람 기록은 있으나 연결된 교환 기록이 없는 파일을 조회합니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, repo_commit: { type: 'string' } } } },
-  { name: 'get_recent_analyses', description: '트랙이나 버전의 최근 분석·검증 이벤트를 조회합니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, since: { type: 'string' }, limit: { type: 'integer' } } } },
+  { name: 'get_review_gaps', description: '검증이 부족하거나 충돌하는 가설을 조회합니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, repo_commit: { type: 'string' } } } },
   { name: 'list_findings', description: '현재 트랙 또는 지정한 버전·커밋의 취약점 보고를 조회합니다. 자동 확정 판정이 아닙니다.', inputSchema: { type: 'object', properties: { track_id: { type: 'string', enum: ['rc', 'mainline'] }, version_id: { type: 'string' }, repo_commit: { type: 'string' } } } },
 ].map(tool => ({ ...tool, annotations: { readOnlyHint: true } }));

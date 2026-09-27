@@ -101,7 +101,7 @@ function addEvent(db, input, agentId) {
       const warning = targetWarning(db, data.version_id, data.repo_commit);
       return { event_id: existing.id, hypothesis_id: existing.hypothesis_id || existing.verification_of || existing.related_hypothesis_id, replayed: true, possible_matches: [], warnings: warning ? [warning] : [] };
     }
-    if (data.kind === 'verification' || data.kind === 'finding' || (data.kind === 'analysis' && data.hypothesis_id)) {
+    if (data.kind === 'verification' || data.kind === 'finding') {
       const target = db.prepare("SELECT version_id, repo_commit FROM events h WHERE hypothesis_id = ? AND kind = 'hypothesis' AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id)").get(data.verification_of || data.finding_of || data.hypothesis_id);
       if (!target || (target.version_id !== data.version_id && (!trackFor(db, data.version_id, data.repo_commit) || trackFor(db, data.version_id, data.repo_commit) !== trackFor(db, target.version_id, target.repo_commit)))) invalid('Unknown hypothesis', 422);
     }
@@ -338,7 +338,7 @@ function dashboard(db, requested = {}) {
   const taskMap = new Map();
   for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
   const progress = Object.fromEntries(['todo', 'in_progress', 'blocked', 'done'].map(status => [status, [...taskMap.values()].filter(value => value === status).length]));
-  const recent = allEvents.filter(event => event.repo_commit === commit).slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
+  const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis').slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
   return {
     tracks, versions, selected: { track_id: trackId, version_id: versionId, repo_commit: commit },
     metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: latest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
@@ -407,13 +407,10 @@ function coverageGaps(db, args) {
 function reviewGaps(db, args) {
   const { versionId, commit } = selectedVersion(db, args);
   const report = dashboard(db, { version_id: versionId, repo_commit: commit });
-  const eventScopes = db.prepare("SELECT scope_json FROM events WHERE version_id = ? AND repo_commit = ? AND kind IN ('hypothesis','analysis','verification')").all(versionId, commit).flatMap(row => JSON.parse(row.scope_json));
-  const withoutRecord = report.files.filter(file => file.read && !eventScopes.some(scope => file.path === scope || file.path.startsWith(scope.endsWith('/') ? scope : `${scope}/`))).slice(0, 20).map(file => ({ path: file.path, read_lines: file.read }));
   return {
     version_id: versionId, repo_commit: commit,
     hypotheses: report.hypotheses.filter(item => ['unverified', 'refuted', 'contested', 'stale', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs, refutation_count }) => ({ id, title, status, scope, code_refs, refutation_count })),
-    observed_files_without_exchange_record: withoutRecord,
-    note: '기록의 공백만 보여줍니다. 열람 여부로 검토 완료나 가설의 진실을 판단하지 않습니다.',
+    note: '추가 검증 후보만 보여줍니다. 코드 열람 여부로 가설의 진실을 판단하지 않습니다.',
   };
 }
 
@@ -494,7 +491,7 @@ function getHypothesis(db, agentId, args) {
   const basic = { id: row.hypothesis_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, claim: claimSection(row.markdown) || row.title, scope: JSON.parse(row.scope_json), code_refs: readFrontMatter(row.markdown).data.code_refs || [], verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', status: claimStatus(state.status), verification_count: state.current.length, refutation_count: state.refutation_count, finding_count: state.finding_count };
   if (mode === 'claim_only') return basic;
   const details = checks.map(item => ({ event_id: item.id, agent_id: item.agent_id, repo_commit: item.repo_commit, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, code_refs: readFrontMatter(item.markdown).data.code_refs || [] }));
-  return { ...basic, status: state.status, markdown: row.markdown, checks: details, note: '현재 커밋에서 서로 다른 두 에이전트의 반박이 있으면 재시도 보류 상태가 됩니다. 새 근거는 기존 가설에 계속 기록할 수 있습니다.' };
+  return { ...basic, status: state.status, markdown: row.markdown, checks: details, note: '현재 커밋에서 서로 다른 두 에이전트의 반박이 있으면 재시도 보류 상태가 됩니다. 해당 가설의 재검증은 중단하고, 반박 기록이 잘못됐다면 정정하세요.' };
 }
 
 function getEvent(db, agentId, args) {
@@ -503,19 +500,6 @@ function getEvent(db, agentId, args) {
   if (!row) invalid('Unknown event', 404);
   logExposure(db, agentId, row.hypothesis_id || row.verification_of || row.related_hypothesis_id, 'full');
   return { id: row.id, kind: row.kind, agent_id: row.agent_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, markdown: row.markdown };
-}
-
-function recentAnalyses(db, args) {
-  const versionId = args.version_id == null ? null : required(args.version_id, 'version_id', 64);
-  const trackId = args.track_id || null;
-  if (trackId && !['rc', 'mainline'].includes(trackId) || !trackId && !versionId) invalid('track_id or version_id required');
-  const since = args.since ?? '';
-  if (typeof since !== 'string' || since.length > 40) invalid('Invalid since');
-  const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 20);
-  const rows = trackId
-    ? db.prepare("SELECT e.id, e.kind, e.agent_id, e.version_id, e.repo_commit, e.title, e.related_hypothesis_id, e.verification_of, e.received_at FROM events e JOIN track_targets t ON t.version_id = e.version_id AND t.repo_commit = e.repo_commit WHERE t.track_id = ? AND e.kind IN ('analysis','verification','finding') AND e.received_at > ? ORDER BY e.received_at DESC LIMIT ?").all(trackId, since, limit)
-    : db.prepare("SELECT id, kind, agent_id, version_id, repo_commit, title, related_hypothesis_id, verification_of, received_at FROM events WHERE version_id = ? AND kind IN ('analysis','verification','finding') AND received_at > ? ORDER BY received_at DESC LIMIT ?").all(versionId, since, limit);
-  return { events: rows };
 }
 
 function callTool(db, agentId, name, args) {
@@ -535,11 +519,6 @@ function callTool(db, agentId, name, args) {
     case 'get_review_gaps': {
       const result = reviewGaps(db, args);
       for (const item of result.hypotheses) logExposure(db, agentId, item.id, 'summary');
-      return result;
-    }
-    case 'get_recent_analyses': {
-      const result = recentAnalyses(db, args);
-      for (const item of result.events) logExposure(db, agentId, item.verification_of || item.related_hypothesis_id, 'summary');
       return result;
     }
     case 'list_findings': {

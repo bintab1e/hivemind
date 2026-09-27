@@ -52,9 +52,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   edited.sha256 = sha(edited.markdown);
   assert.equal((await post('/v1/exchange/events', edited))[0], 409);
   const analysis = event('pc1', 'exchange/outbox/pc1/a1.md', `kind: analysis\ntitle: "조건 추적"\nhypothesis_id: "${first.hypothesis_id}"\n`);
-  const [analysisStatus, analysisResult] = await post('/v1/exchange/events', analysis);
-  assert.equal(analysisStatus, 200);
-  assert.equal(db.prepare('SELECT related_hypothesis_id FROM events WHERE id = ?').get(analysisResult.event_id).related_hypothesis_id, first.hypothesis_id);
+  assert.equal((await post('/v1/exchange/events', analysis))[0], 400);
   const secondHypothesis = event('pc4', 'exchange/outbox/pc4/h1.md', 'kind: hypothesis\ntitle: "경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n');
   const [secondStatus, second] = await post('/v1/exchange/events', secondHypothesis);
   assert.equal(secondStatus, 200);
@@ -108,10 +106,6 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: commit, mode: 'claim_only' })).status, 'retired');
   assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: alternateCommit, mode: 'claim_only' })).status, 'stale');
   assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${commit}`)).json()).metrics.retired_count, 1);
-  const newEvidence = `kind: verification\ntitle: "새 재현"\nverification_of: "${retired.hypothesis_id}"\nmethod: "새 입력 재현"\nverdict: supports\nprior_exposure: claim_only\nbased_on_event_ids: []\n`;
-  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/reopen.md', newEvidence)))[0], 200);
-  assert.equal((await tool('pc5', 'search_hypotheses', { version_id: '7.2.5', repo_commit: commit, query: 'cache-failure' })).matches[0].status, 'retired');
-  assert.equal((await tool('pc5', 'get_hypothesis', { hypothesis_id: retired.hypothesis_id, repo_commit: commit, mode: 'full' })).status, 'retired');
 
   const batch = (agent_id, read, version = '7.2.5', revision = commit, generatedAt = stamp) => {
     const source = agent_id === 'pc1' ? 'C:\\audit\\src\\app.py' : 'src/app.py';
@@ -160,7 +154,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const reviews = await tool('pc1', 'get_review_gaps', { version_id: '7.2.5', repo_commit: commit });
   assert(reviews.hypotheses.some(item => item.id === first.hypothesis_id && item.status === 'contested'));
   assert.equal((await tool('pc1', 'get_team_status', { version_id: '7.2.5', repo_commit: commit })).metrics.read_lines, 3);
-  assert((await tool('pc1', 'get_recent_analyses', { version_id: '7.2.5' })).events.length >= 2);
+  assert(!(await mcp('pc1', 'tools/list')).tools.some(item => item.name === 'get_recent_analyses'));
   const claim = await tool('pc5', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'claim_only' });
   assert(!Object.hasOwn(claim, 'checks'));
   assert((await tool('pc2', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'full' })).checks.length >= 2);
