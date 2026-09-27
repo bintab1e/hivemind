@@ -47,7 +47,7 @@ mkdir -p "$CONFIG_DIR" "$HOME/.config/systemd/user"
 chmod 700 "$CONFIG_DIR"
 if [ ! -s "$CONFIG_DIR/server.env" ]; then
   umask 077
-  printf 'HIVEMIND_DASHBOARD_PASSWORD=%s\n' "$("$NODE" -e "process.stdout.write(require('node:crypto').randomBytes(24).toString('hex'))")" > "$CONFIG_DIR/server.env"
+  printf 'HIVEMIND_DASHBOARD_USER=guest\nHIVEMIND_DASHBOARD_PASSWORD=%s\n' "$("$NODE" -e "process.stdout.write(require('node:crypto').randomBytes(24).toString('hex'))")" > "$CONFIG_DIR/server.env"
 fi
 chmod 600 "$CONFIG_DIR/server.env"
 cat > "$HOME/.config/systemd/user/hivemind.service" <<EOF
@@ -82,8 +82,9 @@ fi
 
 LAN_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^192[.]168[.]/ { print; exit }')"
 LAN_IP="${LAN_IP:-$(hostname -I 2>/dev/null | awk '{ print $1 }')}"
+DASHBOARD_USER="$(sed -n 's/^HIVEMIND_DASHBOARD_USER=//p' "$CONFIG_DIR/server.env" | head -n 1)"
 echo "서버 설치 완료: $REPO"
-echo "대시보드: http://${LAN_IP:-SERVER_IP}:8765/ (계정 viewer)"
+echo "대시보드: http://${LAN_IP:-SERVER_IP}:8765/ (계정 ${DASHBOARD_USER:-viewer})"
 echo "대시보드 비밀번호: $(sed -n 's/^HIVEMIND_DASHBOARD_PASSWORD=//p' "$CONFIG_DIR/server.env")"
 echo "최신 RC·stable 대상 등록: bash '$REPO/server/manage.sh' setup"
 echo "분석 PC를 연결할 때만 토큰 발급 (jinpyo를 이름으로 교체): bash '$REPO/server/manage.sh' agent add jinpyo rc"

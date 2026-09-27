@@ -34,6 +34,6 @@ systemctl --user status hivemind
 journalctl --user -u hivemind -n 50 --no-pager
 ```
 
-대시보드 계정은 `viewer`, 비밀번호 파일은 `~/.config/hivemind/server.env`입니다. 관리자 토큰과 SQLite DB는 `server/runtime/server/`에 있습니다. 설치기는 같은 네트워크의 PC가 연결할 수 있도록 8765 포트에 바인딩합니다. 방화벽에서는 팀 내부망만 허용하고 인터넷 포트 포워딩은 하지 마세요. LAN HTTP에서는 토큰과 분석 기록이 암호화되지 않습니다. 외부망 사용 시 HTTPS나 SSH 터널을 구성하세요.
+새 설치의 대시보드 계정은 `guest`, 비밀번호 파일은 `~/.config/hivemind/server.env`입니다. 관리자 토큰과 SQLite DB는 `server/runtime/server/`에 있습니다. 설치기는 같은 네트워크의 PC가 연결할 수 있도록 8765 포트에 바인딩합니다. 방화벽에서는 팀 내부망만 허용하고 인터넷 포트 포워딩은 하지 마세요. LAN HTTP에서는 토큰과 분석 기록이 암호화되지 않습니다. 외부망 사용 시 HTTPS나 SSH 터널을 구성하세요.
 
 SSH 로그아웃 뒤 서비스가 종료된다면 서버에서 `sudo loginctl enable-linger "$USER"`를 한 번 실행하세요. 백업은 `systemctl --user stop hivemind` 후 `server/runtime/server/` 전체를 복사하고 다시 `systemctl --user start hivemind`를 실행하면 됩니다.
