@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export const evidenceLimits = { poc: 250_000, kasan: 600_000 };
+const hasKorean = value => typeof value === 'string' && /[가-힣]/u.test(value);
 
 export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -58,7 +59,7 @@ export function validateEvent(input) {
   const digest = hash(markdown);
   if (required(input.sha256, 'sha256', 64).toLowerCase() !== digest) invalid('Markdown hash mismatch');
   const { data, body } = readFrontMatter(markdown);
-  if (data.schema_version !== 1 || !['hypothesis', 'verification', 'finding', 'correction'].includes(data.kind)) invalid('Unsupported event schema or kind');
+  if (data.schema_version !== 1 || !['hypothesis', 'analysis', 'verification', 'finding', 'correction'].includes(data.kind)) invalid('Unsupported event schema or kind');
   for (const key of ['version_id', 'repo_commit', 'title', 'angle', 'created_at']) required(data[key], key, key === 'title' ? 300 : 200);
   if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(data.version_id)) invalid('Invalid version_id');
   if (!/^[a-f0-9]{40,64}$/i.test(data.repo_commit)) invalid('Invalid repo_commit');
@@ -71,7 +72,9 @@ export function validateEvent(input) {
     required(data.claim_key, 'claim_key', 160);
     required(data.verification_plan, 'verification_plan', 1000);
     if (!['checked', 'unavailable'].includes(data.preflight)) invalid('Invalid preflight');
+    if (!hasKorean(data.verification_plan) || !hasKorean(body)) invalid('가설의 검증 계획과 Markdown 본문은 한국어로 작성해야 합니다');
   }
+  if (data.kind === 'analysis' && data.hypothesis_id != null) required(data.hypothesis_id, 'hypothesis_id', 32);
   if (data.kind === 'verification') {
     required(data.verification_of, 'verification_of', 32);
     required(data.method, 'method', 300);
@@ -88,6 +91,7 @@ export function validateEvent(input) {
     if (data.evidence_event_ids != null && (!Array.isArray(data.evidence_event_ids) || data.evidence_event_ids.length > 30 || new Set(data.evidence_event_ids).size !== data.evidence_event_ids.length || data.evidence_event_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id)))) invalid('Invalid evidence_event_ids');
     if (typeof data.poc_source !== 'string' || !data.poc_source.trim() || Buffer.byteLength(data.poc_source) > evidenceLimits.poc || hash(data.poc_source) !== data.poc_sha256) invalid('Invalid PoC source or hash');
     if (typeof data.kasan_log !== 'string' || !/^[ \t]*(?:\[[^\]\r\n]{1,40}\][ \t]*)?BUG:[ \t]*KASAN:/im.test(data.kasan_log) || Buffer.byteLength(data.kasan_log) > evidenceLimits.kasan || hash(data.kasan_log) !== data.kasan_sha256) invalid('Invalid KASAN log or hash');
+    if (!hasKorean(data.impact) || !hasKorean(body)) invalid('취약점 영향과 Markdown 본문은 한국어로 작성해야 합니다');
   }
   if (data.kind === 'correction') required(data.corrects_event_id, 'corrects_event_id', 64);
   return { agentId, sourcePath, markdown, digest, data };

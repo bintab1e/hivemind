@@ -6,6 +6,12 @@ const empty = (element, message) => element.append(node('p', 'placeholder', mess
 const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: '취약점 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '취약점 보고·반박 충돌', stale: '커밋 변경' };
 const verdicts = { supports: '지지', refutes: '반박', inconclusive: '미결' };
 const kinds = { hypothesis: '가설', verification: '검증', finding: '취약점 보고', correction: '정정' };
+const exclusionReasons = {
+  worktree_dirty: '계측 대상 파일에 커밋되지 않은 변경이 있습니다.',
+  scope_mismatch: '계측 범위가 기준 배치와 다릅니다.',
+  file_shape_mismatch: '파일별 계측 가능 줄 구성이 기준 배치와 다릅니다.',
+};
+const exclusionReason = reason => exclusionReasons[reason] || '팀 병합 조건과 다릅니다.';
 let refreshSequence = 0;
 let coverageFileCount = 0;
 let coverageAllFileCount = 0;
@@ -85,7 +91,8 @@ function render(data) {
     $('agents').append(row);
   }
   if (!data.agents.length) empty($('agents'), '병합 가능한 에이전트 자료가 없습니다.');
-  $('exclusions').textContent = metrics.excluded_agents.length ? `병합 제외: ${metrics.excluded_agents.join(', ')} · 커밋, 계측 범위 또는 파일 구성이 다릅니다.` : '';
+  const excludedCoverage = data.coverage_agents.filter(agent => !agent.included_in_team);
+  $('exclusions').textContent = excludedCoverage.length ? `병합 제외: ${excludedCoverage.map(agent => `${agent.agent_id} · ${exclusionReason(agent.exclusion_reason)}`).join(' / ')}` : '';
 
   reviewData = data;
   if (new URLSearchParams(location.search).get('view') === 'reviews') renderReviews(data);
@@ -316,7 +323,7 @@ function renderCoverage(report) {
     metric('미열람 소스 줄', (totalLines - readLines).toLocaleString(), '추가 조사 후보'),
   );
   $('coverage-exclusion').hidden = report.included_in_team;
-  $('coverage-exclusion').textContent = report.included_in_team ? '' : '이 에이전트의 최신 자료는 작업 트리나 계측 범위가 달라 팀 합집합에서 제외되었습니다.';
+  $('coverage-exclusion').textContent = report.included_in_team ? '' : `병합 제외 · ${exclusionReason(report.exclusion_reason)}`;
   clear($('files'));
   for (const file of files) {
     const row = node('div', 'file-row');

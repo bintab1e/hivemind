@@ -41,6 +41,12 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
     const markdown = `---\n${base}${fields}${fields.includes('kind: hypothesis') ? 'verification_plan: "반례 입력으로 분기 확인"\n' : ''}scope:\n  - "src/app.py"\ncode_refs:\n  - "src/app.py#parse_request"\nangle: static-trace\ncreated_at: "${stamp}"\n---\n\n${body}`;
     return { agent_id, source_path, markdown, sha256: sha(markdown) };
   };
+  const englishBody = event('pc1', 'exchange/outbox/pc1/english-body.md', 'kind: hypothesis\ntitle: "English title is allowed"\nclaim_key: "english-body"\npreflight: checked\n', '## Evidence\nObserved the code path.\n');
+  assert.equal((await post('/v1/exchange/events', englishBody))[0], 400);
+  const englishPlan = event('pc1', 'exchange/outbox/pc1/english-plan.md', 'kind: hypothesis\ntitle: "English title is allowed"\nclaim_key: "english-plan"\npreflight: checked\n');
+  englishPlan.markdown = englishPlan.markdown.replace('반례 입력으로 분기 확인', 'Reproduce the branch with a boundary input');
+  englishPlan.sha256 = sha(englishPlan.markdown);
+  assert.equal((await post('/v1/exchange/events', englishPlan))[0], 400);
   const hypothesis = event('pc1', 'exchange/outbox/pc1/h1.md', 'kind: hypothesis\ntitle: "경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n');
   assert.equal((await post('/v1/exchange/events', hypothesis, 'wrong'))[0], 401);
   assert.equal((await post('/v1/exchange/events', hypothesis, agentTokens.pc2))[0], 403);
@@ -52,7 +58,10 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   edited.sha256 = sha(edited.markdown);
   assert.equal((await post('/v1/exchange/events', edited))[0], 409);
   const analysis = event('pc1', 'exchange/outbox/pc1/a1.md', `kind: analysis\ntitle: "조건 추적"\nhypothesis_id: "${first.hypothesis_id}"\n`);
-  assert.equal((await post('/v1/exchange/events', analysis))[0], 400);
+  const [analysisStatus, analysisResult] = await post('/v1/exchange/events', analysis);
+  assert.equal(analysisStatus, 200);
+  assert.deepEqual([analysisResult.accepted, analysisResult.discarded, analysisResult.reason], [false, true, 'intermediate_analysis_disabled']);
+  assert.equal(db.prepare('SELECT 1 FROM events WHERE id = ?').get(analysisResult.event_id), undefined);
   const secondHypothesis = event('pc4', 'exchange/outbox/pc4/h1.md', 'kind: hypothesis\ntitle: "경계값 우회"\nclaim_key: "boundary-bypass"\npreflight: checked\n');
   const [secondStatus, second] = await post('/v1/exchange/events', secondHypothesis);
   assert.equal(secondStatus, 200);
@@ -70,6 +79,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const poc = 'int main(void) { return trigger_boundary(); }\n';
   const kasan = 'BUG: KASAN: slab-out-of-bounds in parse_request\nCall Trace:\n parse_request\n';
   const findingFields = (ids = []) => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nimpact: "경계값 입력이 검사를 우회함"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n${ids.length ? `evidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n` : ''}`;
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/english-impact.md', findingFields().replace('impact: "경계값 입력이 검사를 우회함"', 'impact: "Memory corruption"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-poc.md', findingFields().replace(/^poc_source:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-kasan.md', findingFields().replace(/^kasan_log:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-finding.md', findingFields(['f'.repeat(64)]))))[0], 422);
@@ -148,13 +158,14 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.deepEqual([teamCoverage.files[0].read, pc1Coverage.files[0].read, pc2Coverage.files[0].read], [3, 2, 2]);
   assert.equal((await fetch(`${coverageUrl}&agent_id=pc5`)).status, 404);
   assert.equal((await mcp('pc1', 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } })).protocolVersion, '2025-11-25');
-  assert((await mcp('pc1', 'tools/list')).tools.some(tool => tool.name === 'get_coverage_gaps'));
+  const listedTools = (await mcp('pc1', 'tools/list')).tools;
+  assert(listedTools.some(tool => tool.name === 'get_coverage_gaps'));
+  assert(!listedTools.some(tool => tool.name === 'get_recent_analyses'));
   const gaps = await tool('pc1', 'get_coverage_gaps', { version_id: '7.2.5', repo_commit: commit });
   assert.deepEqual(gaps.files[0].ranges, [{ start: 40, end: 40 }]);
   const reviews = await tool('pc1', 'get_review_gaps', { version_id: '7.2.5', repo_commit: commit });
   assert(reviews.hypotheses.some(item => item.id === first.hypothesis_id && item.status === 'contested'));
   assert.equal((await tool('pc1', 'get_team_status', { version_id: '7.2.5', repo_commit: commit })).metrics.read_lines, 3);
-  assert(!(await mcp('pc1', 'tools/list')).tools.some(item => item.name === 'get_recent_analyses'));
   const claim = await tool('pc5', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'claim_only' });
   assert(!Object.hasOwn(claim, 'checks'));
   assert((await tool('pc2', 'get_hypothesis', { hypothesis_id: first.hypothesis_id, mode: 'full' })).checks.length >= 2);
@@ -232,6 +243,45 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal(currentRc.hypotheses.find(item => item.id === rcEvent.hypothesis_id).status, 'reported');
   assert.equal(currentRc.findings.length, 1);
   assert.equal((await (await fetch(`${url}/api/dashboard?track_id=mainline`)).json()).selected.version_id, '7.2.5');
+});
+
+test('coverage exclusions report the exact failed merge condition', async t => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-exclusions-'));
+  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const tokens = {};
+  for (const agent of ['pc1', 'pc2', 'pc3', 'pc4']) {
+    const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: agent }) });
+    assert.equal(response.status, 201);
+    tokens[agent] = (await response.json()).token;
+  }
+  const batch = (agent, { clean = true, scope = 'shared-scope', eligible = [10, 20] } = {}) => {
+    const lcov = `TN:\nSF:/repo/src/app.py\n${eligible.map(line => `DA:${line},${line === 10 ? 1 : 0}`).join('\n')}\nLF:${eligible.length}\nLH:1\nend_of_record\n`;
+    const coverage_json = '{}';
+    const progress_md = `---\nschema_version: 1\nversion_id: 7.2.5\nrepo_commit: ${commit}\nupdated_at: "${stamp}"\n---\n`;
+    const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
+    const coverage_scope_hash = sha(scope);
+    const batch_id = sha(['7.2.5', agent, commit, coverage_scope_hash, String(clean), stamp, ...Object.values(hashes)].join('\0'));
+    return { manifest: { schema_version: 1, batch_id, agent_id: agent, version_id: '7.2.5', repo_commit: commit, repo_root: '/repo', coverage_scope_hash, worktree_clean: clean, generated_at: stamp, hashes }, lcov, coverage_json, progress_md };
+  };
+  const upload = async payload => {
+    const response = await fetch(`${url}/v1/telemetry/batches`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[payload.manifest.agent_id]}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    assert.equal(response.status, 200);
+  };
+  await upload(batch('pc1'));
+  await upload(batch('pc2', { clean: false }));
+  await upload(batch('pc3', { scope: 'different-scope' }));
+  await upload(batch('pc4', { eligible: [10, 20, 30] }));
+  const dashboard = await (await fetch(`${url}/api/dashboard`)).json();
+  assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.included_in_team, agent.exclusion_reason]), [
+    ['pc1', true, null],
+    ['pc2', false, 'worktree_dirty'],
+    ['pc3', false, 'scope_mismatch'],
+    ['pc4', false, 'file_shape_mismatch'],
+  ]);
+  assert.deepEqual(dashboard.metrics.excluded_agents, ['pc2', 'pc3', 'pc4']);
+  const detail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc2`)).json();
+  assert.deepEqual([detail.included_in_team, detail.exclusion_reason], [false, 'worktree_dirty']);
 });
 
 test('PoC and KASAN can be reported directly from an unverified hypothesis', async t => {

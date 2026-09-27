@@ -92,6 +92,10 @@ function addEvent(db, input, agentId) {
   if (event.agentId !== agentId) invalid('agent_id does not match token', 403);
   const { sourcePath, markdown, digest, data } = event;
   const id = hash(`${data.version_id}\0${agentId}\0${sourcePath}`);
+  if (data.kind === 'analysis') {
+    const warning = targetWarning(db, data.version_id, data.repo_commit);
+    return { event_id: id, hypothesis_id: data.hypothesis_id || null, accepted: false, discarded: true, reason: 'intermediate_analysis_disabled', warnings: [...(warning ? [warning] : []), 'intermediate_analysis_discarded'] };
+  }
   db.exec('BEGIN IMMEDIATE');
   try {
     const existing = db.prepare('SELECT id, sha256, hypothesis_id, verification_of, related_hypothesis_id FROM events WHERE version_id = ? AND agent_id = ? AND source_path = ?').get(data.version_id, agentId, sourcePath);
@@ -243,8 +247,12 @@ function coverageState(db, versionId, commit) {
     const entries = Object.values(files);
     const totalLines = entries.reduce((sum, file) => sum + file.eligible.length, 0);
     const readLines = entries.reduce((sum, file) => sum + file.read.length, 0);
-    const included = !!row.worktree_clean && row.scope_hash === canonical && (!fileShape.size || (Object.keys(files).length === fileShape.size && Object.entries(files).every(([name, file]) => fileShape.get(name) === JSON.stringify(file.eligible))));
-    coverageAgents.push({ agent_id: row.agent_id, read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, included_in_team: included });
+    let exclusionReason = null;
+    if (!row.worktree_clean) exclusionReason = 'worktree_dirty';
+    else if (row.scope_hash !== canonical) exclusionReason = 'scope_mismatch';
+    else if (fileShape.size && (Object.keys(files).length !== fileShape.size || Object.entries(files).some(([name, file]) => fileShape.get(name) !== JSON.stringify(file.eligible)))) exclusionReason = 'file_shape_mismatch';
+    const included = exclusionReason === null;
+    coverageAgents.push({ agent_id: row.agent_id, read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, included_in_team: included, exclusion_reason: exclusionReason });
     if (!included) {
       excluded.push(row.agent_id);
       continue;
@@ -365,16 +373,18 @@ function coverageDetails(db, args) {
   let files = state.files;
   let missingIncludes = state.missingIncludes;
   let includedInTeam = true;
+  let exclusionReason = null;
   if (agentId) {
     const snapshot = state.latest.find(row => row.agent_id === agentId);
     if (!snapshot) invalid('Unknown agent for this version and commit', 404);
     files = Object.entries(JSON.parse(snapshot.files_json)).map(([name, file]) => ({ path: name, total: file.eligible.length, read: file.read.length, percent: file.eligible.length ? Math.round(file.read.length / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
     missingIncludes = JSON.parse(snapshot.coverage_json).hivemind_scope?.missing_includes?.length || 0;
     includedInTeam = !state.excluded.includes(agentId);
+    exclusionReason = state.coverageAgents.find(agent => agent.agent_id === agentId)?.exclusion_reason || null;
   }
   const totalLines = files.reduce((sum, file) => sum + file.total, 0);
   const readLines = files.reduce((sum, file) => sum + file.read, 0);
-  return { version_id: versionId, repo_commit: commit, agent_id: agentId, included_in_team: includedInTeam, files, metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, read_files: files.filter(file => file.read > 0).length, missing_includes: missingIncludes } };
+  return { version_id: versionId, repo_commit: commit, agent_id: agentId, included_in_team: includedInTeam, exclusion_reason: exclusionReason, files, metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, read_files: files.filter(file => file.read > 0).length, missing_includes: missingIncludes } };
 }
 
 function lineRanges(lines) {
