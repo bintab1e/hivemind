@@ -1,5 +1,4 @@
 runtime/
 .venv/
-__pycache__/
-.agentcov/
+.local/
 *.token

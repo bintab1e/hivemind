@@ -1,6 +1,6 @@
 # Hivemind 중앙 서버 (Linux)
 
-이 `server/` 폴더만 Linux 서버에 복사하면 웹 대시보드, SQLite 저장소, 기록 API가 실행됩니다. **커널 소스와 agentcov는 서버에 설치하지 않습니다.** Node.js 24 이상이 필요하며 npm 설치 단계는 없습니다. 분석 PC 설정은 별도 배포하는 에이전트 패키지의 README를 따릅니다.
+이 `server/` 폴더만 Linux 서버에 복사하면 웹 대시보드, SQLite 저장소, 기록 API가 실행됩니다. **커널 소스와 agentcov는 서버에 설치하지 않습니다.** Node.js 24 이상이 필요하며 npm 설치 단계는 없습니다. 분석 PC 설정은 독립 저장소 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent)의 README를 따릅니다.
 
 준비물: 서버에 접속할 일반 사용자 계정, SSH, `curl`, `tar`, `xz`, `sha256sum`. 아래 명령은 Bash와 systemd가 있는 Linux에서 실행합니다. Debian/Ubuntu에서 `curl`이나 `xz`가 없으면 `sudo apt-get update && sudo apt-get install -y ca-certificates curl xz-utils`로 설치합니다. `server/` 외의 Hivemind 파일은 필요하지 않습니다.
 
