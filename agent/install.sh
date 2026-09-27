@@ -6,7 +6,11 @@ SOURCE="${HIVEMIND_AGENT_SOURCE:-https://github.com/bintab1e/hivemind-agent.git}
 
 command -v git >/dev/null || { echo 'git이 필요합니다.' >&2; exit 1; }
 command -v curl >/dev/null || { echo 'curl이 필요합니다.' >&2; exit 1; }
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo '커널 Git 체크아웃 안에서 실행하세요.' >&2; exit 1; }
+if [ -d "$HOME/workspace/knfsd" ]; then
+  ROOT="$(git -C "$HOME/workspace/knfsd" rev-parse --show-toplevel 2>/dev/null)" || { echo '~/workspace/knfsd가 커널 Git 체크아웃이 아닙니다.' >&2; exit 1; }
+else
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo '커널 Git 체크아웃 안에서 실행하세요.' >&2; exit 1; }
+fi
 AGENT="$ROOT/.hivemind/agent"
 curl -fsS "$SERVER_URL/healthz" >/dev/null || { echo "서버에 연결할 수 없습니다: $SERVER_URL" >&2; exit 1; }
 
