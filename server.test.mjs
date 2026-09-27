@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { startServer } from './server/server.mjs';
-import { assertFreshCheckout, makeBatch, selectCoverage } from './agent/sync-agent.mjs';
-import { buildCoverageScope } from './agent/coverage-scope.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40);
@@ -15,31 +13,7 @@ const rcCommit = 'b'.repeat(40);
 const alternateCommit = 'c'.repeat(40);
 const stamp = '2026-09-23T01:00:00Z';
 
-test('coverage scope follows NFS source includes through shared headers', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'hivemind-scope-'));
-  try {
-    for (const directory of ['fs/nfsd', 'net/sunrpc', 'include/linux/sunrpc', 'include/linux']) mkdirSync(path.join(root, directory), { recursive: true });
-    writeFileSync(path.join(root, 'fs/nfsd/main.c'), '#include <linux/sunrpc/svc.h>\n');
-    writeFileSync(path.join(root, 'include/linux/sunrpc/svc.h'), '#include "../types.h"\n#include <net/missing.h>\n');
-    writeFileSync(path.join(root, 'include/linux/types.h'), '/* types */\n');
-    writeFileSync(path.join(root, 'include/linux/unrelated.h'), '/* unrelated */\n');
-    writeFileSync(path.join(root, 'net/sunrpc/svc.c'), '/* RPC source */\n');
-    const scope = await buildCoverageScope(root, ['fs/nfsd/', 'net/sunrpc/']);
-    assert.deepEqual([...scope.files].sort(), ['fs/nfsd/main.c', 'include/linux/sunrpc/svc.h', 'include/linux/types.h', 'net/sunrpc/svc.c']);
-    assert.deepEqual([...scope.missingIncludes], ['net/missing.h']);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test('new commit needs a fresh agentcov checkout', () => {
-  assert.doesNotThrow(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit', commit));
-  assert.doesNotThrow(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit-next', rcCommit));
-  assert.throws(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit', rcCommit), /fresh repo_root/);
-});
-
 test('events remain immutable; conflicting checks and overlapping coverage stay visible', async t => {
-  const filtered = selectCoverage('TN:\nSF:fs/nfsd/main.c\nDA:1,1\nDA:2,0\nLF:2\nLH:1\nend_of_record\nTN:\nSF:fs/other/main.c\nDA:1,1\nLF:1\nLH:1\nend_of_record\n', JSON.stringify({ files: { 'fs/nfsd/main.c': { line_count: 2, read_lines: 1 }, 'fs/other/main.c': { line_count: 1, read_lines: 1 } }, summary: {}, unknown_events: [] }), ['fs/nfsd/'], 'C:\\audit');
-  assert(!filtered.lcov.includes('fs/other/'));
-  assert.deepEqual(Object.keys(JSON.parse(filtered.coverageJson).files), ['fs/nfsd/main.c']);
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-test-'));
   const oldDb = new DatabaseSync(path.join(dataDir, 'hivemind.sqlite3'));
   oldDb.exec('CREATE TABLE batches (id TEXT PRIMARY KEY, agent_id TEXT, version_id TEXT, repo_commit TEXT, scope_hash TEXT, worktree_clean INTEGER, generated_at TEXT, received_at TEXT, files_json TEXT, coverage_json TEXT, progress_md TEXT)');
@@ -135,7 +109,10 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
     const lcov = `TN:\nSF:${source}\nDA:10,${read.includes(10) ? 1 : 0}\nDA:20,${read.includes(20) ? 1 : 0}\nDA:30,${read.includes(30) ? 1 : 0}\nDA:40,${read.includes(40) ? 1 : 0}\nLF:4\nLH:${read.length}\nend_of_record\n`;
     const coverage_json = '{}';
     const progress_md = `---\nschema_version: 1\nversion_id: ${version}\nrepo_commit: ${revision}\nupdated_at: "${stamp}"\n---\n\n| task_id | status |\n| --- | --- |\n| T-001 | in_progress |\n`;
-    return makeBatch({ agentId: agent_id, versionId: version, repoRoot: 'C:\\audit', commit: revision, clean: true, generatedAt, lcov, coverageJson: coverage_json, progressMd: progress_md, agentcovConfig: '' });
+    const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
+    const coverage_scope_hash = sha('test-scope');
+    const batch_id = sha([version, agent_id, revision, coverage_scope_hash, 'true', generatedAt, ...Object.values(hashes)].join('\0'));
+    return { manifest: { schema_version: 1, batch_id, agent_id, version_id: version, repo_commit: revision, repo_root: 'C:\\audit', coverage_scope_hash, worktree_clean: true, generated_at: generatedAt, hashes }, lcov, coverage_json, progress_md };
   };
   const firstBatch = batch('pc1', [10, 20]);
   assert.equal((await post('/v1/telemetry/batches', firstBatch))[0], 200);

@@ -1,4 +1,3 @@
-// These copies ship independently; tests require server/contract.mjs and agent/contract.mjs to match.
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');

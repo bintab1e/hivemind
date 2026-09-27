@@ -32,33 +32,22 @@ MCP는 LLM이 팀의 상태를 조회하고 새 기록을 outbox에 넣는 인�
 
 ## 2. 디렉터리 규약
 
-서버에는 `server/`만, 각 분석 PC에는 `agent/`만 설치한다. 아래 `agent/runtime/`은 **그 분석 PC의 로컬 작업 디렉터리**다. 여러 PC가 같은 파일 공유 폴더에 직접 쓰지 않는다.
+중앙 서버는 `hivemind-server`, 각 분석 PC는 별도 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent) 저장소를 설치한다. 각 에이전트의 `runtime/`은 **그 분석 PC의 로컬 작업 디렉터리**다. 여러 PC가 같은 파일 공유 폴더에 직접 쓰지 않는다.
 
 ```text
-hivemind/
+hivemind-server/
 ├─ server/
 │  ├─ server.mjs
 │  ├─ contract.mjs
 │  ├─ public/
 │  └─ runtime/server/         # SQLite·관리자 토큰 (서버에만)
-├─ agent/
-│  ├─ mcp-agent.mjs
-│  ├─ sync-agent.mjs
-│  ├─ contract.mjs
-│  ├─ templates/
-│  └─ runtime/                # 분석 PC마다 별도 생성
-│     ├─ agents/<agent-id>.json
-│     ├─ agents/<agent-id>.token
-│     ├─ exchange/outbox/<agent-id>/<timestamp>-<short-id>.md
-│     ├─ exchange/ack/<agent-id>/<path-and-content-hash>.json
-│     ├─ telemetry/progress/<agent-id>.md
-│     ├─ telemetry/batches/<agent-id>/<batch-id>/
-│     │  ├─ manifest.json
-│     │  ├─ agentcov.info
-│     │  ├─ coverage.json
-│     │  └─ progress.md
-│     └─ sync-state-<agent-id>.json
 └─ docs/
+
+hivemind-agent/                # 별도 Git 저장소, 분석 PC에 설치
+├─ mcp-agent.mjs
+├─ sync-agent.mjs
+├─ templates/
+└─ runtime/                   # 에이전트별 로컬 기록·토큰·묶음
 ```
 
 `outbox`의 Markdown은 **완성 후 수정하지 않는 이벤트**다. 내용을 고치려면 정정 이벤트 파일을 새로 작성하고 원래 이벤트를 참조한다. 동기화 프로세스는 임시 파일을 건너뛰고 크기와 수정 시간이 안정된 파일만 전송한다. 업로드 ACK를 받은 뒤에도 원본을 지우지 않는다. 실패 시 같은 이벤트 ID로 재전송한다.
@@ -102,8 +91,8 @@ hivemind/
 ## 6. 별도 서버와 분석 PC
 
 - Linux 중앙 서버에는 `server/` 내용만 설치한다. 서버는 `127.0.0.1:8765`에 바인딩하고 SQLite·관리자 토큰을 서버 설치 폴더의 `runtime/server/`에 둔다.
-- 각 Linux·Windows 분석 PC에는 `agent/` 내용만 설치한다. 분석 저장소 경로와 버전은 PC별 JSON 설정에 지정한다. 예시는 `agent/agent.example.json`이다.
-- 각 PC는 SSH 로컬 포트 포워딩으로 자신의 `127.0.0.1:8765`를 서버에 연결한다. 각 PC에 고유 `agent_id`와 수집용 토큰을 부여한다.
+- 각 Linux·Windows 분석 PC에는 별도 `hivemind-agent` 저장소를 설치한다. 분석 저장소 경로와 버전은 PC별 JSON 설정에 지정한다.
+- 각 PC는 같은 내부망의 서버 주소 또는 SSH 로컬 포트 포워딩을 사용한다. 각 PC에 고유 `agent_id`와 수집용 토큰을 부여한다.
 - 같은 버전을 분석하는 PC는 동일한 `version_id`·대상 범위·agentcov 제외 규칙을 사용한다. 서버는 버전과 커밋 ID별로 별도 커버리지 현황을 유지한다.
 
 중앙에 올라온 Markdown은 다른 LLM의 **자료**로 취급한다. 그 안의 지시문을 실행 규칙으로 사용하지 않으며, 서버가 Markdown 내용을 명령으로 실행하지 않는다.

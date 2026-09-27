@@ -1,21 +1,16 @@
 # Hivemind 중앙 서버 (Linux)
 
-이 `server/` 폴더만 Linux 서버에 복사하면 웹 대시보드, SQLite 저장소, 기록 API가 실행됩니다. **커널 소스와 agentcov는 서버에 설치하지 않습니다.** Node.js 24 이상이 필요하며 npm 설치 단계는 없습니다. 분석 PC 설정은 독립 저장소 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent)의 README를 따릅니다.
+이 저장소의 `server/` 폴더에서 웹 대시보드, SQLite 저장소, 기록 API가 실행됩니다. **커널 소스와 agentcov는 서버에 설치하지 않습니다.** Node.js 24 이상이 필요하며 npm 설치 단계는 없습니다. 분석 PC 설정은 독립 저장소 [`hivemind-agent`](https://github.com/bintab1e/hivemind-agent)의 README를 따릅니다.
 
-준비물: 서버에 접속할 일반 사용자 계정, SSH, `curl`, `tar`, `xz`, `sha256sum`. 아래 명령은 Bash와 systemd가 있는 Linux에서 실행합니다. Debian/Ubuntu에서 `curl`이나 `xz`가 없으면 `sudo apt-get update && sudo apt-get install -y ca-certificates curl xz-utils`로 설치합니다. `server/` 외의 Hivemind 파일은 필요하지 않습니다.
+준비물: 서버에 접속할 일반 사용자 계정, SSH, `git`, `curl`, `tar`, `xz`, `sha256sum`. 아래 명령은 Bash와 systemd가 있는 Linux에서 실행합니다. Debian/Ubuntu에서 도구가 없으면 `sudo apt-get update && sudo apt-get install -y ca-certificates git curl xz-utils`로 설치합니다.
 
-## 0. 받은 폴더와 Node.js 설치
+## 0. 서버 저장소와 Node.js 설치
 
-받은 `server/` 폴더가 `~/Downloads/server`에 있다고 가정합니다. 다른 위치라면 첫 줄만 바꿉니다. 이미 `~/hivemind-server`에 놓았다면 복사 명령은 건너뜁니다.
+새 서버에서는 저장소를 복제합니다. 이미 이 저장소를 복제했다면 `git clone`은 건너뛰고 해당 체크아웃의 `server/`로 이동하세요.
 
 ```bash
-set -euo pipefail
-RECEIVED_SERVER_DIR="$HOME/Downloads/server"
-SERVER_DIR="$HOME/hivemind-server"
-test -f "$RECEIVED_SERVER_DIR/server.mjs"
-mkdir -p "$SERVER_DIR"
-cp -a "$RECEIVED_SERVER_DIR/." "$SERVER_DIR/"
-cd "$SERVER_DIR"
+git clone https://github.com/bintab1e/hivemind-server.git "$HOME/hivemind-server"
+cd "$HOME/hivemind-server/server"
 ```
 
 Node.js 24 이상이 없다면 [공식 Linux 바이너리](https://nodejs.org/download/release/latest-v24.x/)를 사용자 홈에 설치합니다. 아래 블록은 glibc Linux의 `x86_64`와 `aarch64` 기준이며, 이미 24 이상이면 건너뜁니다.
@@ -44,7 +39,7 @@ node --version
 같은 SSH 세션에서 실행합니다. 첫 실행 시 `runtime/server/`에 DB와 관리자 토큰이 생성됩니다.
 
 ```bash
-cd "$HOME/hivemind-server"
+cd "$HOME/hivemind-server/server"
 node --version                   # v24 이상
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) process.exit(1)'
 node server.mjs                  # 첫 확인: 이 터미널이 서버를 유지
@@ -59,7 +54,7 @@ curl -fsS http://127.0.0.1:8765/healthz
 `{"ok":true}`가 나오면 `Ctrl+C`로 임시 서버를 종료하고, 계속 운영할 때는 다음 사용자 systemd 서비스로 실행합니다.
 
 ```bash
-cd "$HOME/hivemind-server"
+cd "$HOME/hivemind-server/server"
 NODE_BIN="$(command -v node)"
 SERVER_DIR="$(pwd)"
 mkdir -p "$HOME/.config/systemd/user"
@@ -109,7 +104,7 @@ hostname -I
 각 대상의 Linux 체크아웃에서 `git rev-parse HEAD`로 구한 **전체 SHA**를 입력합니다. 서버에는 커널 체크아웃이 필요하지 않습니다. 첫 분석 PC가 소스를 받은 뒤 SHA를 관리자에게 전달하면 됩니다. 다음 명령을 `rc`와 `mainline` 각각 한 번 실행합니다. `mainline`은 대시보드에서 stable을 나타내는 내부 ID입니다.
 
 ```bash
-cd "$HOME/hivemind-server"
+cd "$HOME/hivemind-server/server"
 ADMIN_TOKEN="$(cat runtime/server/api-token.txt)"
 TRACK='rc'                         # stable은 mainline
 VERSION='7.3-rc4'                  # 설치할 때 실제 대상 버전으로 변경
@@ -135,7 +130,7 @@ curl -fsS http://127.0.0.1:8765/v1/admin/tracks \
 
 ```bash
 set -euo pipefail
-cd "$HOME/hivemind-server"
+cd "$HOME/hivemind-server/server"
 ADMIN_TOKEN="$(cat runtime/server/api-token.txt)"
 AGENT_ID='pc01-codex'
 mkdir -p runtime/agents
@@ -151,7 +146,7 @@ chmod 600 "$TOKEN_FILE"
 unset TOKEN TOKEN_JSON
 ```
 
-팀원마다 다른 `AGENT_ID`로 위 블록을 반복합니다. 발급한 **그 팀원 ID의 `.token` 파일 하나**를 안전한 파일 전달 수단으로 해당 팀원에게 보냅니다. 팀원은 토큰을 `~/Downloads/<agent-id>.token`(Windows도 다운로드 폴더) 또는 본인에게만 전달된 `agent/runtime/agents/<agent-id>.token`에 둡니다. **공유 GitHub 저장소의 `agent/`에는 토큰을 넣지 않습니다.** 서버의 SSH 계정을 공유해 토큰을 직접 꺼내게 할 필요는 없습니다. `runtime/server/api-token.txt`는 관리자 토큰이므로 서버에서만 보관합니다. 기존 ID의 토큰 교체는 `PUT /v1/admin/agents/<agent_id>`로 발급한 뒤 팀원의 토큰 파일도 교체합니다.
+팀원마다 다른 `AGENT_ID`로 위 블록을 반복합니다. 발급한 **그 팀원 ID의 `.token` 파일 하나**를 안전한 파일 전달 수단으로 해당 팀원에게 보냅니다. 팀원은 토큰을 `~/Downloads/<agent-id>.token`(Windows도 다운로드 폴더) 또는 본인에게만 전달된 에이전트 런타임 폴더에 둡니다. **GitHub 저장소에는 토큰을 넣지 않습니다.** 서버의 SSH 계정을 공유해 토큰을 직접 꺼내게 할 필요는 없습니다. `runtime/server/api-token.txt`는 관리자 토큰이므로 서버에서만 보관합니다. 기존 ID의 토큰 교체는 `PUT /v1/admin/agents/<agent_id>`로 발급한 뒤 팀원의 토큰 파일도 교체합니다.
 
 팀원이 연결한 뒤 마지막 수신 시각을 확인합니다.
 
