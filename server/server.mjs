@@ -342,6 +342,17 @@ function findingAccessRequirements(data, title) {
   return accessRequirementTypes.filter(type => requirements.has(type));
 }
 
+function findingAccessWithHistory(allEvents, event, data) {
+  const direct = findingAccessRequirements(data, event.title);
+  if (direct.length) return direct;
+  for (const prior of allEvents) {
+    if (prior.kind !== 'finding' || prior.id === event.id || prior.related_hypothesis_id !== event.related_hypothesis_id || prior.received_at >= event.received_at) continue;
+    const inherited = findingAccessRequirements(readFrontMatter(prior.markdown).data, prior.title);
+    if (inherited.length) return inherited;
+  }
+  return [];
+}
+
 const claimStatus = status => ['retired', 'stale'].includes(status) ? status : 'active';
 
 function dashboard(db, requested = {}) {
@@ -377,7 +388,7 @@ function dashboard(db, requested = {}) {
     const data = readFrontMatter(item.markdown).data;
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
-    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessRequirements(data, item.title), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
+    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
   });
   const taskMap = new Map();
   for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
