@@ -230,7 +230,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const dashboardCss = await dashboardStyle.text();
   assert.match(dashboardCss, /\.recent-list\{max-height:360px;overflow-y:auto;scrollbar-gutter:stable/);
   assert.match(dashboardCss, /\.impact-result-cell\.verified/);
-  assert.match(dashboardCss, /\.access-badge/);
+  assert.match(dashboardCss, /\.access-value/);
 
   const activate = (track, version_id, repo_commit) => fetch(`${url}/v1/admin/tracks/${track}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ version_id, repo_commit }) });
   assert.equal((await activate('mainline', '7.2.5', commit)).status, 200);

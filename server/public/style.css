@@ -120,8 +120,7 @@ h2{font-size:18px;letter-spacing:-.025em;margin-bottom:0}
 .finding-report-cell{padding:12px 13px;background:#111b25;min-width:0}
 .finding-impact-row:hover .finding-report-cell{background:#13212b}
 .access-cell{display:grid;place-items:center;padding:9px;background:#101923;text-align:center}
-.access-badges{display:flex;flex-wrap:wrap;justify-content:center;gap:5px}
-.access-badge{padding:4px 6px;border:1px solid #426776;border-radius:5px;background:#18303a;color:#a9d8df;font:700 9px/1.2 Consolas,"Cascadia Code",monospace}
+.access-value{color:#a9c4cb;font:700 10px/1.45 Consolas,"Cascadia Code",monospace}
 .access-unclassified{color:#5d747d;font-size:10px}
 .impact-result-cell{display:grid;place-items:center;background:#101923;color:#4f6670;font-size:18px;font-weight:900}
 .impact-result-cell.verified{background:#294936;color:#c7ff9b;box-shadow:inset 0 0 0 1px #5d8d59}

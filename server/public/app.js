@@ -250,8 +250,7 @@ function renderFindings(data) {
     const title = node('button', 'hyp-title', finding.title);
     title.type = 'button';
     title.addEventListener('click', () => detail(finding.event_id).catch(showError));
-    const status = finding.evidence_active ? finding.hypothesis_status : 'stale';
-    head.append(title, node('span', `badge ${status}`, finding.evidence_active ? statuses[status] || status : '근거 정정됨'));
+    head.append(title);
     const actions = node('div', 'finding-actions');
     const poc = node('button', 'evidence-button', 'PoC 보기');
     poc.type = 'button';
@@ -278,9 +277,7 @@ function renderFindings(data) {
     access.setAttribute('role', 'cell');
     const requirements = finding.access_requirements || [];
     if (requirements.length) {
-      const badges = node('div', 'access-badges');
-      for (const requirement of requirements) badges.append(node('span', 'access-badge', accessRequirementLabels[requirement] || requirement));
-      access.append(badges);
+      access.append(node('span', 'access-value', requirements.map(requirement => accessRequirementLabels[requirement] || requirement).join(' · ')));
     } else {
       access.append(node('span', 'access-unclassified', '미분류'));
     }
