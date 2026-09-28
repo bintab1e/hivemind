@@ -82,11 +82,12 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${commit}`)).json()).findings.length, 0);
   const poc = 'int main(void) { return trigger_boundary(); }\n';
   const kasan = 'BUG: KASAN: slab-out-of-bounds in parse_request\nWrite of size 8 at addr deadbeef\nCall Trace:\n parse_request\n';
-  const findingFields = (ids = []) => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nsummary: "경계값 입력으로 8바이트 경계 밖 쓰기를 재현했다."\nverified_impacts:\n  - "controlled_write"\nimpact: "경계값 입력이 검사를 우회함"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n${ids.length ? `evidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n` : ''}`;
-  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/english-impact.md', findingFields().replace('impact: "경계값 입력이 검사를 우회함"', 'impact: "Memory corruption"'))))[0], 400);
+  const findingFields = (ids = []) => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nverified_impacts:\n  - "controlled_write"\naccess_requirements:\n  - "auth_null"\nimpact: "AUTH_NULL 또는 AUTH_UNIX 경계값 입력이 검사를 우회함"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n${ids.length ? `evidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n` : ''}`;
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/english-impact.md', findingFields().replace('impact: "AUTH_NULL 또는 AUTH_UNIX 경계값 입력이 검사를 우회함"', 'impact: "Memory corruption"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-poc.md', findingFields().replace(/^poc_source:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-kasan.md', findingFields().replace(/^kasan_log:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-impact-type.md', findingFields().replace('  - "controlled_write"', '  - "possible_rce"'))))[0], 400);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-access-type.md', findingFields().replace('  - "auth_null"', '  - "remote_magic"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/unmatched-kasan-type.md', findingFields().replace('  - "controlled_write"', '  - "kasan_read"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-finding.md', findingFields(['f'.repeat(64)]))))[0], 422);
   const [findingStatus, finding] = await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/finding.md', findingFields()));
@@ -154,8 +155,8 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.read_lines, agent.total_lines, agent.read_percent, agent.included_in_team]), [['pc1', 2, 4, 50, true], ['pc2', 2, 4, 50, true]]);
   assert.equal(dashboard.hypotheses.find(item => item.id === first.hypothesis_id).status, 'contested');
   assert.equal(dashboard.findings[0].hypothesis_status, 'contested');
-  assert.equal(dashboard.findings[0].summary, '경계값 입력으로 8바이트 경계 밖 쓰기를 재현했다.');
   assert.deepEqual(dashboard.findings[0].verified_impacts, ['kasan_write', 'controlled_write']);
+  assert.deepEqual(dashboard.findings[0].access_requirements, ['auth_null', 'auth_unix']);
   assert.deepEqual(dashboard.verifications.filter(item => item.hypothesis_id === first.hypothesis_id).map(item => [item.agent_id, item.verdict, item.hypothesis_id]).sort(), [['pc2', 'supports', first.hypothesis_id], ['pc3', 'refutes', first.hypothesis_id]]);
   assert.equal(dashboard.agents.find(agent => agent.agent_id === 'pc1').unique_lines, 1);
   assert.equal(dashboard.progress.in_progress, 1);
@@ -229,6 +230,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const dashboardCss = await dashboardStyle.text();
   assert.match(dashboardCss, /\.recent-list\{max-height:360px;overflow-y:auto;scrollbar-gutter:stable/);
   assert.match(dashboardCss, /\.impact-result-cell\.verified/);
+  assert.match(dashboardCss, /\.access-badge/);
 
   const activate = (track, version_id, repo_commit) => fetch(`${url}/v1/admin/tracks/${track}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ version_id, repo_commit }) });
   assert.equal((await activate('mainline', '7.2.5', commit)).status, 200);

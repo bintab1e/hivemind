@@ -4,8 +4,8 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { hash, evidenceLimits, verifiedImpactTypes, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools } from './contract.mjs';
-export { evidenceLimits, verifiedImpactTypes, validateEvent, parseLcov, mcpTools } from './contract.mjs';
+import { hash, evidenceLimits, verifiedImpactTypes, accessRequirementTypes, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools } from './contract.mjs';
+export { evidenceLimits, verifiedImpactTypes, accessRequirementTypes, validateEvent, parseLcov, mcpTools } from './contract.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
@@ -325,17 +325,21 @@ function activeChecks(db, hypothesisId) {
   return db.prepare("SELECT v.* FROM events v WHERE v.kind = 'verification' AND v.verification_of = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = v.id) ORDER BY v.received_at DESC").all(hypothesisId);
 }
 
-function findingSummary(data) {
-  const value = String(data.summary || data.impact || '').trim();
-  const firstSentence = value.match(/^.*?[.!?](?=\s|$)/u)?.[0] || value;
-  return firstSentence.length > 180 ? `${firstSentence.slice(0, 179).trimEnd()}…` : firstSentence;
-}
-
 function findingImpacts(data) {
   const verified = new Set(Array.isArray(data.verified_impacts) ? data.verified_impacts : []);
   if (/\bRead of size\b/i.test(data.kasan_log || '')) verified.add('kasan_read');
   if (/\bWrite of size\b/i.test(data.kasan_log || '')) verified.add('kasan_write');
   return verifiedImpactTypes.filter(type => verified.has(type));
+}
+
+function findingAccessRequirements(data, title) {
+  const requirements = new Set(Array.isArray(data.access_requirements) ? data.access_requirements : []);
+  const text = `${title || ''} ${data.impact || ''}`;
+  if (/\b(?:RPC_)?AUTH_NULL\b/i.test(text)) requirements.add('auth_null');
+  if (/\b(?:RPC_)?AUTH_(?:UNIX|SYS)\b/i.test(text)) requirements.add('auth_unix');
+  if (/\bRPCSEC_GSS\b/i.test(text)) requirements.add('rpcsec_gss');
+  if (/(?:악성|침해된)[^\n]{0,160}서버/u.test(text) || /\bmalicious\b[^\n]{0,120}\bserver\b/i.test(text)) requirements.add('malicious_server');
+  return accessRequirementTypes.filter(type => requirements.has(type));
 }
 
 const claimStatus = status => ['retired', 'stale'].includes(status) ? status : 'active';
@@ -373,7 +377,7 @@ function dashboard(db, requested = {}) {
     const data = readFrontMatter(item.markdown).data;
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
-    return { event_id: item.id, title: item.title, summary: findingSummary(data), verified_impacts: findingImpacts(data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
+    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessRequirements(data, item.title), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
   });
   const taskMap = new Map();
   for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);

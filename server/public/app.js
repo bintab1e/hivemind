@@ -11,6 +11,11 @@ const impactTypes = [
   ['controlled_read', 'Controlled Read'], ['controlled_write', 'Controlled Write'],
   ['rce', 'RCE'], ['lpe', 'LPE'], ['info_leak', 'Info Leak'],
 ];
+const accessRequirementLabels = {
+  auth_null: 'AUTH_NULL', auth_unix: 'AUTH_UNIX', rpcsec_gss: 'RPCSEC_GSS',
+  authenticated_client: 'Auth Client', malicious_server: 'Malicious Server',
+  local_user: 'Local User', local_privileged: 'Local Privileged',
+};
 const exclusionReasons = {
   worktree_dirty: '계측 대상 파일에 커밋되지 않은 변경이 있습니다.',
   scope_mismatch: '계측 범위가 기준 배치와 다릅니다.',
@@ -227,6 +232,9 @@ function renderFindings(data) {
   const reportHead = node('div', 'impact-header-cell', '취약점 보고');
   reportHead.setAttribute('role', 'columnheader');
   tableHead.append(reportHead);
+  const accessHead = node('div', 'impact-header-cell', '접근 조건');
+  accessHead.setAttribute('role', 'columnheader');
+  tableHead.append(accessHead);
   for (const [, label] of impactTypes) {
     const cell = node('div', 'impact-header-cell', label);
     cell.setAttribute('role', 'columnheader');
@@ -244,7 +252,6 @@ function renderFindings(data) {
     title.addEventListener('click', () => detail(finding.event_id).catch(showError));
     const status = finding.evidence_active ? finding.hypothesis_status : 'stale';
     head.append(title, node('span', `badge ${status}`, finding.evidence_active ? statuses[status] || status : '근거 정정됨'));
-    const summary = node('p', 'finding-summary', finding.summary);
     const actions = node('div', 'finding-actions');
     const poc = node('button', 'evidence-button', 'PoC 보기');
     poc.type = 'button';
@@ -265,8 +272,19 @@ function renderFindings(data) {
     source.type = 'button';
     source.addEventListener('click', () => detail(finding.event_id).catch(showError));
     actions.append(poc, kasanButton, hypothesis, source);
-    report.append(head, summary, actions);
+    report.append(head, actions);
     row.append(report);
+    const access = node('div', 'access-cell');
+    access.setAttribute('role', 'cell');
+    const requirements = finding.access_requirements || [];
+    if (requirements.length) {
+      const badges = node('div', 'access-badges');
+      for (const requirement of requirements) badges.append(node('span', 'access-badge', accessRequirementLabels[requirement] || requirement));
+      access.append(badges);
+    } else {
+      access.append(node('span', 'access-unclassified', '미분류'));
+    }
+    row.append(access);
     const verified = new Set(finding.verified_impacts || []);
     for (const [type, label] of impactTypes) {
       const active = verified.has(type);

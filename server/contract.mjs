@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export const evidenceLimits = { poc: 250_000, kasan: 600_000 };
 export const verifiedImpactTypes = ['kasan_read', 'kasan_write', 'controlled_read', 'controlled_write', 'rce', 'lpe', 'info_leak'];
+export const accessRequirementTypes = ['auth_null', 'auth_unix', 'rpcsec_gss', 'authenticated_client', 'malicious_server', 'local_user', 'local_privileged'];
 const hasKorean = value => typeof value === 'string' && /[가-힣]/u.test(value);
 
 export class HttpError extends Error {
@@ -87,8 +88,8 @@ export function validateEvent(input) {
   if (data.kind === 'finding') {
     required(data.finding_of, 'finding_of', 32);
     required(data.impact, 'impact', 1000);
-    if (data.summary != null && (!hasKorean(required(data.summary, 'summary', 240)))) invalid('취약점 요약은 한국어로 작성해야 합니다');
     if (data.verified_impacts != null && (!Array.isArray(data.verified_impacts) || data.verified_impacts.length > verifiedImpactTypes.length || new Set(data.verified_impacts).size !== data.verified_impacts.length || data.verified_impacts.some(value => !verifiedImpactTypes.includes(value)))) invalid('Invalid verified_impacts');
+    if (data.access_requirements != null && (!Array.isArray(data.access_requirements) || data.access_requirements.length > accessRequirementTypes.length || new Set(data.access_requirements).size !== data.access_requirements.length || data.access_requirements.some(value => !accessRequirementTypes.includes(value)))) invalid('Invalid access_requirements');
     required(data.reproduction_command, 'reproduction_command', 1000);
     const file = required(data.file_path, 'file_path', 300);
     if (file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Invalid file_path');
