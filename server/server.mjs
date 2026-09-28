@@ -4,8 +4,8 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { hash, evidenceLimits, verifiedImpactTypes, accessRequirementTypes, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools } from './contract.mjs';
-export { evidenceLimits, verifiedImpactTypes, accessRequirementTypes, validateEvent, parseLcov, mcpTools } from './contract.mjs';
+import { hash, evidenceLimits, verifiedImpactTypes, accessRequirementTypes, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools, isStandaloneUserspacePoc } from './contract.mjs';
+export { evidenceLimits, verifiedImpactTypes, accessRequirementTypes, validateEvent, parseLcov, mcpTools, isStandaloneUserspacePoc } from './contract.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
@@ -307,10 +307,15 @@ function coverageState(db, versionId, commit) {
   return { latest, observedLatest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes };
 }
 
+function validFindingPoc(event) {
+  const data = readFrontMatter(event.markdown).data;
+  return Boolean(data.poc_sha256 && data.kasan_sha256 && isStandaloneUserspacePoc(data.poc_source, data.reproduction_command));
+}
+
 function hypothesisState(db, event, commit, checks) {
   const current = checks.filter(item => item.repo_commit === commit);
   const refutationCount = new Set(current.filter(item => item.verdict === 'refutes').map(item => item.agent_id)).size;
-  const findingCount = db.prepare("SELECT COUNT(*) AS count FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = f.id)").get(event.hypothesis_id, commit).count;
+  const findingCount = db.prepare("SELECT f.markdown FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = f.id)").all(event.hypothesis_id, commit).filter(validFindingPoc).length;
   let status = 'unverified';
   if (refutationCount >= 2) status = 'retired';
   else if (refutationCount && findingCount) status = 'contested';
@@ -352,7 +357,7 @@ function dashboard(db, requested = {}) {
   const selected = requested.track_id
     ? active?.version_id && active.track_id === requested.track_id ? active : null
     : direct ? { ...direct, track_id: trackFor(db, direct.version_id, direct.repo_commit) } : active?.version_id ? active : versions[0];
-  if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], recent: [], progress: {} };
+  if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], excluded_finding_count: 0, recent: [], progress: {} };
   const { version_id: versionId, repo_commit: commit } = selected;
   const trackId = selected.track_id || null;
   const { latest, observedLatest, excluded, coverageAgents, frequency, agents, files, missingIncludes } = coverageState(db, versionId, commit);
@@ -373,7 +378,9 @@ function dashboard(db, requested = {}) {
   const verifications = attempts.filter(item => item.repo_commit === commit).map(item => ({ event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.verification_of, hypothesis_title: titles.get(item.verification_of) || item.verification_of, verdict: item.verdict, method: item.method, code_refs: readFrontMatter(item.markdown).data.code_refs || [], created_at: item.created_at }));
   const byHypothesis = new Map(hypotheses.map(item => [item.id, item]));
   const activeVerification = new Map(verifications.map(item => [item.event_id, item]));
-  const findings = allEvents.filter(item => item.kind === 'finding' && item.repo_commit === commit && !corrected.has(item.id) && readFrontMatter(item.markdown).data.poc_sha256 && readFrontMatter(item.markdown).data.kasan_sha256).map(item => {
+  const currentFindingEvents = allEvents.filter(item => item.kind === 'finding' && item.repo_commit === commit && !corrected.has(item.id));
+  const validFindingEvents = currentFindingEvents.filter(validFindingPoc);
+  const findings = validFindingEvents.map(item => {
     const data = readFrontMatter(item.markdown).data;
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
@@ -382,11 +389,12 @@ function dashboard(db, requested = {}) {
   const taskMap = new Map();
   for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
   const progress = Object.fromEntries(['todo', 'in_progress', 'blocked', 'done'].map(status => [status, [...taskMap.values()].filter(value => value === status).length]));
-  const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis').slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
+  const validFindingIds = new Set(validFindingEvents.map(event => event.id));
+  const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis' && (event.kind !== 'finding' || validFindingIds.has(event.id))).slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
   return {
     tracks, versions, selected: { track_id: trackId, version_id: versionId, repo_commit: commit },
     metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: observedLatest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
-    agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), coverage_agents: coverageAgents, files, hypotheses, verifications, findings, recent, progress,
+    agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), coverage_agents: coverageAgents, files, hypotheses, verifications, findings, excluded_finding_count: currentFindingEvents.length - validFindingEvents.length, recent, progress,
   };
 }
 
@@ -576,7 +584,7 @@ function callTool(db, agentId, name, args) {
       const { versionId, commit } = selectedVersion(db, args);
       const findings = dashboard(db, { version_id: versionId, repo_commit: commit }).findings;
       for (const item of findings) logExposure(db, agentId, item.hypothesis_id, 'summary');
-      return { findings, note: '근거가 있는 명시적 보고입니다. 가설의 참·거짓이나 취약점 확정 판정은 아닙니다.' };
+      return { findings, note: '깨끗한 대상 소스에서 외부 입력으로 재현한 독립 사용자 공간 C PoC와 KASAN 근거가 있는 보고입니다. 가설의 참·거짓이나 취약점 확정 판정은 아닙니다.' };
     }
     default: invalid('Unknown tool', 404);
   }

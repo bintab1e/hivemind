@@ -20,6 +20,19 @@ export const safeEqual = (a, b) => {
   return left.length === right.length && timingSafeEqual(left, right);
 };
 
+export function userspacePocError(source, command) {
+  if (typeof source !== 'string' || !source.trim()) return 'PoC source is empty';
+  if (/^diff --git |^--- (?:a\/|\S+\.c)|^\+\+\+ (?:b\/|\S+\.c)|^@@ /m.test(source)) return 'PoC는 커널 패치가 아닌 독립 실행형 사용자 공간 C 소스여야 합니다';
+  if (/\b(?:module_init|late_initcall|core_initcall|subsys_initcall|device_initcall|fs_initcall|KUNIT_CASE|EXPORT_SYMBOL(?:_GPL)?)\s*\(/.test(source)) return '커널 initcall, 모듈 또는 KUnit 하네스는 PoC로 등록할 수 없습니다';
+  if (!/\b(?:int|signed|void)\s+main\s*\(/.test(source)) return 'PoC에는 사용자 공간 C 프로그램의 main 함수가 있어야 합니다';
+  if (typeof command !== 'string' || !command.trim()) return 'PoC reproduction command is empty';
+  if (/\bgit\s+apply\b|(?:^|[;&|]\s*)patch\s+(?:-[^\s]+\s+)*/im.test(command)) return '재현 명령에서 커널 패치를 적용할 수 없습니다';
+  if (!/(?:^|[\s;&|])(?:cc|gcc|clang)(?:[\s;&|]|$)/m.test(command)) return '재현 명령은 제출한 C PoC를 컴파일해야 합니다';
+  return null;
+}
+
+export const isStandaloneUserspacePoc = (source, command) => userspacePocError(source, command) === null;
+
 export function readFrontMatter(markdown) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(markdown);
   if (!match) invalid('Markdown needs YAML front matter');
@@ -90,11 +103,13 @@ export function validateEvent(input) {
     required(data.impact, 'impact', 1000);
     if (data.verified_impacts != null && (!Array.isArray(data.verified_impacts) || data.verified_impacts.length > verifiedImpactTypes.length || new Set(data.verified_impacts).size !== data.verified_impacts.length || data.verified_impacts.some(value => !verifiedImpactTypes.includes(value)))) invalid('Invalid verified_impacts');
     if (data.access_requirements != null && (!Array.isArray(data.access_requirements) || data.access_requirements.length > accessRequirementTypes.length || new Set(data.access_requirements).size !== data.access_requirements.length || data.access_requirements.some(value => !accessRequirementTypes.includes(value)))) invalid('Invalid access_requirements');
-    required(data.reproduction_command, 'reproduction_command', 1000);
+    const reproductionCommand = required(data.reproduction_command, 'reproduction_command', 1000);
     const file = required(data.file_path, 'file_path', 300);
     if (file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Invalid file_path');
     if (data.evidence_event_ids != null && (!Array.isArray(data.evidence_event_ids) || data.evidence_event_ids.length > 30 || new Set(data.evidence_event_ids).size !== data.evidence_event_ids.length || data.evidence_event_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id)))) invalid('Invalid evidence_event_ids');
     if (typeof data.poc_source !== 'string' || !data.poc_source.trim() || Buffer.byteLength(data.poc_source) > evidenceLimits.poc || hash(data.poc_source) !== data.poc_sha256) invalid('Invalid PoC source or hash');
+    const pocError = userspacePocError(data.poc_source, reproductionCommand);
+    if (pocError) invalid(pocError);
     if (typeof data.kasan_log !== 'string' || !/^[ \t]*(?:\[[^\]\r\n]{1,40}\][ \t]*)?BUG:[ \t]*KASAN:/im.test(data.kasan_log) || Buffer.byteLength(data.kasan_log) > evidenceLimits.kasan || hash(data.kasan_log) !== data.kasan_sha256) invalid('Invalid KASAN log or hash');
     if (data.verified_impacts?.includes('kasan_read') && !/\bRead of size\b/i.test(data.kasan_log)) invalid('kasan_read requires a matching KASAN report');
     if (data.verified_impacts?.includes('kasan_write') && !/\bWrite of size\b/i.test(data.kasan_log)) invalid('kasan_write requires a matching KASAN report');

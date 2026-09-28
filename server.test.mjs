@@ -82,13 +82,19 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal((await (await fetch(`${url}/api/dashboard?version_id=7.2.5&repo_commit=${commit}`)).json()).findings.length, 0);
   const poc = 'int main(void) { return trigger_boundary(); }\n';
   const kasan = 'BUG: KASAN: slab-out-of-bounds in parse_request\nWrite of size 8 at addr deadbeef\nCall Trace:\n parse_request\n';
-  const findingFields = (ids = []) => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nverified_impacts:\n  - "controlled_write"\naccess_requirements:\n  - "auth_null"\nimpact: "AUTH_NULL 또는 AUTH_UNIX 경계값 입력이 검사를 우회함"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n${ids.length ? `evidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n` : ''}`;
+  const findingFields = (ids = []) => `kind: finding\ntitle: "경계값 우회 취약점 보고"\nfinding_of: "${first.hypothesis_id}"\nfile_path: "src/app.py"\nverified_impacts:\n  - "controlled_write"\naccess_requirements:\n  - "auth_null"\nimpact: "AUTH_NULL 또는 AUTH_UNIX 경계값 입력이 검사를 우회함"\nreproduction_command: "cc -o poc poc.c && ./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n${ids.length ? `evidence_event_ids:\n${ids.map(id => `  - "${id}"`).join('\n')}\n` : ''}`;
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/english-impact.md', findingFields().replace('impact: "AUTH_NULL 또는 AUTH_UNIX 경계값 입력이 검사를 우회함"', 'impact: "Memory corruption"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-poc.md', findingFields().replace(/^poc_source:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/no-kasan.md', findingFields().replace(/^kasan_log:.*\n/m, ''))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-impact-type.md', findingFields().replace('  - "controlled_write"', '  - "possible_rce"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-access-type.md', findingFields().replace('  - "auth_null"', '  - "remote_magic"'))))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/unmatched-kasan-type.md', findingFields().replace('  - "controlled_write"', '  - "kasan_read"'))))[0], 400);
+  const patchPoc = 'diff --git a/src/app.c b/src/app.c\n--- a/src/app.c\n+++ b/src/app.c\n@@ -1 +1 @@\n';
+  const patchFields = findingFields()
+    .replace('reproduction_command: "cc -o poc poc.c && ./poc"', 'reproduction_command: "git apply poc.patch && make"')
+    .replace(`poc_source: ${JSON.stringify(poc)}`, `poc_source: ${JSON.stringify(patchPoc)}`)
+    .replace(`poc_sha256: "${sha(poc)}"`, `poc_sha256: "${sha(patchPoc)}"`);
+  assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/kernel-patch-poc.md', patchFields)))[0], 400);
   assert.equal((await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/bad-finding.md', findingFields(['f'.repeat(64)]))))[0], 422);
   const [findingStatus, finding] = await post('/v1/exchange/events', event('pc4', 'exchange/outbox/pc4/finding.md', findingFields()));
   assert.equal(findingStatus, 200);
@@ -363,7 +369,7 @@ test('PoC and KASAN can be reported directly from an unverified hypothesis', asy
   const hypothesis = await sendEvent('hypothesis', 'kind: hypothesis\ntitle: "직접 검증 가설"\nclaim_key: "direct-test"\nverification_plan: "입력을 실행한다"\npreflight: checked\n');
   const poc = 'int main(void) { return 0; }\n';
   const kasan = 'BUG: KASAN: use-after-free in nfsd4_open\n';
-  const finding = await sendEvent('finding', `kind: finding\ntitle: "직접 재현"\nfinding_of: "${hypothesis.hypothesis_id}"\nfile_path: "fs/nfsd/nfs4proc.c"\nimpact: "메모리 오류"\nreproduction_command: "./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n`);
+  const finding = await sendEvent('finding', `kind: finding\ntitle: "직접 재현"\nfinding_of: "${hypothesis.hypothesis_id}"\nfile_path: "fs/nfsd/nfs4proc.c"\nimpact: "메모리 오류"\nreproduction_command: "cc -o poc poc.c && ./poc"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n`);
   const dashboard = await (await fetch(`${url}/api/dashboard`)).json();
   assert.equal(dashboard.hypotheses[0].status, 'reported');
   assert.equal(dashboard.hypotheses[0].refutation_count, 0);

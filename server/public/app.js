@@ -211,7 +211,8 @@ function renderReviews(data) {
 function renderFindings(data) {
   const selectedId = new URLSearchParams(location.search).get('hypothesis_id');
   const findings = selectedId ? (data.findings || []).filter(item => item.hypothesis_id === selectedId) : data.findings || [];
-  $('finding-count').textContent = `${findings.length}건${selectedId ? ' · 선택한 가설' : ''}`;
+  const excluded = !selectedId && data.excluded_finding_count ? ` · 비독립 PoC ${data.excluded_finding_count}건 제외` : '';
+  $('finding-count').textContent = `${findings.length}건${selectedId ? ' · 선택한 가설' : excluded}`;
   clear($('findings'));
   if (selectedId) {
     const all = node('button', 'source-link', '전체 취약점 보고 보기');
@@ -294,7 +295,7 @@ function renderFindings(data) {
     table.append(row);
   }
   if (findings.length) $('findings').append(table);
-  if (!findings.length) empty($('findings'), '이 버전·코드 기준점에 PoC와 KASAN 로그까지 제출된 취약점 보고가 없습니다.');
+  if (!findings.length) empty($('findings'), '이 버전·코드 기준점에 독립 사용자 공간 C PoC와 KASAN 로그까지 제출된 취약점 보고가 없습니다.');
 }
 
 function showView(view) {
