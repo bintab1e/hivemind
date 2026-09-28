@@ -29,7 +29,8 @@ h2{font-size:18px;letter-spacing:-.025em;margin-bottom:0}
 .tabs button:focus-visible{outline:2px solid #b7f263;outline-offset:-3px}
 .metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
 .coverage-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
-.metric,.panel,.notice,.empty{background:#111b25;border:1px solid #22333d;border-radius:12px}
+#overview-view>.metrics+.grid,#coverage-view>.coverage-metrics{margin-top:16px}
+.metric,.panel,.empty{background:#111b25;border:1px solid #22333d;border-radius:12px}
 .metric{padding:21px 22px;min-height:126px;position:relative;overflow:hidden}
 .metric:before{content:"";position:absolute;width:3px;left:0;top:22px;bottom:22px;background:#344b55;border-radius:2px}
 .metric.accent:before{background:#b7f263}
@@ -39,10 +40,6 @@ h2{font-size:18px;letter-spacing:-.025em;margin-bottom:0}
 .metric.accent .number{color:#b7f263}
 .metric.warn .number{color:#f3b86e}
 .metric .sub{font-size:11px;color:#697f88}
-.notice{display:flex;gap:12px;align-items:start;padding:13px 17px;margin:16px 0 22px;background:#18251f;border-color:#31483b;color:#9eb6a8;font-size:12px;line-height:1.6}
-.notice p{margin:0}
-.notice strong{color:#c5e6b2}
-.notice-icon{border:1px solid #719264;color:#b7f263;border-radius:50%;width:17px;height:17px;display:grid;place-items:center;flex:none;font-size:11px;font-weight:700;margin-top:1px}
 .grid{display:grid;gap:16px}
 .bottom-grid{grid-template-columns:minmax(0,1.25fr) minmax(320px,1fr);margin-top:16px}
 .pagination{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;padding-top:16px;margin-top:auto;border-top:1px solid #273944}

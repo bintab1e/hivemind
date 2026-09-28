@@ -242,6 +242,8 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.match(dashboardHtml, /id="recent" class="recent-list" role="region" aria-label="최근 기록 목록" tabindex="0"/);
   assert.match(dashboardHtml, /id="hypothesis-pagination" class="pagination" aria-label="가설 페이지" hidden/);
   assert.match(dashboardHtml, /id="finding-pagination" class="pagination" aria-label="취약점 보고 페이지" hidden/);
+  assert.doesNotMatch(dashboardHtml, /class="notice(?: |")/);
+  assert.doesNotMatch(dashboardHtml, /notice-icon/);
   const dashboardScript = await fetch(`${url}/app.js`);
   assert.equal(dashboardScript.status, 200);
   const dashboardJs = await dashboardScript.text();
