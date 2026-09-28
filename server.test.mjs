@@ -228,16 +228,24 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal((await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${agentTokens.pc5}` } })).status, 401);
   const dashboardPage = await fetch(`${url}/`);
   assert.equal(dashboardPage.status, 200);
-  assert.match(await dashboardPage.text(), /id="recent" class="recent-list" role="region" aria-label="최근 기록 목록" tabindex="0"/);
+  const dashboardHtml = await dashboardPage.text();
+  assert.match(dashboardHtml, /id="recent" class="recent-list" role="region" aria-label="최근 기록 목록" tabindex="0"/);
+  assert.match(dashboardHtml, /id="hypothesis-pagination" class="pagination" aria-label="가설 페이지" hidden/);
+  assert.match(dashboardHtml, /id="finding-pagination" class="pagination" aria-label="취약점 보고 페이지" hidden/);
   const dashboardScript = await fetch(`${url}/app.js`);
   assert.equal(dashboardScript.status, 200);
-  assert.match(await dashboardScript.text(), /impact-table/);
+  const dashboardJs = await dashboardScript.text();
+  assert.match(dashboardJs, /const pageSize = 10/);
+  assert.match(dashboardJs, /for \(const hypothesis of page\.items\)/);
+  assert.match(dashboardJs, /for \(const finding of page\.items\)/);
+  assert.match(dashboardJs, /impact-table/);
   const dashboardStyle = await fetch(`${url}/style.css`);
   assert.equal(dashboardStyle.status, 200);
   const dashboardCss = await dashboardStyle.text();
   assert.match(dashboardCss, /\.recent-list\{max-height:360px;overflow-y:auto;scrollbar-gutter:stable/);
   assert.match(dashboardCss, /\.impact-result-cell\.verified/);
   assert.match(dashboardCss, /\.access-value/);
+  assert.match(dashboardCss, /\.pagination button\[aria-current="page"\]/);
 
   const activate = (track, version_id, repo_commit) => fetch(`${url}/v1/admin/tracks/${track}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ version_id, repo_commit }) });
   assert.equal((await activate('mainline', '7.2.5', commit)).status, 200);

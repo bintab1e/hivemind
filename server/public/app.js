@@ -22,12 +22,62 @@ const exclusionReasons = {
   file_shape_mismatch: '파일별 계측 가능 줄 구성이 기준 배치와 다릅니다.',
 };
 const exclusionReason = reason => exclusionReasons[reason] || '팀 병합 조건과 다릅니다.';
+const pageSize = 10;
 let refreshSequence = 0;
 let coverageFileCount = 0;
 let coverageAllFileCount = 0;
 let missingIncludeCount = 0;
 let coverageReport = null;
 let reviewData = null;
+
+function pageOf(items, queryKey) {
+  const requested = Number.parseInt(new URLSearchParams(location.search).get(queryKey) || '1', 10);
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  const current = Math.min(Number.isFinite(requested) && requested > 0 ? requested : 1, pages);
+  return { current, pages, items: items.slice((current - 1) * pageSize, current * pageSize) };
+}
+
+function pageTokens(current, pages) {
+  const visible = new Set([1, pages, current - 1, current, current + 1]);
+  const numbered = [...visible].filter(page => page > 0 && page <= pages).sort((a, b) => a - b);
+  const tokens = [];
+  for (const page of numbered) {
+    if (tokens.length && page - tokens.at(-1) > 1) tokens.push('ellipsis');
+    tokens.push(page);
+  }
+  return tokens;
+}
+
+function renderPagination(id, page, onChange) {
+  const pagination = $(id);
+  clear(pagination);
+  pagination.hidden = page.pages <= 1;
+  if (page.pages <= 1) return;
+  const addButton = (label, target, options = {}) => {
+    const button = node('button', options.className || '', label);
+    button.type = 'button';
+    button.disabled = options.disabled || false;
+    button.setAttribute('aria-label', options.ariaLabel || `${target}페이지`);
+    if (options.current) button.setAttribute('aria-current', 'page');
+    button.addEventListener('click', () => onChange(target));
+    pagination.append(button);
+  };
+  addButton('이전', page.current - 1, { disabled: page.current === 1, ariaLabel: '이전 페이지' });
+  for (const token of pageTokens(page.current, page.pages)) {
+    if (token === 'ellipsis') pagination.append(node('span', 'pagination-ellipsis', '…'));
+    else addButton(String(token), token, { current: token === page.current });
+  }
+  addButton('다음', page.current + 1, { disabled: page.current === page.pages, ariaLabel: '다음 페이지' });
+}
+
+function setPage(queryKey, page, renderView, clearSelection = false) {
+  const query = new URLSearchParams(location.search);
+  if (page === 1) query.delete(queryKey);
+  else query.set(queryKey, String(page));
+  if (clearSelection) query.delete('hypothesis_id');
+  history.replaceState(null, '', `?${query}`);
+  renderView(reviewData);
+}
 
 async function detail(id) {
   const response = await fetch(`/api/events/${encodeURIComponent(id)}`);
@@ -142,16 +192,24 @@ function selectHypothesis(id) {
 function renderReviews(data) {
   const search = $('hypothesis-search').value.trim().toLowerCase();
   const hypotheses = data.hypotheses.filter(item => `${item.title} ${item.claim_key || ''} ${item.scope.join(' ')} ${(item.code_refs || []).join(' ')}`.toLowerCase().includes(search));
-  const selectedId = new URLSearchParams(location.search).get('hypothesis_id');
+  const query = new URLSearchParams(location.search);
+  const selectedId = query.get('hypothesis_id');
   const selected = hypotheses.find(item => item.id === selectedId);
   if (selectedId && !selected) {
-    const query = new URLSearchParams(location.search);
     query.delete('hypothesis_id');
     history.replaceState(null, '', `?${query}`);
   }
-  $('hypothesis-count').textContent = search ? `${hypotheses.length}/${data.hypotheses.length}건` : `${data.hypotheses.length}건`;
+  if (selected && !query.has('hypothesis_page')) {
+    const selectedPage = Math.floor(hypotheses.indexOf(selected) / pageSize) + 1;
+    if (selectedPage > 1) {
+      query.set('hypothesis_page', String(selectedPage));
+      history.replaceState(null, '', `?${query}`);
+    }
+  }
+  const page = pageOf(hypotheses, 'hypothesis_page');
+  $('hypothesis-count').textContent = `${search ? `${hypotheses.length}/${data.hypotheses.length}` : data.hypotheses.length}건 · ${page.current}/${page.pages}페이지`;
   clear($('hypotheses'));
-  for (const hypothesis of hypotheses) {
+  for (const hypothesis of page.items) {
     const row = node('div', `hyp-row${hypothesis.id === selected?.id ? ' selected' : ''}`);
     const choose = node('button', 'hyp-select');
     choose.type = 'button';
@@ -179,6 +237,7 @@ function renderReviews(data) {
         const query = new URLSearchParams(location.search);
         query.set('view', 'findings');
         query.set('hypothesis_id', hypothesis.id);
+        query.delete('finding_page');
         history.replaceState(null, '', `?${query}`);
         refresh();
       });
@@ -187,6 +246,7 @@ function renderReviews(data) {
     $('hypotheses').append(row);
   }
   if (!hypotheses.length) empty($('hypotheses'), search ? '검색과 일치하는 가설이 없습니다.' : '등록된 가설이 없습니다.');
+  renderPagination('hypothesis-pagination', page, target => setPage('hypothesis_page', target, renderReviews, true));
 
   $('selected-hypothesis').textContent = selected ? `${selected.id} · ${selected.title}` : '왼쪽에서 가설을 선택하세요.';
   const verifications = selected ? data.verifications.filter(item => item.hypothesis_id === selected.id) : [];
@@ -211,7 +271,8 @@ function renderReviews(data) {
 function renderFindings(data) {
   const selectedId = new URLSearchParams(location.search).get('hypothesis_id');
   const findings = selectedId ? (data.findings || []).filter(item => item.hypothesis_id === selectedId) : data.findings || [];
-  $('finding-count').textContent = `${findings.length}건${selectedId ? ' · 선택한 가설' : ''}`;
+  const page = pageOf(findings, 'finding_page');
+  $('finding-count').textContent = `${findings.length}건${selectedId ? ' · 선택한 가설' : ''} · ${page.current}/${page.pages}페이지`;
   clear($('findings'));
   if (selectedId) {
     const all = node('button', 'source-link', '전체 취약점 보고 보기');
@@ -219,6 +280,7 @@ function renderFindings(data) {
     all.addEventListener('click', () => {
       const query = new URLSearchParams(location.search);
       query.delete('hypothesis_id');
+      query.delete('finding_page');
       history.replaceState(null, '', `?${query}`);
       renderFindings(data);
     });
@@ -241,7 +303,7 @@ function renderFindings(data) {
     tableHead.append(cell);
   }
   table.append(tableHead);
-  for (const finding of findings) {
+  for (const finding of page.items) {
     const row = node('div', 'impact-table-row finding-impact-row');
     row.setAttribute('role', 'row');
     const report = node('div', 'finding-report-cell');
@@ -264,6 +326,7 @@ function renderFindings(data) {
       const query = new URLSearchParams(location.search);
       query.set('view', 'reviews');
       query.set('hypothesis_id', finding.hypothesis_id);
+      query.delete('hypothesis_page');
       history.replaceState(null, '', `?${query}`);
       refresh();
     });
@@ -295,6 +358,7 @@ function renderFindings(data) {
   }
   if (findings.length) $('findings').append(table);
   if (!findings.length) empty($('findings'), '이 버전·코드 기준점에 PoC와 KASAN 로그까지 제출된 취약점 보고가 없습니다.');
+  renderPagination('finding-pagination', page, target => setPage('finding_page', target, renderFindings));
 }
 
 function showView(view) {
@@ -431,6 +495,8 @@ $('version').addEventListener('change', () => {
   query.delete('repo_commit');
   query.delete('agent_id');
   query.delete('hypothesis_id');
+  query.delete('hypothesis_page');
+  query.delete('finding_page');
   history.replaceState(null, '', `?${query}`);
   refresh();
 });
@@ -443,7 +509,12 @@ for (const button of document.querySelectorAll('.tabs button')) button.addEventL
 });
 $('coverage-search').addEventListener('input', filterFiles);
 $('coverage-scope').addEventListener('change', () => { if (coverageReport) renderCoverage(coverageReport); });
-$('hypothesis-search').addEventListener('input', () => { if (reviewData) renderReviews(reviewData); });
+$('hypothesis-search').addEventListener('input', () => {
+  const query = new URLSearchParams(location.search);
+  query.delete('hypothesis_page');
+  history.replaceState(null, '', `?${query}`);
+  if (reviewData) renderReviews(reviewData);
+});
 $('close-detail').addEventListener('click', () => $('detail').close());
 window.addEventListener('popstate', refresh);
 refresh();

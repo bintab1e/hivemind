@@ -40,13 +40,13 @@
         <section class="notice"><span class="notice-icon">i</span><p><strong>가설 상태</strong>는 현재 코드 기준점의 검증과 취약점 보고를 요약합니다. PoC·KASAN 보고나 반박 기록만으로 가설의 참·거짓이 확정되지는 않습니다.</p></section>
         <div class="coverage-controls"><label>가설 검색<input id="hypothesis-search" type="search" placeholder="주장, 파일, 함수 또는 기능" autocomplete="off"></label></div>
         <section class="grid bottom-grid">
-          <article class="panel"><div class="panel-title"><div><p class="eyebrow">HYPOTHESES</p><h2>가설</h2></div><span id="hypothesis-count" class="minor"></span></div><div id="hypotheses"></div></article>
+          <article class="panel"><div class="panel-title"><div><p class="eyebrow">HYPOTHESES</p><h2>가설</h2></div><span id="hypothesis-count" class="minor"></span></div><div id="hypotheses"></div><nav id="hypothesis-pagination" class="pagination" aria-label="가설 페이지" hidden></nav></article>
           <article class="panel"><div class="panel-title"><div><p class="eyebrow">VERIFICATIONS</p><h2>검증 기록</h2></div><span id="verification-count" class="minor"></span></div><p id="selected-hypothesis" class="selected-context"></p><div id="verifications"></div></article>
         </section>
       </div>
       <div id="findings-view" hidden>
         <section class="notice"><span class="notice-icon">i</span><p><strong>영향 검증 표</strong>는 PoC·KASAN 또는 보고된 실제 결과로 확인된 항목만 강조합니다. 접근 조건은 복수로 표시할 수 있으며, 가능성만 언급한 영향은 강조하지 않습니다.</p></section>
-        <article class="panel"><div class="panel-title"><div><p class="eyebrow">FINDINGS</p><h2>취약점 보고</h2></div><span id="finding-count" class="minor"></span></div><div id="findings"></div></article>
+        <article class="panel"><div class="panel-title"><div><p class="eyebrow">FINDINGS</p><h2>취약점 보고</h2></div><span id="finding-count" class="minor"></span></div><div id="findings"></div><nav id="finding-pagination" class="pagination" aria-label="취약점 보고 페이지" hidden></nav></article>
       </div>
       <div id="coverage-view" hidden>
         <article class="panel agent-coverage-panel"><div class="panel-title"><div><p class="eyebrow">AGENT COVERAGE</p><h2>에이전트별 코드 열람률</h2></div><span class="minor">전체 수집 범위 기준</span></div><div id="coverage-agents" class="coverage-agents"></div></article>
