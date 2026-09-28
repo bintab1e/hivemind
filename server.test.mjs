@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { gzipSync } from 'node:zlib';
 import test from 'node:test';
 import { startServer } from './server/server.mjs';
+import { userspacePocError } from './server/contract.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40);
@@ -282,10 +283,10 @@ test('coverage exclusions report the exact failed merge condition', async t => {
     assert.equal(response.status, 201);
     tokens[agent] = (await response.json()).token;
   }
-  const batch = (agent, { clean = true, scope = 'shared-scope', eligible = [10, 20], generatedAt = stamp } = {}) => {
+  const batch = (agent, { clean = true, scope = 'shared-scope', eligible = [10, 20], generatedAt = stamp, taskStatus = 'done' } = {}) => {
     const lcov = `TN:\nSF:/repo/src/app.py\n${eligible.map(line => `DA:${line},${line === 10 ? 1 : 0}`).join('\n')}\nLF:${eligible.length}\nLH:1\nend_of_record\n`;
     const coverage_json = '{}';
-    const progress_md = `---\nschema_version: 1\nversion_id: 7.2.5\nrepo_commit: ${commit}\nupdated_at: "${stamp}"\n---\n`;
+    const progress_md = `---\nschema_version: 1\nversion_id: 7.2.5\nrepo_commit: ${commit}\nupdated_at: "${stamp}"\n---\n\n| task_id | status |\n| --- | --- |\n| T-${agent} | ${taskStatus} |\n`;
     const hashes = { 'agentcov.info': sha(lcov), 'coverage.json': sha(coverage_json), 'progress.md': sha(progress_md) };
     const coverage_scope_hash = sha(scope);
     const batch_id = sha(['7.2.5', agent, commit, coverage_scope_hash, String(clean), generatedAt, ...Object.values(hashes)].join('\0'));
@@ -300,7 +301,7 @@ test('coverage exclusions report the exact failed merge condition', async t => {
   await upload(batch('pc3', { scope: 'different-scope' }));
   await upload(batch('pc4', { eligible: [10, 20, 30] }));
   await upload(batch('pc5'));
-  await upload(batch('pc5', { clean: false, scope: 'temporary-dirty-scope', generatedAt: '2026-09-23T01:00:01Z' }));
+  await upload(batch('pc5', { clean: false, scope: 'temporary-dirty-scope', generatedAt: '2026-09-23T01:00:01Z', taskStatus: 'in_progress' }));
   const dashboard = await (await fetch(`${url}/api/dashboard`)).json();
   assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.included_in_team, agent.exclusion_reason]), [
     ['pc1', true, null],
@@ -315,6 +316,7 @@ test('coverage exclusions report the exact failed merge condition', async t => {
     latest_batch_exclusion_reason: 'worktree_dirty',
   });
   assert.deepEqual(dashboard.metrics.excluded_agents, ['pc2', 'pc3', 'pc4']);
+  assert.deepEqual(dashboard.progress, { todo: 0, in_progress: 1, blocked: 0, done: 4 });
   const detail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc2`)).json();
   assert.deepEqual([detail.included_in_team, detail.exclusion_reason], [false, 'worktree_dirty']);
   const fallbackDetail = await (await fetch(`${url}/api/coverage?version_id=7.2.5&repo_commit=${commit}&agent_id=pc5`)).json();
@@ -329,6 +331,7 @@ test('gzip telemetry accepts detailed coverage above the legacy 10 MB limit', as
   const token = (await created.json()).token;
   const health = await (await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${token}` } })).json();
   assert(health.telemetry.content_encodings.includes('gzip'));
+  assert.equal(health.exchange.finding_revisions, true);
 
   const lcov = 'TN:\nSF:src/app.py\nDA:1,1\nLF:1\nLH:1\nend_of_record\n';
   const coverage_json = JSON.stringify({ files: {}, padding: 'x'.repeat(10_000_000) });
@@ -375,4 +378,25 @@ test('PoC and KASAN can be reported directly from an unverified hypothesis', asy
   assert.equal(dashboard.hypotheses[0].refutation_count, 0);
   assert.deepEqual(dashboard.findings[0].evidence_event_ids, []);
   assert.equal(await (await fetch(`${url}/api/events/${finding.event_id}/kasan`)).text(), kasan);
+
+  const revisedPoc = 'int main(void) { return 2; }\n';
+  const revised = await sendEvent('finding-revision', `kind: finding\ntitle: "수정된 직접 재현"\nfinding_of: "${hypothesis.hypothesis_id}"\ncorrects_event_id: "${finding.event_id}"\nfile_path: "fs/nfsd/nfs4proc.c"\nimpact: "수정된 PoC에서 메모리 오류를 재확인함"\nreproduction_command: "/usr/bin/gcc -o poc poc.c && ./poc"\npoc_source: ${JSON.stringify(revisedPoc)}\npoc_sha256: "${sha(revisedPoc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\n`);
+  const revisedDashboard = await (await fetch(`${url}/api/dashboard`)).json();
+  assert.deepEqual(revisedDashboard.findings.map(item => [item.event_id, item.title]), [[revised.event_id, '수정된 직접 재현']]);
+  assert.equal(revisedDashboard.hypotheses[0].finding_count, 1);
+  assert.equal(await (await fetch(`${url}/api/events/${finding.event_id}/poc`)).text(), poc);
+  assert.equal(await (await fetch(`${url}/api/events/${revised.event_id}/poc`)).text(), revisedPoc);
+  assert.match((await (await fetch(`${url}/api/events/${revised.event_id}`)).json()).markdown, /코드와 재현 결과를 확인함/);
+});
+
+test('standalone PoC validation accepts common compiler and build-tool forms', () => {
+  const source = 'int main(void) { return 0; }\n';
+  for (const command of [
+    '/usr/bin/gcc -o poc poc.c && ./poc',
+    'x86_64-linux-gnu-gcc -o poc poc.c && ./poc',
+    'CC=clang make poc && ./poc',
+    'cmake --build build && ./build/poc',
+    'ninja -C build poc && ./build/poc',
+  ]) assert.equal(userspacePocError(source, command), null, command);
+  assert.match(userspacePocError(source, './poc'), /컴파일/);
 });

@@ -122,10 +122,12 @@ function addEvent(db, input, agentId) {
         invalid('Finding evidence must reference active verifications of the same hypothesis and commit', 422);
       }
     }
-    if (data.kind === 'correction') {
-      const target = db.prepare('SELECT version_id, agent_id FROM events WHERE id = ?').get(data.corrects_event_id);
+    if (data.corrects_event_id) {
+      const target = db.prepare('SELECT id, kind, version_id, repo_commit, agent_id, related_hypothesis_id FROM events WHERE id = ?').get(data.corrects_event_id);
       if (!target) invalid('Unknown corrected event', 422);
       if (target.version_id !== data.version_id || target.agent_id !== agentId) invalid('Corrected event must have the same version and author', 422);
+      if (db.prepare('SELECT 1 FROM events WHERE corrects_event_id = ?').get(target.id)) invalid('Corrected event already has a correction or replacement', 409);
+      if (data.kind === 'finding' && (target.kind !== 'finding' || target.repo_commit !== data.repo_commit || target.related_hypothesis_id !== data.finding_of)) invalid('Finding revision must replace a finding for the same hypothesis and commit', 422);
     }
     const trackId = trackFor(db, data.version_id, data.repo_commit);
     const matches = data.kind !== 'hypothesis' ? [] : trackId
@@ -310,7 +312,7 @@ function coverageState(db, versionId, commit) {
 function hypothesisState(db, event, commit, checks) {
   const current = checks.filter(item => item.repo_commit === commit);
   const refutationCount = new Set(current.filter(item => item.verdict === 'refutes').map(item => item.agent_id)).size;
-  const findingCount = db.prepare("SELECT COUNT(*) AS count FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = f.id)").get(event.hypothesis_id, commit).count;
+  const findingCount = db.prepare("SELECT COUNT(*) AS count FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.corrects_event_id = f.id)").get(event.hypothesis_id, commit).count;
   let status = 'unverified';
   if (refutationCount >= 2) status = 'retired';
   else if (refutationCount && findingCount) status = 'contested';
@@ -346,7 +348,7 @@ function findingAccessWithHistory(allEvents, event, data) {
   const direct = findingAccessRequirements(data, event.title);
   if (direct.length) return direct;
   for (const prior of allEvents) {
-    if (prior.kind !== 'finding' || prior.id === event.id || prior.related_hypothesis_id !== event.related_hypothesis_id || prior.received_at >= event.received_at) continue;
+    if (prior.kind !== 'finding' || prior.id === event.id || prior.repo_commit !== event.repo_commit || prior.related_hypothesis_id !== event.related_hypothesis_id || prior.received_at >= event.received_at) continue;
     const inherited = findingAccessRequirements(readFrontMatter(prior.markdown).data, prior.title);
     if (inherited.length) return inherited;
   }
@@ -373,7 +375,7 @@ function dashboard(db, requested = {}) {
   const allEvents = trackId
     ? db.prepare('SELECT e.* FROM events e JOIN track_targets t ON t.version_id = e.version_id AND t.repo_commit = e.repo_commit WHERE t.track_id = ? ORDER BY e.received_at DESC').all(trackId)
     : db.prepare('SELECT * FROM events WHERE version_id = ? ORDER BY received_at DESC').all(versionId);
-  const corrected = new Set(allEvents.filter(e => e.kind === 'correction').map(e => e.corrects_event_id));
+  const corrected = new Set(allEvents.filter(e => e.corrects_event_id).map(e => e.corrects_event_id));
   const attempts = allEvents.filter(e => e.kind === 'verification' && !corrected.has(e.id));
   const hypotheses = allEvents.filter(e => e.kind === 'hypothesis' && !corrected.has(e.id)).map(event => {
     const checks = attempts.filter(item => item.verification_of === event.hypothesis_id);
@@ -391,7 +393,7 @@ function dashboard(db, requested = {}) {
     return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || item.related_hypothesis_id, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || 'stale', file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), created_at: item.created_at };
   });
   const taskMap = new Map();
-  for (const row of [...latest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
+  for (const row of [...observedLatest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
   const progress = Object.fromEntries(['todo', 'in_progress', 'blocked', 'done'].map(status => [status, [...taskMap.values()].filter(value => value === status).length]));
   const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis').slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
   return {
@@ -705,6 +707,7 @@ export async function startServer(options = {}) {
         ok: true,
         agent_id: agentId,
         server_time: now(),
+        exchange: { finding_revisions: true },
         telemetry: { content_encodings: ['identity', 'gzip'], limits: telemetryLimits },
       });
       if (url.pathname === '/mcp' && req.method === 'GET') return send(res, 405, { error: 'SSE stream not supported' });

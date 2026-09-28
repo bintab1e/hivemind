@@ -32,15 +32,15 @@
 | `angle` | 검증 관점. 예: `static-trace`, `runtime-reproduction`, `counterexample` |
 | `created_at` | UTC ISO 8601 시각 |
 
-`verification`은 `verification_of`, `method`, `verdict`, `prior_exposure`(`none`, `claim_only`, `summary`, `full`), `based_on_event_ids`가 필수다. 새 로컬 MCP는 `refutes`와 `inconclusive`를 제공하며, 서버는 기존 클라이언트의 `supports`도 수락하지만 지지 횟수를 보고 조건으로 사용하지 않는다. 본문에는 실제 관찰 또는 반례와 코드 위치·재현 명령·산출물 중 적어도 하나를 근거로 남긴다. `correction`은 `corrects_event_id`로 이전 이벤트를 지목한다. 중간 분석 메모는 서버로 보내지 않는다. 과거에 수락된 `analysis` 기록은 보존하고, 구버전 에이전트가 새로 보낸 기록은 저장하지 않고 폐기 응답한다.
+`verification`은 `verification_of`, `method`, `verdict`, `prior_exposure`(`none`, `claim_only`, `summary`, `full`), `based_on_event_ids`가 필수다. 새 로컬 MCP는 `refutes`와 `inconclusive`를 제공하며, 서버는 기존 클라이언트의 `supports`도 수락하지만 지지 횟수를 보고 조건으로 사용하지 않는다. 본문에는 실제 관찰 또는 반례와 코드 위치·재현 명령·산출물 중 적어도 하나를 근거로 남긴다. `correction`은 `corrects_event_id`로 이전 이벤트를 지목한다. finding 수정본도 같은 필드로 같은 작성자·버전·커밋·가설의 기존 finding을 지목한다. 중간 분석 메모는 서버로 보내지 않는다. 과거에 수락된 `analysis` 기록은 보존하고, 구버전 에이전트가 새로 보낸 기록은 저장하지 않고 폐기 응답한다.
 
-`finding`은 **가설을 깨끗한 대상 소스에서 직접 테스트해 독립 사용자 공간 C PoC와 그 실행의 KASAN 로그**를 얻은 뒤 등록하는 취약점 보고 이벤트다. PoC에는 `main` 함수가 있어야 하며 재현 명령은 C 소스의 컴파일과 실행을 포함해야 한다. 커널 diff, initcall, 모듈, KUnit과 커널 내부 하네스는 분석 근거일 뿐 취약점 PoC가 아니다. `finding_of`(출발 가설 ID), `file_path`(저장소 상대 파일 경로), `code_refs`(정확한 코드 위치), `impact`(영향), `reproduction_command`, `poc_source`, `kasan_log`와 두 원문의 SHA-256이 필수다. 지지 검증 기록은 필요 없다. 기존 검증과 연결하려면 `evidence_event_ids`에 같은 가설·커밋의 활성 검증 ID를 선택적으로 넣을 수 있다. 로컬 MCP의 `queue_finding`은 `poc_path`와 `kasan_path`로 실제 파일을 읽어 Markdown에 원문과 해시를 넣고 즉시 전송한다. 경로는 저장소 또는 에이전트 `home` 안에 있어야 하며, 추적 중인 대상 소스가 수정된 상태에서는 보고를 거절한다. 서버는 새 보고의 연결·해시·KASAN 표시와 PoC 형식을 검사하지만 PoC가 실제로 그 로그를 발생시켰는지는 자동 증명하지 않는다. 반박이 추가되거나 근거가 정정되면 대시보드에 현재 상태가 표시된다. 기존에 저장된 보고는 그대로 표시한다.
+`finding`은 **가설을 깨끗한 대상 소스에서 직접 테스트해 독립 사용자 공간 C PoC와 그 실행의 KASAN 로그**를 얻은 뒤 등록하는 취약점 보고 이벤트다. PoC에는 `main` 함수가 있어야 하며 재현 명령은 C 소스의 컴파일과 실행을 포함해야 한다. 직접 컴파일러 호출뿐 아니라 `make`, `ninja`, `cmake --build`도 허용한다. 커널 diff, initcall, 모듈, KUnit과 커널 내부 하네스는 분석 근거일 뿐 취약점 PoC가 아니다. `finding_of`(출발 가설 ID), `file_path`(저장소 상대 파일 경로), `code_refs`(정확한 코드 위치), `impact`(영향), `reproduction_command`, `poc_source`, `kasan_log`와 두 원문의 SHA-256이 필수다. 지지 검증 기록은 필요 없다. 기존 검증과 연결하려면 `evidence_event_ids`에 같은 가설·커밋의 활성 검증 ID를 선택적으로 넣을 수 있다. 로컬 MCP의 `queue_finding`은 `poc_path`와 `kasan_path`로 실제 파일을 읽어 Markdown에 원문과 해시를 넣고 즉시 전송한다. 경로는 저장소 또는 에이전트 `home` 안에 있어야 하며, 추적 중인 대상 소스가 수정된 상태에서는 보고를 거절한다. 서버는 새 보고의 연결·해시·KASAN 표시와 PoC 형식을 검사하지만 PoC가 실제로 그 로그를 발생시켰는지는 자동 증명하지 않는다. 본문·PoC·KASAN을 고칠 때는 `queue_finding_revision`에 기존 finding의 `event_id`와 수정된 전체 내용을 전달한다. 서버는 새 finding을 먼저 완전히 검증한 뒤 기존 보고를 현재 목록에서 대체하며, 두 이벤트와 증거 원문은 모두 보존한다.
 
 가설은 `verification_plan`과 Markdown 본문을, 검증은 `method`와 Markdown 본문을, 취약점 보고는 `impact`와 Markdown 본문을 한국어로 작성해야 한다. 제목은 영어도 허용한다. 코드 식별자·경로·명령과 PoC·KASAN 원문은 이 언어 규칙의 대상이 아니다.
 
 본문에는 **주장, 확인 방법, 관찰 근거, 미확인 사항**을 분리한다. 근거에는 가능하면 저장소 상대경로와 줄 범위, 명령 출력의 요약, 재현 환경을 넣는다. 서버는 본문을 데이터로 저장하고 Markdown 내 지시문을 실행하지 않는다.
 
-파일은 ACK 이후 불변이다. 동일 `version_id + agent_id + 상대경로`를 다시 보내면 내용 해시가 같을 때 같은 이벤트로 처리하고, 다를 때 `409 immutable_event_changed`를 반환한다. 동기화 프로세스는 수정본을 덮어쓰지 않고 새 `correction` 이벤트를 만들도록 알린다.
+파일은 ACK 이후 불변이다. 동일 `version_id + agent_id + 상대경로`를 다시 보내면 내용 해시가 같을 때 같은 이벤트로 처리하고, 다를 때 `409 immutable_event_changed`를 반환한다. 일반 기록은 새 `correction` 이벤트로 정정하고, finding의 본문·PoC·KASAN은 `corrects_event_id`를 포함한 새 finding으로 교체한다. 기존 이벤트와 증거 API는 감사 이력으로 남는다.
 
 ## 3. 관련 가설과 검증 시도
 
@@ -67,7 +67,7 @@ LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번�
 
 `coverage.json`의 상세 구조는 agentcov 버전에 종속될 수 있다. 로컬 에이전트는 `coverage_prefixes` 아래 파일과 이 파일들이 `#include`하는 헤더만 대상으로 agentcov 보고서를 생성한다. agentcov의 줄별 `lines` 맵은 같은 attribution을 매 줄에 반복하므로 전송본에서 생략하고, 명령·세션·시간·검색 근거를 담은 `read_ranges`와 `search_seen_ranges`를 보존한다. `hivemind_compaction`은 생략된 필드와 재구성 근거를 명시한다. v1의 줄 합산은 LCOV에 의존한다. `search_seen`은 직접 열람률에 합치지 않는다. 서버는 각 에이전트의 최신 묶음을 사용한다. 계측 경로의 작업 트리가 변경됐거나 범위·파일 줄 목록이 다르면 병합에서 제외한다.
 
-`GET /v1/sync/health`의 `telemetry.content_encodings`에 `gzip`이 있으면 에이전트는 telemetry JSON 요청 전체를 gzip으로 압축하고 `Content-Encoding: gzip`으로 보낼 수 있다. manifest의 해시와 `batch_id`는 압축 전 네 파일 원문을 기준으로 계산하므로 동일 배치의 압축·비압축 재전송은 같은 ID를 유지한다. 에이전트는 서버가 이 capability를 공개하지 않으면 기존 비압축 요청을 사용한다. 서버는 압축 요청 8 MB, 해제된 요청 128 MB, `coverage.json` 64 MB를 각각 상한으로 검증한다.
+`GET /v1/sync/health`의 `telemetry.content_encodings`에 `gzip`이 있으면 에이전트는 telemetry JSON 요청 전체를 gzip으로 압축하고 `Content-Encoding: gzip`으로 보낼 수 있다. `exchange.finding_revisions=true`이면 finding 수정본의 원자적 교체를 지원한다. 에이전트는 이 capability가 없는 구버전 서버에 수정본을 보내 중복 보고가 생기지 않도록 제출 전에 확인한다. manifest의 해시와 `batch_id`는 압축 전 네 파일 원문을 기준으로 계산하므로 동일 배치의 압축·비압축 재전송은 같은 ID를 유지한다. 에이전트는 서버가 압축 capability를 공개하지 않으면 기존 비압축 요청을 사용한다. 서버는 압축 요청 8 MB, 해제된 요청 128 MB, `coverage.json` 64 MB를 각각 상한으로 검증한다.
 
 ## 5. 수집 API와 MCP 조회 도구
 
@@ -81,7 +81,7 @@ LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번�
 | MCP `get_team_status` | 버전, 커밋 | 팀 진행·계측 요약 |
 | MCP `get_coverage_gaps` | 버전, 커밋, 경로 필터 | 미열람 파일·줄 범위 |
 | MCP `get_review_gaps` | 버전, 커밋 | 독립 검증이 없거나 결론이 충돌하는 가설 |
-| MCP `queue_finding`, `list_findings` | 가설·파일·PoC·KASAN·영향 보고 또는 버전·커밋 조회 | 즉시 취약점 보고 등록 또는 현재 보고 목록 |
+| MCP `queue_finding`, `queue_finding_revision`, `list_findings` | 가설·파일·PoC·KASAN·영향 보고, 기존 보고 수정본 제출 또는 버전·커밋 조회 | 즉시 취약점 보고 등록·교체 또는 현재 보고 목록 |
 | MCP `list_versions`, `get_event` | 없음 또는 이벤트 ID | 현재 두 트랙과 보관된 버전 목록 또는 이벤트 원문 |
 | `GET /api/dashboard`, `/api/team-status.md` | 선택적 `track_id` | 현재 트랙의 대시보드 JSON 또는 Markdown |
 | `PUT /v1/admin/tracks/rc`, `/mainline` | 관리자 토큰, 버전·커밋 | 해당 트랙의 현재 대상 전환 |

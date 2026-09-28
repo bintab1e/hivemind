@@ -27,7 +27,9 @@ export function userspacePocError(source, command) {
   if (!/\b(?:int|signed|void)\s+main\s*\(/.test(source)) return 'PoC에는 사용자 공간 C 프로그램의 main 함수가 있어야 합니다';
   if (typeof command !== 'string' || !command.trim()) return 'PoC reproduction command is empty';
   if (/\bgit\s+apply\b|(?:^|[;&|]\s*)patch\s+(?:-[^\s]+\s+)*/im.test(command)) return '재현 명령에서 커널 패치를 적용할 수 없습니다';
-  if (!/(?:^|[\s;&|])(?:cc|gcc|clang)(?:[\s;&|]|$)/m.test(command)) return '재현 명령은 제출한 C PoC를 컴파일해야 합니다';
+  const compiler = /(?:^|[\s;&|=])(?:[^\s;&|=]*\/)?(?:[a-z0-9_.+]+-)*(?:cc|gcc|clang)(?:-[a-z0-9_.+-]+)?(?=$|[\s;&|])/im;
+  const buildTool = /(?:^|[\s;&|])(?:[^\s;&|]*\/)?(?:g?make|ninja)(?=$|[\s;&|])|(?:^|[\s;&|])(?:[^\s;&|]*\/)?cmake\s+--build(?=$|[\s;&|])/im;
+  if (!compiler.test(command) && !buildTool.test(command)) return '재현 명령은 제출한 C PoC를 컴파일해야 합니다';
   return null;
 }
 
@@ -115,7 +117,11 @@ export function validateEvent(input) {
     if (data.verified_impacts?.includes('kasan_write') && !/\bWrite of size\b/i.test(data.kasan_log)) invalid('kasan_write requires a matching KASAN report');
     if (!hasKorean(data.impact) || !hasKorean(body)) invalid('취약점 영향과 Markdown 본문은 한국어로 작성해야 합니다');
   }
-  if (data.kind === 'correction') required(data.corrects_event_id, 'corrects_event_id', 64);
+  if (data.corrects_event_id != null) {
+    const corrected = required(data.corrects_event_id, 'corrects_event_id', 64);
+    if (!/^[a-f0-9]{64}$/i.test(corrected) || !['finding', 'correction'].includes(data.kind)) invalid('Invalid corrects_event_id');
+  }
+  if (data.kind === 'correction' && data.corrects_event_id == null) invalid('Invalid corrects_event_id');
   return { agentId, sourcePath, markdown, digest, data };
 }
 
