@@ -6,6 +6,11 @@ const empty = (element, message) => element.append(node('p', 'placeholder', mess
 const statuses = { unverified: '검증 대기', inconclusive: '미결', reported: '취약점 보고', refuted: '반박 1명', retired: '폐기 · 재시도 보류', contested: '취약점 보고·반박 충돌', stale: '커밋 변경' };
 const verdicts = { supports: '지지', refutes: '반박', inconclusive: '미결' };
 const kinds = { hypothesis: '가설', verification: '검증', finding: '취약점 보고', correction: '정정' };
+const impactTypes = [
+  ['kasan_read', 'KASAN Read'], ['kasan_write', 'KASAN Write'],
+  ['controlled_read', 'Controlled Read'], ['controlled_write', 'Controlled Write'],
+  ['rce', 'RCE'], ['lpe', 'LPE'], ['info_leak', 'Info Leak'],
+];
 const exclusionReasons = {
   worktree_dirty: '계측 대상 파일에 커밋되지 않은 변경이 있습니다.',
   scope_mismatch: '계측 범위가 기준 배치와 다릅니다.',
@@ -214,21 +219,32 @@ function renderFindings(data) {
     });
     $('findings').append(all);
   }
+  const table = node('div', 'impact-table');
+  table.setAttribute('role', 'table');
+  table.setAttribute('aria-label', '취약점별 검증된 영향');
+  const tableHead = node('div', 'impact-table-row impact-table-head');
+  tableHead.setAttribute('role', 'row');
+  const reportHead = node('div', 'impact-header-cell', '취약점 보고');
+  reportHead.setAttribute('role', 'columnheader');
+  tableHead.append(reportHead);
+  for (const [, label] of impactTypes) {
+    const cell = node('div', 'impact-header-cell', label);
+    cell.setAttribute('role', 'columnheader');
+    tableHead.append(cell);
+  }
+  table.append(tableHead);
   for (const finding of findings) {
-    const row = node('div', 'finding-row');
+    const row = node('div', 'impact-table-row finding-impact-row');
+    row.setAttribute('role', 'row');
+    const report = node('div', 'finding-report-cell');
+    report.setAttribute('role', 'cell');
     const head = node('div', 'finding-head');
     const title = node('button', 'hyp-title', finding.title);
     title.type = 'button';
     title.addEventListener('click', () => detail(finding.event_id).catch(showError));
     const status = finding.evidence_active ? finding.hypothesis_status : 'stale';
     head.append(title, node('span', `badge ${status}`, finding.evidence_active ? statuses[status] || status : '근거 정정됨'));
-    const impact = node('p', 'finding-impact', finding.impact);
-    const refs = node('div', 'finding-refs');
-    refs.append(node('strong', '', '발견 파일'), node('code', '', finding.file_path), node('strong', '', '코드 위치'));
-    for (const ref of finding.code_refs) refs.append(node('code', '', ref));
-    const meta = node('p', 'finding-meta', `출발 가설 ${finding.hypothesis_id} · ${finding.hypothesis_title} (제안 LLM: ${finding.hypothesis_agent_id || '—'})`);
-    const evidence = node('p', 'finding-meta', `발견·보고 LLM: ${finding.agent_id} · 연결 검증 ${finding.evidence_event_ids.length}건 (${finding.evidence_agents.join(', ') || '없음'})`);
-    const kasan = node('p', 'finding-kasan', finding.kasan_summary);
+    const summary = node('p', 'finding-summary', finding.summary);
     const actions = node('div', 'finding-actions');
     const poc = node('button', 'evidence-button', 'PoC 보기');
     poc.type = 'button';
@@ -249,9 +265,20 @@ function renderFindings(data) {
     source.type = 'button';
     source.addEventListener('click', () => detail(finding.event_id).catch(showError));
     actions.append(poc, kasanButton, hypothesis, source);
-    row.append(head, impact, refs, meta, evidence, kasan, actions);
-    $('findings').append(row);
+    report.append(head, summary, actions);
+    row.append(report);
+    const verified = new Set(finding.verified_impacts || []);
+    for (const [type, label] of impactTypes) {
+      const active = verified.has(type);
+      const cell = node('div', `impact-result-cell${active ? ' verified' : ''}`, active ? '✓' : '—');
+      cell.setAttribute('role', 'cell');
+      cell.setAttribute('aria-label', `${label} ${active ? '검증됨' : '미검증'}`);
+      cell.title = `${label} · ${active ? '검증됨' : '미검증'}`;
+      row.append(cell);
+    }
+    table.append(row);
   }
+  if (findings.length) $('findings').append(table);
   if (!findings.length) empty($('findings'), '이 버전·코드 기준점에 PoC와 KASAN 로그까지 제출된 취약점 보고가 없습니다.');
 }
 

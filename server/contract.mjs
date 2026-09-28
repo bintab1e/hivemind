@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export const evidenceLimits = { poc: 250_000, kasan: 600_000 };
+export const verifiedImpactTypes = ['kasan_read', 'kasan_write', 'controlled_read', 'controlled_write', 'rce', 'lpe', 'info_leak'];
 const hasKorean = value => typeof value === 'string' && /[가-힣]/u.test(value);
 
 export class HttpError extends Error {
@@ -86,12 +87,16 @@ export function validateEvent(input) {
   if (data.kind === 'finding') {
     required(data.finding_of, 'finding_of', 32);
     required(data.impact, 'impact', 1000);
+    if (data.summary != null && (!hasKorean(required(data.summary, 'summary', 240)))) invalid('취약점 요약은 한국어로 작성해야 합니다');
+    if (data.verified_impacts != null && (!Array.isArray(data.verified_impacts) || data.verified_impacts.length > verifiedImpactTypes.length || new Set(data.verified_impacts).size !== data.verified_impacts.length || data.verified_impacts.some(value => !verifiedImpactTypes.includes(value)))) invalid('Invalid verified_impacts');
     required(data.reproduction_command, 'reproduction_command', 1000);
     const file = required(data.file_path, 'file_path', 300);
     if (file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Invalid file_path');
     if (data.evidence_event_ids != null && (!Array.isArray(data.evidence_event_ids) || data.evidence_event_ids.length > 30 || new Set(data.evidence_event_ids).size !== data.evidence_event_ids.length || data.evidence_event_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id)))) invalid('Invalid evidence_event_ids');
     if (typeof data.poc_source !== 'string' || !data.poc_source.trim() || Buffer.byteLength(data.poc_source) > evidenceLimits.poc || hash(data.poc_source) !== data.poc_sha256) invalid('Invalid PoC source or hash');
     if (typeof data.kasan_log !== 'string' || !/^[ \t]*(?:\[[^\]\r\n]{1,40}\][ \t]*)?BUG:[ \t]*KASAN:/im.test(data.kasan_log) || Buffer.byteLength(data.kasan_log) > evidenceLimits.kasan || hash(data.kasan_log) !== data.kasan_sha256) invalid('Invalid KASAN log or hash');
+    if (data.verified_impacts?.includes('kasan_read') && !/\bRead of size\b/i.test(data.kasan_log)) invalid('kasan_read requires a matching KASAN report');
+    if (data.verified_impacts?.includes('kasan_write') && !/\bWrite of size\b/i.test(data.kasan_log)) invalid('kasan_write requires a matching KASAN report');
     if (!hasKorean(data.impact) || !hasKorean(body)) invalid('취약점 영향과 Markdown 본문은 한국어로 작성해야 합니다');
   }
   if (data.kind === 'correction') required(data.corrects_event_id, 'corrects_event_id', 64);
