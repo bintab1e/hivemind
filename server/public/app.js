@@ -29,6 +29,12 @@ let coverageAllFileCount = 0;
 let missingIncludeCount = 0;
 let coverageReport = null;
 let reviewData = null;
+let agentProfiles = new Map();
+
+const agentLabel = agentId => {
+  const profile = agentProfiles.get(agentId);
+  return [agentId, profile?.client_name, profile?.model_id].filter(Boolean).join(' · ');
+};
 
 function pageOf(items, queryKey) {
   const requested = Number.parseInt(new URLSearchParams(location.search).get(queryKey) || '1', 10);
@@ -83,7 +89,7 @@ async function detail(id) {
   const response = await fetch(`/api/events/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error('원본 기록을 가져오지 못했습니다.');
   const item = await response.json();
-  openDetail(`${kinds[item.kind] || item.kind} · ${item.agent_id}`, item.title, item.markdown);
+  openDetail(`${kinds[item.kind] || item.kind} · ${agentLabel(item.agent_id)}`, item.title, item.markdown);
 }
 
 function openDetail(kind, title, content) {
@@ -106,6 +112,7 @@ function metric(label, value, sub, tone = '') {
 }
 
 function render(data) {
+  agentProfiles = new Map((data.agent_profiles || []).map(profile => [profile.agent_id, profile]));
   const selected = data.selected;
   const trackSelect = $('version');
   clear(trackSelect);
@@ -146,7 +153,7 @@ function render(data) {
     const head = node('div', 'agent-head');
     const stats = node('span', 'agent-stats');
     stats.append(node('strong', '', coverage?.read_percent == null ? '—' : `${coverage.read_percent}%`), document.createTextNode(` · ${agent.read_lines.toLocaleString()}/${coverage?.total_lines.toLocaleString() || '—'}줄 · 고유 ${agent.unique_lines.toLocaleString()}줄`));
-    head.append(node('span', 'agent-name', agent.agent_id), stats);
+    head.append(node('span', 'agent-name', agentLabel(agent.agent_id)), stats);
     row.append(head, node('div', 'agent-sub', `마지막 보고 ${date(agent.generated_at)}${agent.last_seen_at ? ` · 최근 서버 통신 ${date(agent.last_seen_at)}` : ''}${coverage?.using_clean_fallback ? ' · 직전 정상 배치 사용' : ''}`));
     $('agents').append(row);
   }
@@ -175,7 +182,7 @@ function render(data) {
     const title = node('button', 'recent-title', event.title);
     title.type = 'button';
     title.addEventListener('click', () => detail(event.id).catch(showError));
-    row.append(title, node('div', 'recent-meta', `${kinds[event.kind] || event.kind} · ${event.agent_id} · ${date(event.received_at)}`));
+    row.append(title, node('div', 'recent-meta', `${kinds[event.kind] || event.kind} · ${agentLabel(event.agent_id)} · ${date(event.received_at)}`));
     $('recent').append(row);
   }
   if (!data.recent.length) empty($('recent'), '아직 기록이 없습니다.');
@@ -224,7 +231,7 @@ function renderReviews(data) {
       stat.append(node('strong', '', count));
       stats.append(stat);
     }
-    left.append(node('span', 'hyp-title', hypothesis.title), stats);
+    left.append(node('span', 'hyp-title', hypothesis.title), node('span', 'hyp-id', `작성 에이전트 · ${agentLabel(hypothesis.agent_id)}`), stats);
     choose.append(left, node('span', `badge ${hypothesis.status}`, statuses[hypothesis.status] || hypothesis.status));
     const source = node('button', 'source-link', '가설 원문 보기');
     source.type = 'button';
@@ -259,7 +266,7 @@ function renderReviews(data) {
     const title = node('button', 'hyp-title', verification.title);
     title.type = 'button';
     title.addEventListener('click', () => detail(verification.event_id).catch(showError));
-    left.append(title, node('div', 'hyp-id', `${verification.agent_id} · ${date(verification.created_at)}`), node('div', 'verification-method', `${verification.method} · ${(verification.code_refs || []).join(', ')}`));
+    left.append(title, node('div', 'hyp-id', `${agentLabel(verification.agent_id)} · ${date(verification.created_at)}`), node('div', 'verification-method', `${verification.method} · ${(verification.code_refs || []).join(', ')}`));
     top.append(left, node('span', `badge ${verification.verdict}`, verdicts[verification.verdict] || verification.verdict));
     row.append(top);
     $('verifications').append(row);
@@ -334,7 +341,7 @@ function renderFindings(data) {
     source.type = 'button';
     source.addEventListener('click', () => detail(finding.event_id).catch(showError));
     actions.append(poc, kasanButton, hypothesis, source);
-    report.append(head, actions);
+    report.append(head, node('div', 'finding-meta', `보고 에이전트 · ${agentLabel(finding.agent_id)} · ${date(finding.created_at)}`), actions);
     row.append(report);
     const access = node('div', 'access-cell');
     access.setAttribute('role', 'cell');
@@ -384,7 +391,7 @@ function renderAgentChoices(data, selectedAgent) {
     fill.style.width = `${agent.read_percent || 0}%`;
     bar.append(fill);
     button.append(
-      node('span', 'choice-name', agent.agent_id || '전체 합집합'),
+      node('span', 'choice-name', agent.agent_id ? agentLabel(agent.agent_id) : '전체 합집합'),
       node('strong', '', agent.read_percent == null ? '—' : `${agent.read_percent}%`),
       node('span', 'choice-meta', `${agent.read_lines.toLocaleString()}/${agent.total_lines.toLocaleString()}줄 관측${agent.included_in_team ? '' : ' · 병합 제외'}${agent.using_clean_fallback ? ' · 직전 정상 배치' : ''}`),
       bar,

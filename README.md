@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/bintab1e/hivemind-server/main/serve
 bash ~/Desktop/workspace/hivemind-server/server/manage.sh setup
 ```
 
-분석 PC를 연결할 때만 `bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add jinpyo rc`를 실행하세요. `jinpyo`를 지정한 에이전트 이름으로 바꾸면 **해당 에이전트용 토큰**과 **분석 PC 설치 명령**이 출력됩니다. 토큰은 그 분석 PC에만 전달합니다. 대상 갱신은 `.../manage.sh track rc` 또는 `.../manage.sh track mainline`입니다.
+분석 PC를 연결할 때만 `bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add jinpyo rc codex gpt-5.6-sol`을 실행하세요. `jinpyo`, 실행 도구와 모델명을 해당 에이전트에 맞게 바꾸면 **해당 에이전트용 토큰**과 **분석 PC 설치 명령**이 출력됩니다. 기존 에이전트에는 `.../manage.sh agent label jinpyo codex gpt-5.6-sol`로 표시 정보를 한 번 지정할 수 있습니다. 토큰은 그 분석 PC에만 전달합니다. 대상 갱신은 `.../manage.sh track rc` 또는 `.../manage.sh track mainline`입니다.
 
 서버 설치기가 대시보드 주소와 `guest` 계정의 비밀번호도 출력합니다. 상태 확인은 `curl -fsS http://127.0.0.1:8765/healthz`, 로그 확인은 `journalctl --user -u hivemind -f`입니다.
 
@@ -36,6 +36,6 @@ LLM이 가설을 등록하면 직접 테스트할 수 있습니다. 깨끗한 �
 
 중간 분석 메모는 서버에 저장하지 않습니다. 가설·검증·취약점 보고의 제목은 영어를 허용하지만 검증 계획·방법·영향과 Markdown 본문은 한국어로 작성합니다. 코드·경로·명령, PoC와 KASAN 로그 원문은 그대로 보존합니다.
 
-커버리지는 agentcov가 관측한 **코드 열람률**입니다. 가설의 참·거짓이나 분석 완료율을 뜻하지 않습니다.
+커버리지는 agentcov가 관측한 **코드 열람률**입니다. `agent_id`별 수치는 별도로 보존되고 대시보드에서 실행 도구·모델명과 함께 선택할 수 있습니다. 같은 PC에서 모델을 바꿀 때는 새 `agent_id`와 별도 체크아웃을 사용해야 과거 agentcov 열람 이력이 섞이지 않습니다. 가설의 참·거짓이나 분석 완료율을 뜻하지 않습니다.
 
 개발 확인: `node --test server.test.mjs server/manage.test.mjs`. 자세한 서버 명령은 [server/README.md](server/README.md), 입력 형식은 [데이터 계약](docs/data-contract.md)을 보세요.

@@ -34,11 +34,13 @@ test('management command issues a reusable token and an agent install command', 
   const active = await fetch(`${url}/v1/admin/tracks/rc`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version_id: '7.3-rc4', repo_commit: 'a'.repeat(40) }) });
   assert.equal(active.status, 200);
   const env = { ...process.env, HIVEMIND_DATA_DIR: dataDir, HIVEMIND_PORT: new URL(url).port, HIVEMIND_SERVER_URL: 'http://192.168.1.188:8765' };
-  const command = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'manage.mjs'), 'agent', 'add', 'jinpyo', 'rc'];
+  const command = [path.join(path.dirname(fileURLToPath(import.meta.url)), 'manage.mjs'), 'agent', 'add', 'jinpyo', 'rc', 'codex', 'gpt-5.6-sol'];
   const first = await run(process.execPath, command, { env });
   const token = readFileSync(path.join(temp, 'agents', 'jinpyo.token'), 'utf8').trim();
   assert.match(token, /^[a-f0-9]{64}$/);
   assert(first.stdout.includes('bash -s -- http://192.168.1.188:8765 rc'));
+  const agents = await (await fetch(`${url}/v1/admin/agents`, { headers: { Authorization: `Bearer ${adminToken}` } })).json();
+  assert.deepEqual(agents.agents.find(agent => agent.agent_id === 'jinpyo'), { agent_id: 'jinpyo', client_name: 'codex', model_id: 'gpt-5.6-sol', created_at: agents.agents[0].created_at, last_seen_at: null });
   const second = await run(process.execPath, command, { env });
   assert(second.stdout.includes(token));
 });

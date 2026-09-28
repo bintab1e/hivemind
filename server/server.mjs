@@ -44,7 +44,8 @@ function openDatabase(file) {
     CREATE INDEX IF NOT EXISTS batches_version ON batches(version_id, repo_commit, generated_at);
     CREATE TABLE IF NOT EXISTS agents (
       agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL, last_seen_at TEXT
+      created_at TEXT NOT NULL, last_seen_at TEXT,
+      client_name TEXT, model_id TEXT
     );
     CREATE TABLE IF NOT EXISTS exposures (
       agent_id TEXT NOT NULL, hypothesis_id TEXT NOT NULL,
@@ -62,19 +63,40 @@ function openDatabase(file) {
   if (!batchColumns.has('manifest_json')) db.exec('ALTER TABLE batches ADD COLUMN manifest_json TEXT');
   if (!batchColumns.has('lcov')) db.exec('ALTER TABLE batches ADD COLUMN lcov TEXT');
   if (!batchColumns.has('missing_includes')) db.exec('ALTER TABLE batches ADD COLUMN missing_includes INTEGER');
+  const agentColumns = new Set(db.prepare('PRAGMA table_info(agents)').all().map(column => column.name));
+  if (!agentColumns.has('client_name')) db.exec('ALTER TABLE agents ADD COLUMN client_name TEXT');
+  if (!agentColumns.has('model_id')) db.exec('ALTER TABLE agents ADD COLUMN model_id TEXT');
   return db;
 }
 
-function issueAgentToken(db, agentId, rotate = false) {
+function readAgentProfile(input, mandatory = false) {
+  const hasClient = input?.client_name != null;
+  const hasModel = input?.model_id != null;
+  if (hasClient !== hasModel || mandatory && !hasClient) invalid('client_name and model_id are required together');
+  if (!hasClient) return { client_name: null, model_id: null };
+  return { client_name: required(input.client_name, 'client_name', 64), model_id: required(input.model_id, 'model_id', 100) };
+}
+
+function issueAgentToken(db, agentId, rotate = false, profileInput = null) {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(agentId)) invalid('Invalid agent_id');
   const token = randomBytes(32).toString('hex');
   if (rotate) {
     if (!db.prepare('UPDATE agents SET token_hash = ? WHERE agent_id = ?').run(hash(token), agentId).changes) invalid('Unknown agent', 404);
   } else {
     if (db.prepare('SELECT 1 FROM agents WHERE agent_id = ?').get(agentId)) invalid('Agent already exists', 409);
-    db.prepare('INSERT INTO agents VALUES (?, ?, ?, NULL)').run(agentId, hash(token), now());
+    const profile = readAgentProfile(profileInput);
+    db.prepare('INSERT INTO agents (agent_id, token_hash, created_at, last_seen_at, client_name, model_id) VALUES (?, ?, ?, NULL, ?, ?)').run(agentId, hash(token), now(), profile.client_name, profile.model_id);
   }
   return { agent_id: agentId, token };
+}
+
+function setAgentProfile(db, agentId, input) {
+  const profile = readAgentProfile(input, true);
+  const current = db.prepare('SELECT client_name, model_id FROM agents WHERE agent_id = ?').get(agentId);
+  if (!current) invalid('Unknown agent', 404);
+  if (current.client_name && (current.client_name !== profile.client_name || current.model_id !== profile.model_id)) invalid('Agent profile is immutable; create a new agent_id for a different client or model', 409);
+  db.prepare('UPDATE agents SET client_name = ?, model_id = ? WHERE agent_id = ?').run(profile.client_name, profile.model_id, agentId);
+  return { agent_id: agentId, ...profile };
 }
 
 function bearer(req) {
@@ -365,7 +387,8 @@ function dashboard(db, requested = {}) {
   const selected = requested.track_id
     ? active?.version_id && active.track_id === requested.track_id ? active : null
     : direct ? { ...direct, track_id: trackFor(db, direct.version_id, direct.repo_commit) } : active?.version_id ? active : versions[0];
-  if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], recent: [], progress: {} };
+  const agentProfiles = db.prepare('SELECT agent_id, client_name, model_id FROM agents ORDER BY agent_id').all();
+  if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], agent_profiles: agentProfiles, coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], recent: [], progress: {} };
   const { version_id: versionId, repo_commit: commit } = selected;
   const trackId = selected.track_id || null;
   const { latest, observedLatest, excluded, coverageAgents, frequency, agents, files, missingIncludes } = coverageState(db, versionId, commit);
@@ -399,7 +422,7 @@ function dashboard(db, requested = {}) {
   return {
     tracks, versions, selected: { track_id: trackId, version_id: versionId, repo_commit: commit },
     metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: observedLatest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
-    agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), coverage_agents: coverageAgents, files, hypotheses, verifications, findings, recent, progress,
+    agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), agent_profiles: agentProfiles, coverage_agents: coverageAgents, files, hypotheses, verifications, findings, recent, progress,
   };
 }
 
@@ -482,17 +505,22 @@ function teamStatusMarkdown(report) {
   if (!report.selected) return '# knfsd 팀 현황\n\n아직 수집된 자료가 없습니다.\n';
   const safe = value => String(value).replaceAll('|', '\\|').replace(/\r?\n/g, ' ');
   const { metrics, selected, agents, hypotheses, findings, progress } = report;
+  const profiles = new Map((report.agent_profiles || []).map(profile => [profile.agent_id, profile]));
+  const agentLabel = agentId => {
+    const profile = profiles.get(agentId);
+    return [agentId, profile?.client_name, profile?.model_id].filter(Boolean).join(' · ');
+  };
   return [
     '# knfsd 팀 현황', '', `- 버전: ${selected.version_id}`, `- 코드 기준점: ${selected.repo_commit}`,
     `- 관측 열람: ${metrics.read_lines}/${metrics.total_lines}줄 (${metrics.read_percent == null ? '계산 불가' : `${metrics.read_percent}%`})`,
     `- 중복 열람: ${metrics.overlap_lines}줄`, `- 병합 제외 에이전트: ${metrics.excluded_agents.join(', ') || '없음'}`,
     `- 작업: 완료 ${progress.done}, 진행 ${progress.in_progress}, 차단 ${progress.blocked}, 대기 ${progress.todo}`,
     '', '## 에이전트', '', '| 에이전트 | 열람 줄 | 고유 기여 줄 |', '| --- | ---: | ---: |',
-    ...agents.map(item => `| ${safe(item.agent_id)} | ${item.read_lines} | ${item.unique_lines} |`),
-    '', '## 가설', '', '| ID | 주장 | 잠정 상태 | 반박 에이전트 |', '| --- | --- | --- | ---: |',
-    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(item.status === 'reported' ? '취약점 보고' : item.status)} | ${item.refutation_count} |`),
+    ...agents.map(item => `| ${safe(agentLabel(item.agent_id))} | ${item.read_lines} | ${item.unique_lines} |`),
+    '', '## 가설', '', '| ID | 주장 | 작성 에이전트 | 잠정 상태 | 반박 에이전트 |', '| --- | --- | --- | --- | ---: |',
+    ...hypotheses.map(item => `| ${safe(item.id)} | ${safe(item.title)} | ${safe(agentLabel(item.agent_id))} | ${safe(item.status === 'reported' ? '취약점 보고' : item.status)} | ${item.refutation_count} |`),
     '', '## 취약점 보고', '', '| 보고 | 연결 가설 | 보고 에이전트 | 코드 위치 |', '| --- | --- | --- | --- |',
-    ...findings.map(item => `| ${safe(item.title)} | ${safe(item.hypothesis_id)} | ${safe(item.agent_id)} | ${safe(item.file_path)} |`),
+    ...findings.map(item => `| ${safe(item.title)} | ${safe(item.hypothesis_id)} | ${safe(agentLabel(item.agent_id))} | ${safe(item.file_path)} |`),
     '', 'agentcov 열람률은 관측된 코드 노출 범위이며 코드 이해도·검토 완료율·가설의 참거짓이 아닙니다.', '',
   ].join('\n');
 }
@@ -681,16 +709,17 @@ export async function startServer(options = {}) {
           return send(res, 401, { error: 'Dashboard login required' });
         }
       }
-      if (url.pathname === '/v1/admin/agents' && req.method === 'GET') return send(res, 200, { agents: db.prepare('SELECT agent_id, created_at, last_seen_at FROM agents ORDER BY agent_id').all() });
+      if (url.pathname === '/v1/admin/agents' && req.method === 'GET') return send(res, 200, { agents: db.prepare('SELECT agent_id, client_name, model_id, created_at, last_seen_at FROM agents ORDER BY agent_id').all() });
       if (url.pathname === '/v1/admin/tracks' && req.method === 'GET') return send(res, 200, { tracks: trackRows(db) });
       const trackMatch = /^\/v1\/admin\/tracks\/(rc|mainline)$/.exec(url.pathname);
       if (trackMatch && req.method === 'PUT') return send(res, 200, setActiveTrack(db, trackMatch[1], await readJson(req)));
       if (url.pathname === '/v1/admin/agents' && req.method === 'POST') {
         const input = await readJson(req);
-        return send(res, 201, issueAgentToken(db, required(input?.agent_id, 'agent_id', 64)));
+        return send(res, 201, issueAgentToken(db, required(input?.agent_id, 'agent_id', 64), false, input));
       }
       const agentMatch = /^\/v1\/admin\/agents\/([a-z0-9][a-z0-9_-]*)$/i.exec(url.pathname);
       if (agentMatch && req.method === 'PUT') return send(res, 200, issueAgentToken(db, agentMatch[1], true));
+      if (agentMatch && req.method === 'PATCH') return send(res, 200, setAgentProfile(db, agentMatch[1], await readJson(req)));
       if (agentMatch && req.method === 'DELETE') {
         if (!db.prepare('DELETE FROM agents WHERE agent_id = ?').run(agentMatch[1]).changes) invalid('Unknown agent', 404);
         return send(res, 200, { agent_id: agentMatch[1], revoked: true });
@@ -706,6 +735,7 @@ export async function startServer(options = {}) {
       if (req.method === 'GET' && url.pathname === '/v1/sync/health') return send(res, 200, {
         ok: true,
         agent_id: agentId,
+        agent_profile: db.prepare('SELECT client_name, model_id FROM agents WHERE agent_id = ?').get(agentId),
         server_time: now(),
         exchange: { finding_revisions: true },
         telemetry: { content_encodings: ['identity', 'gzip'], limits: telemetryLimits },

@@ -9,7 +9,7 @@
 - `version_id`: 릴리스/후보 버전 문자열. 예: `7.2.5`, `7.2.5-rc1`. 다섯 PC에서 같은 버전에는 같은 값을 사용한다.
 - `repo_commit`: `git rev-parse HEAD`의 전체 커밋 해시. 같은 버전명이라도 커밋이 다르면 줄 단위 수치를 섞지 않는다.
 - 현재 서버는 업로드된 버전명과 커밋을 저장하며 Git 태그와의 일치 여부까지 검사하지 않는다. 동기화 에이전트는 실제 체크아웃에서 두 값을 생성해야 한다.
-- `agent_id`: PC/LLM 조합마다 고유한 ID. 예: `pc01-codex`, `pc02-claude`.
+- `agent_id`: PC/실행 도구/모델 조합마다 고유한 ID. 예: `pc01-codex`, `pc02-claude`. 등록 시 선택적으로 `client_name`과 `model_id`를 함께 지정하며 reasoning 수준은 저장하지 않는다. 사용 이력이 생긴 에이전트의 실행 도구나 모델이 바뀌면 기존 프로필을 고치지 않고 새 `agent_id`를 만든다.
 - 서버 관리자는 `server/runtime/server/api-token.txt`의 관리자 토큰으로 `POST /v1/admin/agents`를 호출해 에이전트별 Bearer 토큰을 발급한다. 서버 설치 폴더 안에서는 `runtime/server/api-token.txt`다. 업로드와 MCP 조회는 이 토큰에 묶인 `agent_id`로만 가능하다.
 
 ## 2. `exchange/outbox` 이벤트
@@ -63,7 +63,7 @@
 
 `batch_id`는 `version_id`, `agent_id`, `repo_commit`, `coverage_scope_hash`, `worktree_clean`, `generated_at`, 세 파일 해시를 이 순서대로 NUL로 연결한 UTF-8 문자열의 SHA-256이다. 파일 해시 순서는 `agentcov.info`, `coverage.json`, `progress.md`다. `coverage_scope_hash`는 `.agentcov.toml`의 원문과 LCOV에 나온 대상 파일·줄 목록의 해시다. 동일 묶음의 재전송은 서버에서 한 번만 기록한다. 서버는 묶음을 **모두 검증한 뒤 한 번에** 반영한다. 일부 파일 누락이나 해시 오류가 있으면 이전 정상 묶음을 유지한다.
 
-LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번호`다. `SF`가 절대경로라면 `repo_root` 아래 경로만 상대경로로 변환하고, 바깥 경로는 거절한다. Windows 경로 구분자와 저장소의 대소문자 정책을 정규화한다. 각 에이전트의 `DA` 값이 1인 줄을 집합으로 다룬다. 팀 열람률은 이 집합의 합집합을 동일 범위의 전체 대상 코드 줄 수로 나눈다. 분모에는 대상 파일의 미열람 줄도 포함한다. 다른 버전·커밋·`coverage_scope_hash`는 하나의 퍼센트로 섞지 않는다. v1은 `worktree_clean=true`인 묶음만 팀 수치에 병합하고, 다른 묶음은 개별 수치로만 보여준다.
+LCOV 병합 키는 `version_id + repo_commit + 저장소 상대경로 + 줄 번호`다. `SF`가 절대경로라면 `repo_root` 아래 경로만 상대경로로 변환하고, 바깥 경로는 거절한다. Windows 경로 구분자와 저장소의 대소문자 정책을 정규화한다. 각 에이전트의 `DA` 값이 1인 줄을 집합으로 다루고 `agent_id`별 개별 수치도 보존한다. 팀 열람률은 이 집합의 합집합을 동일 범위의 전체 대상 코드 줄 수로 나눈다. 분모에는 대상 파일의 미열람 줄도 포함한다. 다른 버전·커밋·`coverage_scope_hash`는 하나의 퍼센트로 섞지 않는다. v1은 `worktree_clean=true`인 묶음만 팀 수치에 병합하고, 다른 묶음은 개별 수치로만 보여준다. 같은 체크아웃의 `.agentcov/events.jsonl`을 여러 모델이 공유하면 열람 주체를 구분할 수 없으므로 모델별 에이전트는 별도 체크아웃을 사용한다.
 
 `coverage.json`의 상세 구조는 agentcov 버전에 종속될 수 있다. 로컬 에이전트는 `coverage_prefixes` 아래 파일과 이 파일들이 `#include`하는 헤더만 대상으로 agentcov 보고서를 생성한다. agentcov의 줄별 `lines` 맵은 같은 attribution을 매 줄에 반복하므로 전송본에서 생략하고, 명령·세션·시간·검색 근거를 담은 `read_ranges`와 `search_seen_ranges`를 보존한다. `hivemind_compaction`은 생략된 필드와 재구성 근거를 명시한다. v1의 줄 합산은 LCOV에 의존한다. `search_seen`은 직접 열람률에 합치지 않는다. 서버는 각 에이전트의 최신 묶음을 사용한다. 계측 경로의 작업 트리가 변경됐거나 범위·파일 줄 목록이 다르면 병합에서 제외한다.
 

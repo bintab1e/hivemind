@@ -18,9 +18,10 @@ bash ~/Desktop/workspace/hivemind-server/server/manage.sh status
 추가 에이전트와 릴리스 교체:
 
 ```bash
-bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add jinpyo rc
-bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc02-codex rc
-bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc03-claude mainline
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add jinpyo rc codex gpt-5.6-sol
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc02-codex rc codex MODEL_ID
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent add pc03-claude mainline claude-code MODEL_ID
+bash ~/Desktop/workspace/hivemind-server/server/manage.sh agent label EXISTING_ID codex MODEL_ID
 bash ~/Desktop/workspace/hivemind-server/server/manage.sh track rc
 bash ~/Desktop/workspace/hivemind-server/server/manage.sh track mainline
 bash ~/Desktop/workspace/hivemind-server/server/manage.sh track rc 7.3-rc4

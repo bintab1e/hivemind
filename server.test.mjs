@@ -19,15 +19,24 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-test-'));
   const oldDb = new DatabaseSync(path.join(dataDir, 'hivemind.sqlite3'));
   oldDb.exec('CREATE TABLE batches (id TEXT PRIMARY KEY, agent_id TEXT, version_id TEXT, repo_commit TEXT, scope_hash TEXT, worktree_clean INTEGER, generated_at TEXT, received_at TEXT, files_json TEXT, coverage_json TEXT, progress_md TEXT)');
+  oldDb.exec('CREATE TABLE agents (agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT)');
   oldDb.close();
   const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const agentTokens = {};
   for (const agent of ['pc1', 'pc2', 'pc3', 'pc4', 'pc5']) {
-    const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ agent_id: agent }) });
+    const profile = agent === 'pc1' ? { client_name: 'codex', model_id: 'gpt-5.6-sol' } : {};
+    const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ agent_id: agent, ...profile }) });
     assert.equal(response.status, 201);
     agentTokens[agent] = (await response.json()).token;
   }
+  const pc2Profile = await fetch(`${url}/v1/admin/agents/pc2`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ client_name: 'claude-code', model_id: 'claude-test' }) });
+  assert.equal(pc2Profile.status, 200);
+  assert.deepEqual(await pc2Profile.json(), { agent_id: 'pc2', client_name: 'claude-code', model_id: 'claude-test' });
+  const changedProfile = await fetch(`${url}/v1/admin/agents/pc2`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }, body: JSON.stringify({ client_name: 'codex', model_id: 'another-model' }) });
+  assert.equal(changedProfile.status, 409);
+  const pc1Health = await (await fetch(`${url}/v1/sync/health`, { headers: { Authorization: `Bearer ${agentTokens.pc1}` } })).json();
+  assert.deepEqual(pc1Health.agent_profile, { client_name: 'codex', model_id: 'gpt-5.6-sol' });
   const post = async (endpoint, body, token = agentTokens[body.agent_id || body.manifest?.agent_id]) => {
     const response = await fetch(`${url}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
     return [response.status, await response.json()];
@@ -159,6 +168,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.deepEqual([dashboard.metrics.read_lines, dashboard.metrics.total_lines, dashboard.metrics.overlap_lines], [3, 4, 1]);
   assert.equal(dashboard.metrics.read_percent, 75);
   assert.equal(dashboard.metrics.missing_includes, 2);
+  assert.deepEqual(dashboard.agent_profiles.find(agent => agent.agent_id === 'pc1'), { agent_id: 'pc1', client_name: 'codex', model_id: 'gpt-5.6-sol' });
   assert.deepEqual(dashboard.coverage_agents.map(agent => [agent.agent_id, agent.read_lines, agent.total_lines, agent.read_percent, agent.included_in_team]), [['pc1', 2, 4, 50, true], ['pc2', 2, 4, 50, true]]);
   assert.equal(dashboard.hypotheses.find(item => item.id === first.hypothesis_id).status, 'contested');
   assert.equal(dashboard.findings[0].hypothesis_status, 'contested');
@@ -236,6 +246,8 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   assert.equal(dashboardScript.status, 200);
   const dashboardJs = await dashboardScript.text();
   assert.match(dashboardJs, /const pageSize = 10/);
+  assert.match(dashboardJs, /agentLabel\(hypothesis\.agent_id\)/);
+  assert.match(dashboardJs, /agentLabel\(finding\.agent_id\)/);
   assert.match(dashboardJs, /for \(const hypothesis of page\.items\)/);
   assert.match(dashboardJs, /for \(const finding of page\.items\)/);
   assert.match(dashboardJs, /impact-table/);
