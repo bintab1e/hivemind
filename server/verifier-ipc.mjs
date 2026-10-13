@@ -94,7 +94,8 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null) {
     allowVerifierUser(socketPath, verifierUser);
   } catch (error) {
     await new Promise(resolve => server.close(resolve));
-    fs.unlinkSync(socketPath);
+    try { fs.unlinkSync(socketPath); }
+    catch (cleanupError) { if (cleanupError.code !== 'ENOENT') console.error('Verifier socket cleanup:', cleanupError); }
     throw error;
   }
   server.on('close', () => { try { fs.unlinkSync(socketPath); } catch (error) { if (error.code !== 'ENOENT') console.error('Verifier socket cleanup:', error); } });
