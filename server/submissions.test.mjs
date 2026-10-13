@@ -232,6 +232,37 @@ test('queue reports persisted stages, compatible workers, lease activity and int
   assert.equal(listVerificationQueue(db).active.find(row => row.submission_id === first).phase, 'preparing');
 });
 
+test('queue hides superseded worker sessions while retaining one offline card per kernel', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-worker-sessions-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  const stableCommit = 'b'.repeat(40);
+  const oldRc = '1'.repeat(32);
+  const newRc = '2'.repeat(32);
+  const oldStable = '3'.repeat(32);
+  const newStable = '4'.repeat(32);
+  heartbeatWorker(db, { worker_id: oldRc, target_commit: commit });
+  heartbeatWorker(db, { worker_id: oldStable, target_commit: stableCommit });
+  db.prepare('UPDATE verifier_workers SET last_seen_at = ?').run(new Date(Date.now() - 5 * 60_000).toISOString());
+  heartbeatWorker(db, { worker_id: newRc, target_commit: commit });
+  heartbeatWorker(db, { worker_id: newStable, target_commit: stableCommit });
+
+  let workers = listVerificationQueue(db).workers;
+  assert.deepEqual(new Set(workers.map(row => row.worker_id)), new Set([newRc, newStable]));
+  assert.ok(workers.every(row => row.status === 'idle'));
+
+  db.prepare('UPDATE verifier_workers SET last_seen_at = ? WHERE worker_id = ?')
+    .run(new Date(Date.now() - 2 * 60_000).toISOString(), newStable);
+  workers = listVerificationQueue(db).workers;
+  assert.deepEqual(new Set(workers.map(row => row.worker_id)), new Set([newRc, newStable]));
+  assert.equal(workers.find(row => row.worker_id === newStable).status, 'offline');
+
+  const parallelRc = '5'.repeat(32);
+  heartbeatWorker(db, { worker_id: parallelRc, target_commit: commit });
+  workers = listVerificationQueue(db).workers;
+  assert.deepEqual(new Set(workers.map(row => row.worker_id)), new Set([newRc, parallelRc, newStable]));
+});
+
 test('expired leases, unregistered targets, and unrelated traces cannot approve a submission', t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-gates-'));
   const db = openDatabase(path.join(directory, 'db.sqlite3'));

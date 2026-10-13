@@ -96,7 +96,16 @@ export function listVerificationQueue(db) {
   const onlineCutoff = Date.now() - WORKER_ONLINE_MS;
   const processingIds = new Set(active.map(row => row.submission_id));
   const recent = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-  const workers = db.prepare('SELECT worker_id, target_commit, current_submission_id, started_at, last_seen_at FROM verifier_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 30').all(recent)
+  const workerRows = db.prepare('SELECT worker_id, target_commit, current_submission_id, started_at, last_seen_at FROM verifier_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC, worker_id LIMIT 30').all(recent);
+  const onlineTargets = new Set(workerRows.filter(row => Date.parse(row.last_seen_at) >= onlineCutoff).map(row => row.target_commit));
+  const offlineTargets = new Set();
+  const workers = workerRows
+    .filter(row => {
+      if (Date.parse(row.last_seen_at) >= onlineCutoff) return true;
+      if (onlineTargets.has(row.target_commit) || offlineTargets.has(row.target_commit)) return false;
+      offlineTargets.add(row.target_commit);
+      return true;
+    })
     .map(row => {
       const online = Date.parse(row.last_seen_at) >= onlineCutoff;
       const current = online && processingIds.has(row.current_submission_id) ? row.current_submission_id : null;

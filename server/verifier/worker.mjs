@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,6 +35,16 @@ function configuration(env) {
   };
   if (Object.values(config).some(value => typeof value !== 'string' || !path.isAbsolute(value))) throw new WorkerError('not_configured');
   return config;
+}
+
+export function stableWorkerId(config, hostname = os.hostname()) {
+  let targetCommit;
+  try { targetCommit = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8')).sourceCommit; }
+  catch { throw new WorkerError('kernel_commit_unavailable'); }
+  if (!/^[a-f0-9]{40}$/.test(targetCommit || '')) throw new WorkerError('kernel_commit_unavailable');
+  return createHash('sha256')
+    .update(JSON.stringify([hostname, config.workRoot, config.kernelInfoPath, targetCommit]))
+    .digest('hex').slice(0, 32);
 }
 
 export function postJson(socketPath, endpoint, body) {
@@ -258,7 +268,7 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const config = configuration(process.env);
-    const workerId = randomBytes(16).toString('hex');
+    const workerId = stableWorkerId(config);
     while (true) {
       try {
         const worked = await runWorkerOnce({ config, workerId });

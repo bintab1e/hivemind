@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { postJson, runWorkerOnce } from './worker.mjs';
+import { postJson, runWorkerOnce, stableWorkerId } from './worker.mjs';
 
 const commit = 'a'.repeat(40);
 const id = 'b'.repeat(64);
@@ -34,6 +34,20 @@ function setup(t) {
   return { dir, config: { socketPath: path.join(dir, 'verifier.sock'), cliPath: '/usr/bin/codex', kernelImage: '/trusted/bzImage', vmlinuxImage,
     kernelInfoPath, kernelSource: '/trusted/linux', rootfsImage: '/trusted/rootfs.raw', workRoot: dir } };
 }
+
+test('worker identity is stable across restarts and distinct per service target', t => {
+  const { config, dir } = setup(t);
+  const first = stableWorkerId(config, 'verifier-host');
+  assert.match(first, /^[a-f0-9]{32}$/);
+  assert.equal(stableWorkerId({ ...config }, 'verifier-host'), first);
+  assert.notEqual(stableWorkerId(config, 'another-host'), first);
+  assert.notEqual(stableWorkerId({ ...config, workRoot: path.join(dir, 'another-work-root') }, 'verifier-host'), first);
+  const otherKernelInfoPath = path.join(dir, 'other-kernel-info.json');
+  fs.copyFileSync(config.kernelInfoPath, otherKernelInfoPath);
+  assert.notEqual(stableWorkerId({ ...config, kernelInfoPath: otherKernelInfoPath }, 'verifier-host'), first);
+  fs.writeFileSync(config.kernelInfoPath, JSON.stringify({ sourceCommit: 'f'.repeat(40) }));
+  assert.notEqual(stableWorkerId(config, 'verifier-host'), first);
+});
 
 test('uses exact original C PoC and fixed guest manifest, sends only post-PoC server evidence', async t => {
   const { dir, config } = setup(t);
