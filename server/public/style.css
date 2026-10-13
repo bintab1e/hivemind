@@ -85,6 +85,11 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-badge.busy{border-color:#796347;color:#e9ca92;background:#3b3026}
 .queue-badge.idle{border-color:#35785e;color:#9be7bf;background:#1d3b32}
 .queue-badge.offline{border-color:#744858;color:#eda9ba;background:#3a2732}
+.queue-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.queue-column{display:flex;flex-direction:column;min-width:0;border-right:1px solid #292e3b}
+.queue-column:last-child{border-right:0}
+.queue-column .coverage-section-heading{border-top:0}
+.queue-column .table-scroll{flex:1;min-width:0;width:100%;min-height:180px;max-height:500px}
 .queue-table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;font-size:11px}
 .queue-table th,.queue-table td{padding:11px 12px;border-top:1px solid #252b38;border-right:1px solid #252b38;text-align:left;vertical-align:top}
 .queue-table th:last-child,.queue-table td:last-child{border-right:0}
@@ -207,3 +212,4 @@ footer a{color:#b9a8fb}
 @media(max-width:720px){.shell{width:calc(100% - 20px)}.workspace-actions .connection{display:none}.workspace-head{flex-wrap:wrap}.workspace-actions{margin-left:auto}.track-select select{max-width:calc(100vw - 110px)}.toolbar .search-field{width:100%;min-width:0}.toolbar>.count{margin-left:0}.finding-table th:nth-child(3),.finding-table td:nth-child(3){position:static;min-width:260px;max-width:260px}.coverage-table th:first-child,.coverage-table td:first-child{min-width:108px;max-width:108px}.coverage-table th:nth-child(2),.coverage-table td:nth-child(2){position:static;min-width:230px;max-width:230px}.detail-summary{grid-template-columns:1fr 1fr;margin:0 14px 13px}.dialog-top{padding:16px 14px}.detail-tabs{padding:0 14px;gap:14px}.detail-content{padding:14px}footer{display:block}footer a{display:block;margin-top:7px}}
 @media(max-width:1000px){.zip-submit-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.zip-submit-fields button{justify-self:start}}
 @media(max-width:620px){.zip-submit-fields{grid-template-columns:1fr}.zip-submit-fields button{width:100%}}
+@media(max-width:900px){.queue-columns{grid-template-columns:1fr}.queue-column{border-right:0;border-bottom:1px solid #292e3b}.queue-column:last-child{border-bottom:0}.queue-column:not(:first-child) .coverage-section-heading{border-top:0}}
