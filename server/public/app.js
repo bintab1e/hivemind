@@ -158,7 +158,7 @@ function isNewFinding(finding) {
 }
 const visibleFindings = () => activeView() === 'registry'
   ? state.registry?.findings || []
-  : [...(demoEnabled() ? [demoFinding] : []), ...(state.registry?.findings || []).filter(isNewFinding)];
+  : [...(activeView() === 'findings' && demoEnabled() ? [demoFinding] : []), ...(state.registry?.findings || []).filter(isNewFinding)];
 function findingGroups(findings) {
   const byId = new Map(findings.map(finding => [finding.event_id, finding]));
   const groups = new Map();

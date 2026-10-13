@@ -97,6 +97,8 @@ test('new findings include only numbered verified rows and show the right verifi
   assert.deepEqual(Array.from(visibleFindings(), row => row.event_id), ['demo-preview', 'knfsd', 'ganesha', 'libnfs']);
   assert.equal(isNewFinding(visibleFindings()[0]), false);
   assert.equal(reviewLabel(visibleFindings()[0]), '화면 예시 · 실제 검증 아님');
+  context.testView = 'queue';
+  assert.deepEqual(Array.from(visibleFindings(), row => row.event_id), ['knfsd', 'ganesha', 'libnfs']);
   context.testView = 'registry';
   assert.equal(visibleFindings().length, rows.length);
 });
