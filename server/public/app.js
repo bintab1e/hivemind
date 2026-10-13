@@ -785,7 +785,11 @@ function openFinding(finding, tab = 'report') {
     }
     $('detail-summary').append(fact);
   }
-  if (finding.review_summary) $('detail-summary').append(detailFact('정적 검토 의견', finding.review_summary));
+  if (finding.review_summary) {
+    const review = detailFact('정적 검토 의견', finding.review_summary);
+    review.classList.add('review-summary');
+    $('detail-summary').append(review);
+  }
   if (!$('detail').open) $('detail').showModal();
   showDetailTab();
 }
