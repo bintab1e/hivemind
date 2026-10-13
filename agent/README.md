@@ -21,7 +21,7 @@ stdio MCP의 `submit_vulnerability`는 원본 자료를 서버 검증 대기열�
 
 이전 버전에서 `exchange/outbox/`에 작성한 finding Markdown은 자동 제출하지 않고 원본을 보존합니다. 검증에 필요한 PoC·로그를 확인한 뒤 `submit_vulnerability`로 다시 제출하세요.
 
-동기화 에이전트는 `fs/nfsd/`, `fs/nfs/`, `fs/nfs_common/`, `fs/lockd/`, `fs/exportfs/`, `net/sunrpc/`와 로컬 include 의존성 범위의 LCOV와 요약 JSON을 5분마다 보냅니다. 이 범위 외 KNFSD 실행 의존성은 모든 에이전트의 `coverage_prefixes`에 동일하게 추가하세요. 세션 원문·분석 PC의 절대 경로·로컬 자유 형식 진행 메모는 전송하지 않습니다. 로컬 telemetry 배치는 최신 1개만 유지합니다. Linux에서는 `systemctl --user status hivemind-agent`, macOS에서는 `launchctl print gui/$(id -u)/org.hivemind.knfsd-agent`로 동기화 상태를 확인합니다.
+동기화 에이전트는 `fs/nfsd/`, `fs/nfs/`, `fs/nfs_common/`, `fs/lockd/`, `fs/exportfs/`, `net/sunrpc/`와 로컬 include 의존성 범위의 커버리지를 5분마다 보냅니다. LCOV에는 각 파일의 전체 줄 수와 실제 열람한 줄만 기록하고, 미열람 줄은 서버가 복원합니다. 이 범위 외 KNFSD 실행 의존성은 모든 에이전트의 `coverage_prefixes`에 동일하게 추가하세요. 세션 원문·분석 PC의 절대 경로·로컬 자유 형식 진행 메모는 전송하지 않습니다. 누적 열람 계산에 필요한 `.agentcov/events.jsonl`은 로컬에 유지하고, telemetry 배치는 최신 1개만 유지합니다. Linux에서는 `systemctl --user status hivemind-agent`, macOS에서는 `launchctl print gui/$(id -u)/org.hivemind.knfsd-agent`로 동기화 상태를 확인합니다.
 
 `list_findings`와 `get_coverage_gaps`로 기존 보고와 조사 공백을 확인합니다. 신규 후보는 `submit_vulnerability`에 확인한 내용과 위 네 종류의 원본 자료를 보내세요. 제목은 `영향받는 기능 + 원인 + 결과`로 짧고 중립적으로 씁니다. 정정 자료도 새 제출로 보내고 이전 `submission_id`를 보고서 `Summary`에 명시하세요. **코드 열람률은 검증 결과가 아닙니다.**
 

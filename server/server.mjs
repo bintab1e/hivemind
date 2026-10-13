@@ -243,13 +243,26 @@ function addBatch(db, input, agentId) {
   if (manifest.batch_id && manifest.batch_id !== id) invalid('Batch ID mismatch');
   const warning = targetWarning(db, manifest.version_id, manifest.repo_commit);
   const warnings = warning ? [warning] : [];
-  if (db.prepare('SELECT 1 FROM batches WHERE id = ?').get(id)) return { batch_id: id, accepted: true, replayed: true, warnings };
-  db.prepare('INSERT INTO batches (id, agent_id, version_id, repo_commit, scope_hash, worktree_clean, generated_at, received_at, files_json, manifest_json, lcov, coverage_json, progress_md, missing_includes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
-    id, manifest.agent_id, manifest.version_id, manifest.repo_commit,
-    manifest.coverage_scope_hash, Number(manifest.worktree_clean), manifest.generated_at,
-    now(), JSON.stringify(files), JSON.stringify(manifest), lcov, coverageJson, progressMd, missingIncludes,
-  );
-  return { batch_id: id, accepted: true, replayed: false, warnings };
+  const group = [manifest.agent_id, manifest.version_id, manifest.repo_commit];
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (db.prepare('SELECT 1 FROM batches WHERE id = ?').get(id)) {
+      db.exec('COMMIT');
+      return { batch_id: id, accepted: true, replayed: true, retained: true, warnings };
+    }
+    db.prepare('INSERT INTO batches (id, agent_id, version_id, repo_commit, scope_hash, worktree_clean, generated_at, received_at, files_json, manifest_json, lcov, coverage_json, progress_md, missing_includes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+      id, ...group, manifest.coverage_scope_hash, Number(manifest.worktree_clean), manifest.generated_at,
+      now(), JSON.stringify(files), JSON.stringify(manifest), lcov, coverageJson, progressMd, missingIncludes,
+    );
+    const latest = db.prepare('SELECT id FROM batches WHERE agent_id = ? AND version_id = ? AND repo_commit = ? ORDER BY generated_at DESC, received_at DESC, id DESC LIMIT 1').get(...group).id;
+    const latestClean = db.prepare('SELECT id FROM batches WHERE agent_id = ? AND version_id = ? AND repo_commit = ? AND worktree_clean = 1 ORDER BY generated_at DESC, received_at DESC, id DESC LIMIT 1').get(...group)?.id || latest;
+    db.prepare('DELETE FROM batches WHERE agent_id = ? AND version_id = ? AND repo_commit = ? AND id NOT IN (?, ?)').run(...group, latest, latestClean);
+    db.exec('COMMIT');
+    return { batch_id: id, accepted: true, replayed: false, retained: id === latest || id === latestClean, warnings };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function progressRows(markdown) {
@@ -304,8 +317,8 @@ function coverageState(db, versionId, commit) {
   const candidates = db.prepare(`
     WITH ranked AS (
       SELECT id, agent_id,
-             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC) AS latest_rank,
-             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY worktree_clean DESC, generated_at DESC, received_at DESC) AS clean_rank
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC, id DESC) AS latest_rank,
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY worktree_clean DESC, generated_at DESC, received_at DESC, id DESC) AS clean_rank
       FROM batches WHERE version_id = ? AND repo_commit = ?
     )
     SELECT b.id, b.agent_id, b.version_id, b.repo_commit, b.scope_hash,

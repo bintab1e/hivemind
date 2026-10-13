@@ -44,6 +44,8 @@ WantedBy=default.target
 
 현재 공용 서버는 사용자 서비스 `knfsd-hub`로 운영합니다. 서비스 파일 변경 후 `systemctl --user daemon-reload`와 `systemctl --user restart knfsd-hub`를 실행하고 `curl -fsS http://SERVER_LAN_IP:8765/healthz`로 확인합니다. 인터넷 포트 포워딩은 사용하지 않습니다. 이 배포 절차는 방화벽 설정을 변경하지 않습니다.
 
+커버리지 업로드는 기존 전체 줄 LCOV와 열람 줄만 담은 `hivemind-sparse-v1` 형식을 모두 받습니다. 새 형식의 미열람 줄은 파일별 전체 줄 수에서 복원하므로 커버리지 계산은 동일합니다. SQLite에는 에이전트·버전·커밋별 최신 배치와 최신 clean 배치만 남깁니다. 따라서 삭제된 예전 배치 ID의 원본 다운로드는 제공되지 않습니다. 이전 버전에서 이미 저장된 기록은 업로드가 들어온 그룹부터 정리되며, SQLite 파일 크기 회수는 별도의 백업·점검 후 유지보수 시간에 진행해야 합니다.
+
 새 제보의 Codex 정적 검토와 QEMU 2 VM 검증은 별도 `bintable` 사용자 서비스에서 실행합니다. 웹 서버의 전용 Unix 소켓 설정, VM 이미지 설치와 워커 실행 절차는 [검증 워커 배포 문서](verifier/README.md)를 따릅니다. 검증 워커가 준비되지 않았을 때 새 제보는 대기열에 남고 취약점 관리 번호가 발급되지 않습니다.
 
 ## 웹에서 ZIP으로 직접 제출

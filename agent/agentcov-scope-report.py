@@ -17,7 +17,6 @@ from pathlib import Path
 
 import agentcov.aggregate as aggregate
 from agentcov.config import load_config
-from agentcov.report import write_lcov
 from agentcov.storage import load_events
 
 
@@ -51,6 +50,20 @@ def write_json_atomic(value: object, path: Path) -> None:
         raise
 
 
+def write_sparse_lcov(coverage: dict, path: Path) -> None:
+    """Emit only observed reads; LF describes every eligible source line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as output:
+        for name, file in sorted(coverage["files"].items()):
+            line_count = file["line_count"]
+            reads = [line for line in range(1, line_count + 1)
+                     if file["lines"].get(str(line), {}).get("read_count", 0) > 0]
+            output.write(f"TN:hivemind-sparse-v1\nSF:{name}\n")
+            for line in reads:
+                output.write(f"DA:{line},1\n")
+            output.write(f"LH:{len(reads)}\nLF:{line_count}\nend_of_record\n")
+
+
 def main() -> int:
     args = parse_args()
     root = args.root.resolve()
@@ -77,10 +90,9 @@ def main() -> int:
     finally:
         aggregate.list_project_files = original_inventory
 
-    # LCOV is the server's source of truth and needs the native per-line map.
-    # Write it before compacting the JSON-only representation below.
-    args.lcov.parent.mkdir(parents=True, exist_ok=True)
-    write_lcov(coverage, out=args.lcov, counts="binary")
+    # The server infers unread eligible lines from LF, avoiding a DA:...,0 row
+    # for every physical source line while keeping per-line read coverage.
+    write_sparse_lcov(coverage, args.lcov)
 
     # The server derives its per-file and per-line coverage from the LCOV above.
     # Agentcov's files.*.read_ranges and search_seen_ranges repeat event details

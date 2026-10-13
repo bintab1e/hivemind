@@ -135,8 +135,13 @@ export function parseLcov(text, repoRoot) {
   if (typeof text !== 'string' || !text.trim() || text.length > 10_000_000) invalid('Invalid LCOV');
   const files = {};
   let current;
+  let sparseRecord = false;
+  let inferredLines = 0;
   for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('SF:')) {
+    if (line.startsWith('TN:')) {
+      if (current?.sparse) invalid('Invalid sparse LCOV record');
+      if (!current) sparseRecord = line === 'TN:hivemind-sparse-v1';
+    } else if (line.startsWith('SF:')) {
       let file = line.slice(3).replaceAll('\\', '/');
       const absolute = file.startsWith('/') || /^[a-z]:\//i.test(file);
       if (absolute) {
@@ -148,29 +153,44 @@ export function parseLcov(text, repoRoot) {
       file = file.replace(/^\.\//, '');
       if (!file || file.split('/').some(segment => !segment || segment === '.' || segment === '..') || Object.hasOwn(files, file)) invalid('Invalid LCOV path');
       if (current) invalid('Incomplete LCOV record');
-      current = { path: file, total: undefined, lines: new Map() };
+      current = { path: file, total: undefined, lines: new Map(), sparse: sparseRecord, hits: undefined };
+      sparseRecord = false;
     } else if (line.startsWith('DA:')) {
       if (!current) invalid('LCOV DA without SF');
-      const match = /^DA:(\d+),(\d+)(?:,.*)?$/.exec(line);
+      const match = (current.sparse ? /^DA:(\d+),([1-9]\d*)$/ : /^DA:(\d+),(\d+)(?:,.*)?$/).exec(line);
       if (!match) invalid('Invalid LCOV DA');
       const number = Number(match[1]);
       if (number < 1 || number > 5_000_000) invalid('Invalid LCOV line number');
+      if (current.sparse && !Number.isSafeInteger(Number(match[2]))) invalid('Invalid sparse LCOV count');
+      if (current.sparse && current.lines.has(number)) invalid('Duplicate sparse LCOV line');
       current.lines.set(number, Number(match[2]) > 0 || current.lines.get(number) === true);
     } else if (line.startsWith('LF:')) {
       if (!current) invalid('LCOV LF without SF');
+      if (current.sparse && current.total !== undefined) invalid('Duplicate sparse LCOV LF');
+      if (current.sparse && !/^LF:(0|[1-9]\d*)$/.test(line)) invalid('Invalid sparse LCOV LF');
       current.total = Number(line.slice(3));
       if (!Number.isInteger(current.total) || current.total < 0 || current.total > 5_000_000) invalid('Invalid LCOV LF');
+    } else if (line.startsWith('LH:') && current?.sparse) {
+      if (current.hits !== undefined || !/^LH:\d+$/.test(line)) invalid('Invalid sparse LCOV LH');
+      current.hits = Number(line.slice(3));
     } else if (line === 'end_of_record') {
-      if (!current || current.total === undefined || current.lines.size !== current.total) invalid('Incomplete LCOV record');
+      if (!current || current.total === undefined) invalid('Incomplete LCOV record');
+      if (current.sparse) {
+        if (current.hits === undefined || current.hits !== current.lines.size || [...current.lines.keys()].some(number => number > current.total)) invalid('Incomplete LCOV record');
+        inferredLines += current.total;
+        if (inferredLines > 2_000_000) invalid('Sparse LCOV scope too large', 413);
+      } else if (current.lines.size !== current.total) invalid('Incomplete LCOV record');
       files[current.path] = {
         total: current.total,
-        eligible: [...current.lines.keys()].sort((a, b) => a - b),
+        eligible: current.sparse ? Array.from({ length: current.total }, (_, index) => index + 1) : [...current.lines.keys()].sort((a, b) => a - b),
         read: [...current.lines].filter(([, observed]) => observed).map(([number]) => number).sort((a, b) => a - b),
       };
       current = undefined;
+    } else if (current?.sparse && line.trim()) {
+      invalid('Invalid sparse LCOV record');
     }
   }
-  if (current || !Object.keys(files).length) invalid('Incomplete LCOV');
+  if (current || sparseRecord || !Object.keys(files).length) invalid('Incomplete LCOV');
   return files;
 }
 

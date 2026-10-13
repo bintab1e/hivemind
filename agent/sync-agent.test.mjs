@@ -64,6 +64,18 @@ test('coverage upload excludes files outside the knfsd scope', () => {
   assert.throws(() => validateCoverageSummary(selected.lcov, JSON.stringify({ files: 1, total_lines: 2, read_lines: 0 }), 'C:\\audit'), /summary mismatch/);
 });
 
+test('sparse AgentCov upload preserves the dense eligible and read line counts', () => {
+  const dense = 'TN:agentcov\nSF:fs/nfsd/main.c\nDA:1,0\nDA:2,1\nDA:3,0\nLF:3\nLH:1\nend_of_record\n'
+    + 'TN:agentcov\nSF:net/sunrpc/empty.c\nDA:1,0\nDA:2,0\nLF:2\nLH:0\nend_of_record\n';
+  const sparse = 'TN:hivemind-sparse-v1\nSF:fs/nfsd/main.c\nDA:2,1\nLH:1\nLF:3\nend_of_record\n'
+    + 'TN:hivemind-sparse-v1\nSF:net/sunrpc/empty.c\nLH:0\nLF:2\nend_of_record\n';
+  const expected = JSON.stringify({ files: 2, total_lines: 5, read_lines: 1 });
+  assert.deepEqual(validateCoverageSummary(sparse, expected, '.'), validateCoverageSummary(dense, expected, '.'));
+  const batch = lcov => makeBatch({ agentId: 'pc1', versionId: 'v1', repoRoot: '.', commit: 'a'.repeat(40), clean: true,
+    generatedAt: '2026-10-12T00:00:00Z', lcov, coverageJson: '{}', progressMd: '', agentcovConfig: '' });
+  assert.equal(batch(sparse).manifest.coverage_scope_hash, batch(dense).manifest.coverage_scope_hash);
+});
+
 test('telemetry uses repository-relative paths and keeps checkout path local', () => {
   const checkout = 'C:\\private\\analyst\\linux';
   const lcov = `TN:agentcov\nSF:${checkout}\\fs\\nfsd\\main.c\nDA:1,1\nLF:1\nLH:1\nend_of_record\n`;

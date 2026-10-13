@@ -303,6 +303,7 @@ async function syncTelemetry(config, token, telemetry = {}) {
     await fs.writeFile(lcovPath, batch.lcov);
     await fs.writeFile(path.join(temporary, 'coverage.json'), coverageJson);
     await fs.writeFile(path.join(temporary, 'progress.md'), progressMd);
+    await Promise.all([fs.rm(metaPath), fs.rm(scopePath)]);
     await fs.rename(temporary, batchFolder);
     await pendingBatches(config, token, telemetry);
     console.log(`Coverage scope: ${scope.size} files, ${missingIncludes.size} unavailable includes`);
