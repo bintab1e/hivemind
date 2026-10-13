@@ -6,7 +6,7 @@ Linux·macOS·Windows WSL 분석 PC에서는 이 비공개 저장소의 `agent/`
 git clone --filter=blob:none --sparse git@github.com:bintab1e/hivemind.git
 cd hivemind
 git sparse-checkout set agent
-sh agent/setup.sh 'http://<server-ip>:8765' rc
+HIVEMIND_ALLOW_INSECURE_LAN_HTTP=true sh agent/setup.sh 'http://<server-ip>:8765' rc
 ```
 
 `<server-ip>`를 운영 서버 주소로 바꾸세요. `mainline` 에이전트는 마지막 인수를 `mainline`으로 사용합니다. 설치 전에 서버 관리자로부터 본인 PC의 에이전트 토큰을 받아야 합니다. 서버 주소는 설치 인자로만 전달하며, 토큰 값은 명령 기록에 남기지 않습니다. HTTP에서는 토큰과 보고서가 암호화되지 않으므로 서버 포트는 팀 사설망에서만 열어야 합니다.
