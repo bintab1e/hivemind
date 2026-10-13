@@ -64,6 +64,7 @@ function showView() {
   $('track-control').hidden = view !== 'coverage';
   $('coverage-footer').hidden = view !== 'coverage';
   $('findings-view').hidden = view !== 'findings' && view !== 'registry';
+  $('zip-submit-form').hidden = view !== 'findings';
   $('finding-status-stats').hidden = view !== 'registry';
   $('queue-view').hidden = view !== 'queue';
   $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
@@ -847,10 +848,11 @@ const queuePhaseLabels = {
 };
 const queueStatusLabels = {
   pending: '검증 대기', processing: '검증 중', needs_evidence: '증거 보완 필요',
-  needs_review: '추가 검토 필요', error: '오류',
+  needs_review: '추가 검토 필요', rejected: '반려', error: '오류',
 };
 const queueWorkerLabels = { busy: '작업 중', idle: '유휴', offline: '오프라인' };
 const queuePhaseLabel = row => row.phase ? queuePhaseLabels[row.phase] || row.phase : '검증 중';
+const queueSubmitter = row => row.origin === 'manual_upload' ? `직접 제출 · ${row.reporter || '표시명 없음'}` : row.agent_id;
 
 function renderQueueTable(id, rows, columns, emptyMessage) {
   const container = $(id);
@@ -888,7 +890,7 @@ function renderVerificationQueue() {
   for (const [label, count, tone] of [
     ['검증 중', queue.counts.processing, 'accent'],
     ['검증 대기', queue.counts.pending, ''],
-    ['보완 필요 · 오류', queue.counts.blocked, ''],
+    ['반려 · 보완 · 오류', queue.counts.blocked, ''],
   ]) {
     const item = element('div', `strip-stat ${tone}`);
     item.append(element('span', '', label), element('strong', '', number(count)));
@@ -914,21 +916,21 @@ function renderVerificationQueue() {
   }
   const title = row => `${row.project || '대상 미입력'} · ${row.title || '제목 없음'} (${row.submission_id})`;
   renderQueueTable('queue-active', queue.active, [
-    ['취약점', title, 'queue-title-cell'], ['분석 에이전트', row => row.agent_id],
+    ['취약점', title, 'queue-title-cell'], ['제보자', queueSubmitter],
     ['검증 단계', row => `${queuePhaseLabel(row)}${row.stale ? ' · 응답 지연' : ''}`],
     ['상태', row => queueStatusLabels[row.status] || row.status],
     ['단계 갱신', row => when(row.phase_updated_at)], ['대상 커밋', row => row.target_commit, 'queue-commit'],
   ], '현재 검증 중인 신규 제출이 없습니다.');
   renderQueueTable('queue-pending', queue.pending, [
     ['순서', row => row.position, 'queue-position'], ['취약점', title, 'queue-title-cell'],
-    ['분석 에이전트', row => row.agent_id], ['대상 커밋', row => row.target_commit, 'queue-commit'],
+    ['제보자', queueSubmitter], ['대상 커밋', row => row.target_commit, 'queue-commit'],
     ['제출 시각', row => when(row.submitted_at)],
   ], '검증을 기다리는 신규 제출이 없습니다.');
   renderQueueTable('queue-blocked', queue.blocked, [
     ['취약점', title, 'queue-title-cell'], ['상태', row => queueStatusLabels[row.status] || row.status],
-    ['사유', row => row.reason, 'queue-reason'], ['분석 에이전트', row => row.agent_id],
+    ['사유', row => row.reason, 'queue-reason'], ['제보자', queueSubmitter],
     ['대상 커밋', row => row.target_commit, 'queue-commit'],
-  ], '보완이나 재시도가 필요한 신규 제출이 없습니다.');
+  ], '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
 }
 
 async function loadVerificationQueue() {
@@ -945,6 +947,83 @@ async function loadVerificationQueue() {
     state.queueError = error;
   }
   renderVerificationQueue();
+}
+
+const uploadStatusLabels = {
+  pending: '검증 대기', processing: '검증 중', approved: '검증 완료', rejected: '반려',
+  needs_evidence: '재현 자료 필요', needs_review: '추가 검토 필요', error: '검증 오류',
+};
+let zipSubmitting = false;
+let uploadTargets = [];
+
+function uploadMessage(message, error = false, submissionId = '') {
+  const result = $('zip-submit-result');
+  result.className = `zip-submit-result${error ? ' error' : ''}`;
+  result.replaceChildren(element('span', '', message));
+  if (submissionId) {
+    result.append(element('code', '', submissionId));
+    const link = element('a', '', '검증 큐에서 보기 ↗');
+    link.href = '?view=queue';
+    result.append(link);
+  }
+  result.hidden = false;
+}
+
+async function loadUploadTargets() {
+  const { targets } = await api('/api/submissions/upload-targets').then(response => response.json());
+  if (!Array.isArray(targets)) throw new Error('대상 커널 목록 형식이 올바르지 않습니다.');
+  const select = $('zip-target');
+  const old = uploadTargets.find(item => item.track_id === select.value);
+  const selected = old && targets.some(item => item.track_id === old.track_id && item.repo_commit === old.repo_commit) ? old.track_id : '';
+  uploadTargets = targets;
+  clear(select);
+  const placeholder = element('option', '', targets.length ? '대상 커널 선택' : '설정된 대상 없음');
+  placeholder.value = '';
+  select.append(placeholder);
+  for (const target of targets) {
+    const option = element('option', '', `${target.label || target.track_id} · ${target.version_id} · ${String(target.repo_commit).slice(0, 12)}`);
+    option.value = target.track_id;
+    select.append(option);
+  }
+  select.value = selected;
+  select.disabled = !targets.length || zipSubmitting;
+  $('zip-submit-button').disabled = !targets.length || zipSubmitting;
+  if (!targets.length) uploadMessage('검증 가능한 대상 커널이 설정되지 않았습니다.', true);
+  else if (old && !selected) uploadMessage('대상 커널이 변경되었습니다. 다시 선택해 주세요.', true);
+}
+
+async function submitZip(event) {
+  event.preventDefault();
+  if (zipSubmitting) return;
+  const title = $('zip-title').value.trim();
+  const reporter = $('zip-reporter').value.trim();
+  if (!title || !reporter) return uploadMessage('취약점 명과 제보자 표시명을 입력해 주세요.', true);
+  const file = $('zip-file').files?.[0];
+  if (!file || !/\.zip$/i.test(file.name)) return uploadMessage('ZIP 파일을 선택해 주세요.', true);
+  if (!file.size || file.size > 8_000_000) return uploadMessage('ZIP은 8 MB 이하의 비어 있지 않은 파일이어야 합니다.', true);
+  const trackId = $('zip-target').value;
+  if (!uploadTargets.some(item => item.track_id === trackId)) return uploadMessage('대상 커널을 선택해 주세요.', true);
+  zipSubmitting = true;
+  $('zip-submit-button').disabled = true;
+  $('zip-submit-button').textContent = '제출 중…';
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let zipBase64 = '';
+    for (let i = 0; i < bytes.length; i += 24_576) zipBase64 += btoa(String.fromCharCode(...bytes.subarray(i, i + 24_576)));
+    const response = await api('/api/submissions/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: 'knfsd', title, reporter, track_id: trackId, zip_base64: zipBase64 }),
+    }).then(result => result.json());
+    if (!/^[a-f0-9]{64}$/.test(response.submission_id || '')) throw new Error('접수 번호를 확인할 수 없습니다. 검증 큐를 확인해 주세요.');
+    $('zip-submit-form').reset();
+    uploadMessage(`${uploadStatusLabels[response.status] || response.status || '접수됨'} · 접수 ID `, false, response.submission_id);
+  } catch (error) { uploadMessage(error.message || String(error), true); }
+  finally {
+    zipSubmitting = false;
+    $('zip-submit-button').textContent = '검증 큐에 제출';
+    $('zip-submit-button').disabled = !uploadTargets.length;
+    $('zip-target').disabled = !uploadTargets.length;
+  }
 }
 
 async function refresh() {
@@ -969,6 +1048,9 @@ async function refresh() {
       if (activeView() === 'coverage') await loadCoverage();
     }
     if (activeView() === 'queue') await loadVerificationQueue();
+    if (activeView() === 'findings') {
+      loadUploadTargets().catch(error => uploadMessage(`대상 커널 조회 실패: ${error.message}`, true));
+    }
     $('error').hidden = true;
     $('connection').textContent = '서버 연결됨';
     $('connection').classList.remove('offline');
@@ -976,13 +1058,14 @@ async function refresh() {
 }
 
 $('refresh').addEventListener('click', refresh);
+$('zip-submit-form').addEventListener('submit', submitZip);
 $('finding-edit-mode').addEventListener('click', () => {
   if (state.editingFindingId) return;
   state.editMode = !state.editMode;
   renderFindings();
 });
 $('version').addEventListener('change', () => { setQuery({ track_id: $('version').value, version_id: '', repo_commit: '', agent_id: '' }); state.coveragePage = 1; state.coverageSortKey = 'unread'; state.coverageSortDir = 'desc'; refresh(); });
-for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); });
+for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); if (button.dataset.view === 'findings') loadUploadTargets().catch(error => uploadMessage(`대상 커널 조회 실패: ${error.message}`, true)); });
 for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).addEventListener(id === 'finding-search' ? 'input' : 'change', () => { if (state.editingFindingId) return; state.findingPage = 1; renderFindings(); });
 $('coverage-search').addEventListener('input', () => { state.coveragePage = 1; renderCoverage(); });
 $('coverage-component').addEventListener('change', () => { state.coveragePage = 1; renderCoverage(); });

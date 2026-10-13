@@ -14,6 +14,7 @@ import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact }
 import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
 import { getSubmission, initializeSubmissions, listSubmissions, listVerificationQueue, retrySubmission, submitSubmission } from './submissions.mjs';
 import { startVerifierIpc } from './verifier-ipc.mjs';
+import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -869,6 +870,19 @@ export async function startServer(options = {}) {
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
+      if (req.method === 'GET' && url.pathname === '/api/submissions/upload-targets') return send(res, 200, { targets: uploadedTargets(db) });
+      if (req.method === 'POST' && url.pathname === '/api/submissions/upload') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to upload findings' });
+        if (req.headers.origin) {
+          let sameOrigin = false;
+          try { sameOrigin = new URL(req.headers.origin).origin === new URL(`http://${req.headers.host}`).origin; }
+          catch { /* invalid origin */ }
+          if (!sameOrigin) return send(res, 403, { error: 'Origin not allowed' });
+        }
+        if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site upload not allowed' });
+        const { agentId, ...submission } = uploadedSubmission(db, await readJson(req));
+        return send(res, 202, submitSubmission(db, { ...submission, client_submission_id: randomBytes(16).toString('hex') }, agentId, 'manual_upload'));
+      }
       if (req.method === 'GET' && url.pathname === '/api/verification-queue') return send(res, 200, listVerificationQueue(db));
       const registryRowMatch = /^\/api\/registry\/rows\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'PATCH' && registryRowMatch) {

@@ -48,6 +48,7 @@ export function initializeSubmissions(db) {
       submitted_at TEXT NOT NULL, claimed_at TEXT, completed_at TEXT,
       attempts INTEGER NOT NULL DEFAULT 0, finding_id TEXT, management_id TEXT,
       verification_json TEXT, lease_token TEXT, fingerprint TEXT,
+      origin TEXT NOT NULL DEFAULT 'agent',
       UNIQUE(agent_id, client_submission_id)
     );
     CREATE TABLE IF NOT EXISTS submission_artifacts (
@@ -68,11 +69,14 @@ export function initializeSubmissions(db) {
   if (!columns.has('phase')) db.exec('ALTER TABLE submissions ADD COLUMN phase TEXT');
   if (!columns.has('phase_updated_at')) db.exec('ALTER TABLE submissions ADD COLUMN phase_updated_at TEXT');
   if (!columns.has('last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN last_activity_at TEXT');
+  if (!columns.has('origin')) db.exec("ALTER TABLE submissions ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'");
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
 }
 
 export function listVerificationQueue(db) {
-  const fields = `id AS submission_id, agent_id, project, title, status, reason, submitted_at,
+  const fields = `id AS submission_id, agent_id, origin,
+    CASE WHEN origin = 'manual_upload' THEN json_extract(metadata_json, '$.reporter') END AS reporter,
+    project, title, status, reason, submitted_at,
     claimed_at, completed_at, attempts, management_id, phase, phase_updated_at, last_activity_at,
     json_extract(metadata_json, '$.repo_commit') AS target_commit`;
   const rows = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('pending', 'processing') ORDER BY submitted_at, id`).all();
@@ -86,9 +90,9 @@ export function listVerificationQueue(db) {
     if (row.status === 'processing') active.push(item);
     else if (row.status === 'pending') { item.position = pending.length + 1; pending.push(item); }
   }
-  const blocked = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error')
+  const blocked = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')
     ORDER BY completed_at DESC, id DESC LIMIT 50`).all().map(row => ({ ...row, stale: false, position: null }));
-  const blockedCount = db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error')").get().count;
+  const blockedCount = db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')").get().count;
   const onlineCutoff = Date.now() - WORKER_ONLINE_MS;
   const processingIds = new Set(active.map(row => row.submission_id));
   const recent = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
@@ -102,7 +106,8 @@ export function listVerificationQueue(db) {
     active, pending, blocked, blocked_has_more: blockedCount > blocked.length, workers };
 }
 
-export function submitSubmission(db, input, agentId) {
+export function submitSubmission(db, input, agentId, origin = 'agent') {
+  if (!['agent', 'manual_upload'].includes(origin)) invalid('Invalid submission origin');
   if (!input || typeof input !== 'object' || Array.isArray(input) || input.project !== 'knfsd') invalid('Only knfsd submissions are supported');
   const clientId = value(input.client_submission_id, 'client_submission_id', 128);
   if (clientId && !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(clientId)) invalid('Invalid client_submission_id');
@@ -131,9 +136,9 @@ export function submitSubmission(db, input, agentId) {
   const id = hash(`${agentId}\0${clientId || digest}`);
   db.exec('BEGIN IMMEDIATE');
   try {
-    const existing = db.prepare('SELECT raw_sha256, status FROM submissions WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT raw_sha256, status, origin FROM submissions WHERE id = ?').get(id);
     if (existing) {
-      if (existing.raw_sha256 !== digest) invalid('client_submission_id was reused with different content', 409);
+      if (existing.raw_sha256 !== digest || existing.origin !== origin) invalid('client_submission_id was reused with different content', 409);
       db.exec('COMMIT');
       return { submission_id: id, status: existing.status, replayed: true };
     }
@@ -143,8 +148,8 @@ export function submitSubmission(db, input, agentId) {
       db.prepare('SELECT COALESCE(SUM(length(CAST(report AS BLOB))), 0) AS bytes FROM submissions').get().bytes;
     if (stored + total > MAX_STORED_BYTES) invalid('Submission storage is full', 507);
     db.prepare(`INSERT INTO submissions
-      (id, agent_id, client_submission_id, project, title, report, metadata_json, raw_sha256, status, submitted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`).run(id, agentId, clientId, input.project, title, report, metadataJson, digest, now());
+      (id, agent_id, client_submission_id, project, title, report, metadata_json, raw_sha256, status, submitted_at, origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`).run(id, agentId, clientId, input.project, title, report, metadataJson, digest, now(), origin);
     const insert = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
     for (const file of files) insert.run(id, file.ordinal, file.name, file.kind, file.sha256, file.bytes.length, file.bytes);
     db.exec('COMMIT');
@@ -411,6 +416,8 @@ export function completeSubmission(db, id, result, leaseToken) {
       registry_privilege: privilege, registry_nfs_version: value(normalized.nfs_version, 'nfs_version', 100),
       registry_vulnerability_type: value(normalized.vulnerability_type, 'vulnerability_type', 200),
       registry_found_date: foundDate, registry_methodology: 'LLM', registry_report_project: 'Linux kernel',
+      ...(row.origin === 'manual_upload' && typeof metadata.reporter === 'string' && metadata.reporter.length <= 100
+        ? { registry_owner: metadata.reporter } : {}),
     };
     try { validateRegistryMetadata(data); }
     catch (error) {

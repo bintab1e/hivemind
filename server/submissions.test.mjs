@@ -63,6 +63,19 @@ test('unstructured submission stays out of registry until independent 2VM eviden
   assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
 });
 
+test('verified manual upload carries its validated reporter into the registry owner', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-manual-owner-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const input = raw('manual-owner');
+  input.metadata.reporter = '이진표';
+  const accepted = submitSubmission(db, input, 'web:reporter', 'manual_upload');
+  const claimed = claimSubmission(db, commit);
+  assert.equal(completeSubmission(db, accepted.submission_id, verdict(), claimed.lease_token).status, 'approved');
+  assert.equal(listRegistry(db)[0].owner, '이진표');
+});
+
 test('non-reproduction and missing server KASAN never allocate a management number', t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-reject-'));
   const db = openDatabase(path.join(directory, 'db.sqlite3'));
@@ -71,6 +84,11 @@ test('non-reproduction and missing server KASAN never allocate a management numb
   const rejected = submitSubmission(db, raw('case-rejected'), 'pc01').submission_id;
   const rejectedClaim = claimSubmission(db);
   assert.equal(completeSubmission(db, rejected, verdict('not_observed', ''), rejectedClaim.lease_token).status, 'rejected');
+  const rejectedQueue = listVerificationQueue(db);
+  assert.equal(rejectedQueue.counts.blocked, 1);
+  assert.equal(rejectedQueue.blocked[0].submission_id, rejected);
+  assert.equal(rejectedQueue.blocked[0].status, 'rejected');
+  assert.match(rejectedQueue.blocked[0].reason, /No KASAN in server guest/);
   const unsupported = submitSubmission(db, raw('case-no-kasan'), 'pc01').submission_id;
   const unsupportedClaim = claimSubmission(db);
   assert.equal(completeSubmission(db, unsupported, verdict('observed', 'server boot only'), unsupportedClaim.lease_token).status, 'needs_evidence');

@@ -25,6 +25,18 @@
 
       <section id="findings-view" class="viewer" aria-labelledby="findings-title">
         <div class="viewer-head"><h2 id="findings-title">신규 취약점</h2><div class="viewer-head-actions"><span id="finding-count" class="count"></span><button id="finding-edit-mode" class="edit-mode-button" type="button" aria-pressed="false">수정 모드</button></div></div>
+        <form id="zip-submit-form" class="zip-submit-form">
+          <div class="zip-submit-heading"><strong>ZIP 파일로 취약점 제출</strong><span>검증 후 확인된 건만 신규 취약점에 등록됩니다.</span></div>
+          <div class="zip-submit-fields">
+            <label>취약점 명 <input id="zip-title" name="title" type="text" maxlength="300" required autocomplete="off" placeholder="취약점 명"></label>
+            <label>제보자 표시명 <input id="zip-reporter" name="reporter" type="text" maxlength="100" required autocomplete="name" placeholder="이름 또는 팀 내 식별자"></label>
+            <label>대상 커널 <select id="zip-target" name="track_id" required disabled><option value="">불러오는 중</option></select></label>
+            <label>증거 ZIP <input id="zip-file" name="archive" type="file" accept=".zip,application/zip" required></label>
+            <button id="zip-submit-button" type="submit" disabled>검증 큐에 제출</button>
+          </div>
+          <p class="zip-submit-note">ZIP 8 MB 이하 · 코드 경로를 적은 보고서(.md/.txt/.rst) · 단일 C PoC(C가 없으면 Python) · .log 선택</p>
+          <p id="zip-submit-result" class="zip-submit-result" role="status" aria-live="polite" hidden></p>
+        </form>
         <div class="stat-strip" id="finding-stats"></div>
         <div class="stat-strip" id="finding-status-stats" hidden></div>
         <div class="toolbar">
@@ -49,8 +61,8 @@
         <div id="queue-active" class="table-scroll" role="region" aria-label="진행 중인 신규 취약점 검증" tabindex="0"></div>
         <div class="coverage-section-heading"><strong>검증 대기</strong><span id="queue-pending-count"></span></div>
         <div id="queue-pending" class="table-scroll" role="region" aria-label="검증 대기 중인 신규 취약점" tabindex="0"></div>
-        <div class="coverage-section-heading"><strong>보완 필요 · 오류</strong><span id="queue-blocked-count"></span></div>
-        <div id="queue-blocked" class="table-scroll" role="region" aria-label="보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
+        <div class="coverage-section-heading"><strong>반려 · 보완 · 오류</strong><span id="queue-blocked-count"></span></div>
+        <div id="queue-blocked" class="table-scroll" role="region" aria-label="반려되었거나 보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
       </section>
 
       <section id="coverage-view" class="viewer" aria-labelledby="coverage-title" hidden>
