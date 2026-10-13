@@ -22,7 +22,7 @@ h2{font-size:16px;letter-spacing:-.025em;margin:0}
 h3{font-size:13px;margin:0}
 .track-select{display:flex;align-items:center;gap:9px;color:#8f98aa;font-size:11px;white-space:nowrap}
 select{background:#171b28;border:1px solid #343949;border-radius:6px;color:#dfe3ed;padding:7px 9px}
-.track-select select{max-width:min(390px,60vw)}
+.track-select select{max-width:min(390px,60vw);height:30px;padding:0 9px}
 .count{border:1px solid #303747;background:#171b27;color:#a7afc0;border-radius:5px;padding:6px 10px;font:11px Consolas,"Cascadia Code",monospace;white-space:nowrap}
 .tabs{display:flex;gap:22px;border-bottom:1px solid #30333e;margin-bottom:16px}
 .tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:#939bae;padding:11px 2px;font-size:12px;font-weight:700}
