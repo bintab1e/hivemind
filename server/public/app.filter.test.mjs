@@ -92,6 +92,11 @@ test('new findings include only numbered verified rows and show the right verifi
   assert.match(impactEvidence(rows[7], true), /서버 독립 재현 아님/);
   assert.equal(impactEvidence(rows[0], true), '제출 주장, 정적 검증 대기');
   assert.equal(impactEvidence(rows[6], false), '기록 없음');
+  context.location = { search: '?demo=1' };
+  context.URLSearchParams = URLSearchParams;
+  assert.deepEqual(Array.from(visibleFindings(), row => row.event_id), ['demo-preview', 'knfsd', 'ganesha', 'libnfs']);
+  assert.equal(isNewFinding(visibleFindings()[0]), false);
+  assert.equal(reviewLabel(visibleFindings()[0]), '화면 예시 · 실제 검증 아님');
   context.testView = 'registry';
   assert.equal(visibleFindings().length, rows.length);
 });
