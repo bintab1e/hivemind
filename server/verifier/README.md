@@ -43,6 +43,8 @@ Environment=HIVEMIND_VERIFIER_SOCKET=/absolute/private/data-directory/verifier.s
 Environment=HIVEMIND_VERIFIER_USER=bintable
 ```
 
+기존 웹 서비스가 `PrivateTmp=true`를 사용하면 일부 사용자 서비스 환경에서는 다른 UID를 위한 `setfacl`이 사용자 네임스페이스에서 실패합니다. 이 경우 해당 드롭인에 `PrivateTmp=false`도 지정하고 소켓 ACL이 `bintable`에만 `rw`를 주는지 확인합니다. 기존 계정 분리와 `NoNewPrivileges=true`는 유지합니다.
+
 기존 `HIVEMIND_DATA_DIR`, `dashboard-auth.env`, SQLite DB 및 로그인 설정은 그대로 둡니다. 웹 서버 재시작 후 `systemctl --user status knfsd-hub`와 소켓의 ACL을 확인합니다. 이 소켓은 TCP 포트를 열지 않습니다.
 
 ## 3. `bintable` 사용자 서비스 실행
