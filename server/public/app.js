@@ -765,8 +765,12 @@ function openFinding(finding, tab = 'report') {
     }
     $('detail-summary').append(fact);
   }
-  if (finding.review_summary) {
-    const review = detailFact('정적 검토 의견', finding.review_summary);
+  const reviewText = [
+    finding.review_summary,
+    finding.primitive_review_status === 'complete' && finding.primitive_review_summary?.trim() && `프리미티브 추가 검토\n${finding.primitive_review_summary}`,
+  ].filter(Boolean).join('\n\n');
+  if (reviewText) {
+    const review = detailFact('정적 검토 의견', reviewText);
     review.classList.add('review-summary');
     $('detail-summary').append(review);
   }
@@ -935,16 +939,48 @@ function renderVerificationQueue() {
   for (const worker of queue.workers) {
     const card = element('div', 'queue-worker-card');
     const head = element('div', 'queue-worker-heading');
+    const primitive = worker.role === 'primitive';
     const track = (state.data?.tracks || []).find(item => item.repo_commit === worker.target_commit);
-    head.append(element('strong', 'queue-worker-target', track ? `${track.label || track.track_id} · ${track.version_id}` : worker.target_commit ? `커밋 ${worker.target_commit.slice(0, 12)}` : '대상 커밋 없음'));
+    const target = primitive ? '프리미티브 검토'
+      : track ? `${track.label || track.track_id} · ${track.version_id}`
+        : worker.target_commit ? `커밋 ${worker.target_commit.slice(0, 12)}` : '대상 커밋 없음';
+    head.append(element('strong', 'queue-worker-target', target));
     head.append(element('span', `queue-badge ${worker.status || ''}`, queueWorkerLabels[worker.status] || worker.status || '상태 알 수 없음'));
     card.append(head);
     const current = queue.active.find(row => row.submission_id === worker.current_submission_id);
-    if (worker.current_submission_id) card.append(element('div', 'queue-worker-current', `${worker.status === 'offline' ? '마지막 담당' : '담당'} · ${current?.title || worker.current_submission_id}`));
+    const currentId = primitive ? worker.current_finding_id : worker.current_submission_id;
+    const currentTitle = primitive
+      ? [worker.current_management_id, worker.current_title].filter(Boolean).join(' · ') || currentId
+      : current?.title || currentId;
+    if (currentId) card.append(element('div', 'queue-worker-current', `${worker.status === 'offline' ? '마지막 담당' : '담당'} · ${currentTitle}`));
+    if (primitive) card.append(element('div', 'queue-worker-meta', `대기 ${number(worker.pending_count)}건`));
     card.append(element('div', 'queue-worker-meta', `워커 ${worker.worker_id ? worker.worker_id.slice(0, 12) : '—'}`));
-    card.append(element('div', 'queue-worker-meta', `커널 ${worker.target_commit || '—'}`));
+    if (!primitive) card.append(element('div', 'queue-worker-meta', `커널 ${worker.target_commit || '—'}`));
     card.append(element('div', 'queue-worker-meta', `마지막 응답 ${when(worker.last_seen_at)}`));
     $('queue-workers').append(card);
+  }
+  if (queue.primitive) {
+    const board = element('section', 'queue-primitive-board');
+    board.setAttribute('aria-label', '프리미티브 추가 검토 현황');
+    board.append(element('strong', 'queue-primitive-title', '프리미티브 추가 검토'));
+    const columns = element('div', 'queue-primitive-columns');
+    for (const [key, label, count] of [
+      ['pending', '대기', queue.primitive.counts.pending],
+      ['active', '진행 중', queue.primitive.counts.processing],
+      ['errors', '오류', queue.primitive.counts.error],
+    ]) {
+      const column = element('section', 'queue-primitive-column');
+      column.append(element('h3', '', `${label} · ${number(count)}건`));
+      for (const row of queue.primitive[key]) {
+        const item = element('div', 'queue-primitive-item');
+        item.append(element('strong', '', row.management_id || row.finding_id.slice(0, 12)), element('span', '', row.title || '제목 없음'));
+        if (key === 'errors' && row.summary) item.append(element('small', '', row.summary));
+        column.append(item);
+      }
+      columns.append(column);
+    }
+    board.append(columns);
+    $('queue-workers').append(board);
   }
   const title = row => `${row.project || '대상 미입력'} · ${row.title || '제목 없음'} (${row.submission_id})`;
   renderQueueTable('queue-active', queue.active, [

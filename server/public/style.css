@@ -79,6 +79,16 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-worker-target{font-size:11px;overflow-wrap:anywhere}
 .queue-worker-current{font-size:11px;color:#e0e5ee;line-height:1.4;overflow-wrap:anywhere;margin-bottom:7px}
 .queue-worker-meta{font:10px/1.5 Consolas,"Cascadia Code",monospace;color:#9ba7bc;overflow-wrap:anywhere}
+.queue-primitive-board{grid-column:1/-1;border-top:1px solid #303747;padding-top:12px}
+.queue-primitive-title{display:block;margin-bottom:8px;font-size:11px;color:#dce2ed}
+.queue-primitive-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.queue-primitive-column{min-width:0;border:1px solid #303747;border-radius:6px;background:#151924;padding:9px 10px}
+.queue-primitive-column h3{margin:0 0 7px;color:#acb6c8;font-size:10px}
+.queue-primitive-item{display:flex;gap:6px;flex-wrap:wrap;padding:5px 0;border-top:1px solid #292e3b;font-size:10px;line-height:1.4;overflow-wrap:anywhere}
+.queue-primitive-item strong{color:#c7b6ff}
+.queue-primitive-item span{color:#e2e7f0}
+.queue-primitive-item small{flex-basis:100%;color:#eda9ba;font-size:10px}
+@media(max-width:720px){.queue-primitive-columns{grid-template-columns:1fr}}
 .queue-badge{display:inline-block;flex:none;padding:3px 6px;border:1px solid #485061;border-radius:4px;color:#c7cfdb;font-size:10px;white-space:nowrap}
 .queue-badge.busy{border-color:#796347;color:#e9ca92;background:#3b3026}
 .queue-badge.idle{border-color:#35785e;color:#9be7bf;background:#1d3b32}
@@ -192,6 +202,7 @@ footer a{color:#b9a8fb}
 .detail-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 24px 16px}
 .detail-fact{background:#1b2030;border:1px solid #303747;border-radius:6px;padding:10px;min-width:0}
 .detail-fact.review-summary{grid-column:1/-1}
+.detail-fact.review-summary strong{white-space:pre-wrap}
 .detail-fact span{display:block;color:#8792a8;font-size:10px;margin-bottom:6px}
 .detail-fact strong{display:block;color:#dce2ed;font-size:11px;overflow-wrap:anywhere;line-height:1.4}
 .detail-link{border:0;background:transparent;color:#c7b6ff;text-decoration:underline;padding:0;text-align:left;font-size:inherit}

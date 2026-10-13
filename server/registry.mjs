@@ -142,9 +142,12 @@ export function listRegistry(db) {
   const live = db.prepare(`SELECT r.*, e.title, e.agent_id, e.created_at, e.markdown,
     e.corrects_event_id AS replaces_event_id, v.status AS review_status,
     v.verdict AS review_verdict, v.summary AS review_summary, v.provider AS review_provider,
+    pr.status AS primitive_review_status, pr.summary AS primitive_review_summary,
+    pr.completed_at AS primitive_review_completed_at,
     EXISTS(SELECT 1 FROM patches p WHERE p.finding_id = r.finding_id) AS has_patch
     FROM finding_registry r JOIN events e ON e.id = r.finding_id
     LEFT JOIN finding_reviews v ON v.finding_id = r.finding_id
+    LEFT JOIN primitive_reviews pr ON pr.finding_id = r.finding_id
     WHERE r.superseded_by IS NULL ORDER BY r.approved_at DESC, e.received_at DESC`).all().map(row => {
     const data = readFrontMatter(row.markdown).data;
     const { markdown, finding_id, approved_at, withdrawn_at, superseded_by, updated_at, admin_overrides_json, title_override, ...record } = row;
@@ -164,7 +167,8 @@ export function listRegistry(db) {
     ...record, event_id: `history:${row.management_id}`, origin: 'history',
     latest_verification: historyVerifications.get(row.management_id) ?? null,
     agent_id: null, created_at: null, review_status: null, review_verdict: null, review_provider: null,
-    review_summary: null, registration_status: 'history', verified_at: null,
+    review_summary: null, primitive_review_status: null, primitive_review_summary: null,
+    primitive_review_completed_at: null, registration_status: 'history', verified_at: null,
     updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null, has_patch: 0,
     file_path: null, code_refs: [], access_requirements: [], verified_impacts: [],
     vm_environment: null, reproduction_command: null, kasan_summary: null,

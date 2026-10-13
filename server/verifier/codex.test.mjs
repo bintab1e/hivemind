@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 
 const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [
   { number: 1, text: 'int nfsd4_proc_compound(void) { return 0; }' },
@@ -12,7 +12,7 @@ const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4pro
 const options = cliPath => ({ cliPath, trustedSource });
 
 test('both structured-output schemas are valid JSON', () => {
-  for (const name of ['codex-output.schema.json', 'codex-relevance.schema.json']) {
+  for (const name of ['codex-output.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json']) {
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(new URL(name, import.meta.url), 'utf8')));
   }
 });
@@ -68,6 +68,32 @@ process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
   fs.writeFileSync(cli, code, { mode: 0o700 });
   return cli;
 }
+
+test('primitive review stays advisory and grounds each suggested direction in pinned source', async t => {
+  const finding = {
+    title: 'NFSv4 COMPOUND boundary read', file_path: 'fs/nfsd/nfs4proc.c',
+    nfs_version: '4.2', privilege: 'AUTH_SYS', verified_impacts: ['kasan_read'],
+    report: '## Summary\nA bounds read was observed.',
+    poc_source: 'int main(void) { return 0; }\n',
+    kasan_log: 'BUG: KASAN: slab-out-of-bounds\nRead of size 4\n',
+  };
+  const answer = {
+    candidates: [{ primitive: 'controlled_read', source_path: 'fs/nfsd/nfs4proc.c', source_line: 1,
+      basis: '길이 인자에 따라 읽는 위치가 달라질 가능성이 있습니다.', missing_evidence: '읽기 주소의 제어 범위를 별도로 확인해야 합니다.' }],
+  };
+  const cliPath = fakeCli(t, answer, { type: 'turn.completed' }, 0, '<primitive-evidence>');
+  const result = await reviewPrimitiveWithCodex(finding, { cliPath, trustedSource });
+  assert.match(result.summary, /Controlled Read 추가 가능성/);
+  assert.doesNotMatch(result.summary, /미재현|불명확/);
+  assert.match(result.summary, /fs\/nfsd\/nfs4proc\.c:1/);
+  assert.equal(result.candidates.length, 1);
+  assert.deepEqual(finding.verified_impacts, ['kasan_read']);
+  const noCandidateCli = fakeCli(t, { candidates: [] }, { type: 'turn.completed' }, 0, '<primitive-evidence>');
+  assert.equal((await reviewPrimitiveWithCodex(finding, { cliPath: noCandidateCli, trustedSource })).summary, null);
+  const badCli = fakeCli(t, { ...answer, candidates: [{ ...answer.candidates[0], source_line: 99 }] }, { type: 'turn.completed' }, 0, '<primitive-evidence>');
+  await assert.rejects(reviewPrimitiveWithCodex(finding, { cliPath: badCli, trustedSource }),
+    error => error instanceof CodexReviewError && error.code === 'ungrounded_output');
+});
 
 test('uses a C PoC, includes impact allegations, retains original evidence, and never claims reproduction', async t => {
   const result = await reviewSubmissionWithCodex({ ...submission, auth_token: 'HIGHLY_SENSITIVE', metadata: { secret: 'HIGHLY_SENSITIVE', nfs_version: '4.2', claimed_impacts: ['kasan_read', 'lpe'] } },

@@ -105,3 +105,37 @@ curl -fsS http://SERVER_LAN_IP:8765/healthz
 ```
 
 실제 2 VM 실행 성공 여부는 VM 이미지를 준비한 서버에서 통제된 제출로만 확인할 수 있습니다. 대시보드의 제보 상태가 `pending`에서 검증 결과로 바뀌는지 확인하고, `approved`에는 서버 VM에서 새로 생성된 KASAN 증거와 관리 번호가 함께 있어야 합니다. 기존 기록은 이 절차로 다시 검증하거나 번호를 다시 부여하지 않습니다. 검증 실패 원인은 제보 상태에 남으며 `needs_evidence`와 `needs_review`는 근거를 보완한 뒤 관리자가 재시도할 수 있습니다.
+
+## 5. 승인 후 프리미티브 추가 검토
+
+별도 워커 하나가 2VM 검증을 거쳐 `approved`가 된 신규 취약점만 승인 순서대로 얕게 검토합니다. Codex는 승인된 `report.md`·`poc.c`·`kasan.log`와 커밋이 일치하는 깨끗한 커널 소스를 읽습니다. 근거가 있는 추가 프리미티브 가능성이 있을 때만 의견을 저장하고, 검증된 영향 체크표시는 변경하지 않습니다. 후보가 없으면 추가 의견은 비워 둡니다. 기존 A/B/C 기록은 자동 검토 대상이 아닙니다. 소스가 준비되지 않은 커밋의 작업은 대기열에 남으며, 일시적인 검토 실패는 두 번 재시도한 뒤 검증 큐에 오류로 표시합니다.
+
+`bintable` 계정에 별도 작업 디렉터리를 만들고, 아래와 같은 사용자 서비스를 구성합니다. 두 커널 소스 경로는 운영 환경에 맞게 지정하며 구분자는 Linux의 `:`입니다. 기존 검증 워커와 같은 비공개 Unix 소켓을 사용하므로 별도 TCP 포트를 열지 않습니다.
+
+```bash
+install -d -m 0700 /absolute/bintable/primitive-work
+```
+
+```ini
+[Unit]
+Description=Hivemind primitive follow-up reviewer
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/bintable/hivemind-checkout
+ExecStart=/usr/bin/node /absolute/bintable/hivemind-checkout/server/verifier/primitive-worker.mjs
+Environment=HIVEMIND_VERIFIER_SOCKET=/absolute/private/data-directory/verifier.sock
+Environment=HIVEMIND_CODEX_CLI=/absolute/path/to/codex
+Environment=HIVEMIND_PRIMITIVE_KERNEL_SOURCES=/absolute/kernel-stable:/absolute/kernel-rc
+Environment=HIVEMIND_PRIMITIVE_WORK_ROOT=/absolute/bintable/primitive-work
+UMask=0077
+NoNewPrivileges=true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+웹 서버를 먼저 새 버전으로 재시작해 `/primitive/*` 소켓 API를 준비한 뒤 서비스를 시작합니다. 검증 큐에는 이 워커가 세 번째 카드로 나타나고, 추가할 의견이 있는 경우에만 취약점 상세의 정적 검토 의견에 표시됩니다.

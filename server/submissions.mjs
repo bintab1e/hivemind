@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { hash, invalid, isStandaloneUserspacePoc } from './contract.mjs';
+import { hash, invalid, isStandaloneUserspacePoc, readFrontMatter } from './contract.mjs';
 import { registerFinding, validateRegistryMetadata } from './registry.mjs';
 
 const MAX_FILES = 20;
@@ -12,6 +12,8 @@ const MAX_PENDING_TOTAL = 300;
 const MAX_STORED_BYTES = 4_000_000_000;
 const LEASE_MS = 60 * 60_000;
 const WORKER_ONLINE_MS = 60_000;
+const PRIMITIVE_LEASE_MS = 10 * 60_000;
+const MAX_PRIMITIVE_SUMMARY_BYTES = 6000;
 const verificationPhases = new Set(['preparing', 'static_review', 'qemu_reproduction', 'trace_review', 'finalizing']);
 const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
@@ -62,6 +64,18 @@ export function initializeSubmissions(db) {
       worker_id TEXT PRIMARY KEY, target_commit TEXT NOT NULL,
       current_submission_id TEXT, started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS primitive_reviews (
+      finding_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'complete', 'error')),
+      summary TEXT, requested_at TEXT NOT NULL, claimed_at TEXT, completed_at TEXT,
+      last_activity_at TEXT, lease_token TEXT, retry_after TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+      worker_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS primitive_reviews_queue ON primitive_reviews(status, requested_at, finding_id);
+    CREATE TABLE IF NOT EXISTS primitive_workers (
+      worker_id TEXT PRIMARY KEY, current_finding_id TEXT,
+      started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
   `);
   const columns = new Set(db.prepare('PRAGMA table_info(submissions)').all().map(column => column.name));
   if (!columns.has('lease_token')) db.exec('ALTER TABLE submissions ADD COLUMN lease_token TEXT');
@@ -71,6 +85,11 @@ export function initializeSubmissions(db) {
   if (!columns.has('last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN last_activity_at TEXT');
   if (!columns.has('origin')) db.exec("ALTER TABLE submissions ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'");
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
+  const primitiveColumns = new Set(db.prepare('PRAGMA table_info(primitive_reviews)').all().map(column => column.name));
+  if (!primitiveColumns.has('retry_after')) db.exec('ALTER TABLE primitive_reviews ADD COLUMN retry_after TEXT');
+  db.prepare(`INSERT OR IGNORE INTO primitive_reviews (finding_id, status, requested_at)
+    SELECT finding_id, 'pending', completed_at FROM submissions
+    WHERE status = 'approved' AND finding_id IS NOT NULL AND completed_at IS NOT NULL`).run();
 }
 
 export function listVerificationQueue(db) {
@@ -109,10 +128,48 @@ export function listVerificationQueue(db) {
     .map(row => {
       const online = Date.parse(row.last_seen_at) >= onlineCutoff;
       const current = online && processingIds.has(row.current_submission_id) ? row.current_submission_id : null;
-      return { ...row, current_submission_id: current, status: online ? current ? 'busy' : 'idle' : 'offline' };
+      return { ...row, role: 'verifier', current_submission_id: current, status: online ? current ? 'busy' : 'idle' : 'offline' };
     });
+  const primitivePending = db.prepare(`SELECT p.finding_id, r.management_id, e.title, p.requested_at, p.retry_after
+    FROM primitive_reviews p JOIN finding_registry r ON r.finding_id = p.finding_id
+    JOIN events e ON e.id = p.finding_id WHERE p.status = 'pending'
+    ORDER BY p.requested_at, p.finding_id LIMIT 50`).all();
+  const primitiveActive = db.prepare(`SELECT p.finding_id, r.management_id, e.title, p.claimed_at, p.last_activity_at
+    FROM primitive_reviews p JOIN finding_registry r ON r.finding_id = p.finding_id
+    JOIN events e ON e.id = p.finding_id WHERE p.status = 'processing'
+    ORDER BY p.claimed_at, p.finding_id`).all();
+  const primitiveErrors = db.prepare(`SELECT p.finding_id, r.management_id, e.title, p.summary, p.completed_at
+    FROM primitive_reviews p JOIN finding_registry r ON r.finding_id = p.finding_id
+    JOIN events e ON e.id = p.finding_id WHERE p.status = 'error'
+    ORDER BY p.completed_at DESC, p.finding_id DESC LIMIT 50`).all();
+  const primitiveCounts = Object.fromEntries(db.prepare('SELECT status, COUNT(*) AS count FROM primitive_reviews GROUP BY status').all()
+    .map(row => [row.status, row.count]));
+  const primitiveRows = db.prepare(`SELECT w.worker_id, w.current_finding_id, w.started_at, w.last_seen_at,
+      r.management_id AS current_management_id, e.title AS current_title, p.status AS review_status
+    FROM primitive_workers w LEFT JOIN primitive_reviews p ON p.finding_id = w.current_finding_id
+    LEFT JOIN finding_registry r ON r.finding_id = w.current_finding_id
+    LEFT JOIN events e ON e.id = w.current_finding_id
+    WHERE w.last_seen_at >= ? ORDER BY w.last_seen_at DESC, w.worker_id LIMIT 10`).all(recent);
+  const anyPrimitiveOnline = primitiveRows.some(row => Date.parse(row.last_seen_at) >= onlineCutoff);
+  const visiblePrimitiveWorkers = anyPrimitiveOnline
+    ? primitiveRows.filter(row => Date.parse(row.last_seen_at) >= onlineCutoff)
+    : primitiveRows.slice(0, 1);
+  for (const row of visiblePrimitiveWorkers) {
+    const online = Date.parse(row.last_seen_at) >= onlineCutoff;
+    const current = online && row.review_status === 'processing' ? row.current_finding_id : null;
+    workers.push({ worker_id: row.worker_id, role: 'primitive', target_commit: null,
+      current_submission_id: null, current_finding_id: current,
+      current_management_id: current ? row.current_management_id : null,
+      current_title: current ? row.current_title : null,
+      pending_count: primitiveCounts.pending || 0,
+      started_at: row.started_at, last_seen_at: row.last_seen_at,
+      status: online ? current ? 'busy' : 'idle' : 'offline' });
+  }
   return { counts: { processing: active.length, pending: pending.length, blocked: blockedCount },
-    active, pending, blocked, blocked_has_more: blockedCount > blocked.length, workers };
+    active, pending, blocked, blocked_has_more: blockedCount > blocked.length, workers,
+    primitive: { pending: primitivePending, active: primitiveActive, errors: primitiveErrors,
+      counts: { pending: primitiveCounts.pending || 0, processing: primitiveCounts.processing || 0,
+        complete: primitiveCounts.complete || 0, error: primitiveCounts.error || 0 } } };
 }
 
 export function submitSubmission(db, input, agentId, origin = 'agent') {
@@ -403,6 +460,146 @@ export function heartbeatWorker(db, input) {
   return { worker_id: workerId, last_seen_at: at };
 }
 
+function primitiveWorkerId(input) {
+  if (typeof input !== 'string' || !/^[a-f0-9]{32}$/.test(input)) invalid('Invalid primitive worker_id');
+  return input;
+}
+
+function primitiveFindingId(input) {
+  if (typeof input !== 'string' || !/^[a-f0-9]{64}$/.test(input)) invalid('Invalid primitive finding_id');
+  return input;
+}
+
+function supportedPrimitiveCommits(input) {
+  if (!Array.isArray(input) || input.length > 16 ||
+      input.some(commit => typeof commit !== 'string' || !/^[a-f0-9]{40}$/.test(commit)) ||
+      new Set(input).size !== input.length) invalid('Invalid supported_commits');
+  return input;
+}
+
+function primitiveLease(row, token) {
+  if (row?.status !== 'processing') invalid('Primitive review is not processing', 409);
+  checkLease(row, token);
+}
+
+export function claimPrimitiveReview(db, workerId, supportedCommits) {
+  primitiveWorkerId(workerId);
+  const commits = supportedPrimitiveCommits(supportedCommits);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const stale = new Date(Date.now() - PRIMITIVE_LEASE_MS).toISOString();
+    db.prepare(`UPDATE primitive_reviews SET status = 'pending', claimed_at = NULL, last_activity_at = NULL,
+      lease_token = NULL, worker_id = NULL, retry_after = ?
+      WHERE status = 'processing' AND last_activity_at < ? AND attempts < 3`)
+      .run(new Date(Date.now() + 30_000).toISOString(), stale);
+    db.prepare(`UPDATE primitive_reviews SET status = 'error', summary = 'Primitive review lease expired after retries',
+      completed_at = ?, lease_token = NULL, worker_id = NULL, retry_after = NULL
+      WHERE status = 'processing' AND last_activity_at < ? AND attempts >= 3`).run(now(), stale);
+    if (!commits.length) { db.exec('COMMIT'); return null; }
+    const placeholders = commits.map(() => '?').join(', ');
+    const row = db.prepare(`SELECT p.finding_id, r.management_id, r.privilege, r.nfs_version,
+        e.title, e.repo_commit, e.markdown, s.id AS submission_id
+      FROM primitive_reviews p JOIN finding_registry r ON r.finding_id = p.finding_id
+      JOIN events e ON e.id = p.finding_id
+      JOIN submissions s ON s.finding_id = p.finding_id AND s.status = 'approved'
+      WHERE p.status = 'pending' AND e.repo_commit IN (${placeholders})
+        AND (p.retry_after IS NULL OR p.retry_after <= ?)
+      ORDER BY p.requested_at, p.finding_id LIMIT 1`).get(...commits, now());
+    if (!row) { db.exec('COMMIT'); return null; }
+    const artifacts = db.prepare(`SELECT ordinal, content FROM submission_artifacts
+      WHERE submission_id = ? AND ordinal IN (1000, 1001, 1003) ORDER BY ordinal`).all(row.submission_id);
+    if (artifacts.length !== 3 || artifacts.some((item, index) => item.ordinal !== [1000, 1001, 1003][index])) {
+      db.prepare(`UPDATE primitive_reviews SET status = 'error', summary = 'Canonical verification artifacts are missing',
+        completed_at = ? WHERE finding_id = ?`).run(now(), row.finding_id);
+      db.exec('COMMIT');
+      return null;
+    }
+    const { data } = readFrontMatter(row.markdown);
+    const at = now();
+    const leaseToken = randomBytes(32).toString('hex');
+    db.prepare(`UPDATE primitive_reviews SET status = 'processing', claimed_at = ?, last_activity_at = ?,
+      lease_token = ?, retry_after = NULL, attempts = attempts + 1, worker_id = ? WHERE finding_id = ?`)
+      .run(at, at, leaseToken, workerId, row.finding_id);
+    db.exec('COMMIT');
+    return { finding_id: row.finding_id, management_id: row.management_id, title: row.title,
+      repo_commit: row.repo_commit, file_path: data.file_path ?? null,
+      code_refs: Array.isArray(data.code_refs) ? data.code_refs : [],
+      nfs_version: row.nfs_version, privilege: row.privilege,
+      verified_impacts: Array.isArray(data.verified_impacts) ? data.verified_impacts : [],
+      report: Buffer.from(artifacts[0].content).toString('utf8'),
+      poc_source: Buffer.from(artifacts[1].content).toString('utf8'),
+      kasan_log: Buffer.from(artifacts[2].content).toString('utf8'), lease_token: leaseToken };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function heartbeatPrimitiveWorker(db, input) {
+  const workerId = primitiveWorkerId(input?.worker_id);
+  const findingId = input?.finding_id == null ? null : primitiveFindingId(input.finding_id);
+  if (findingId === null && input?.lease_token != null) invalid('Idle primitive heartbeat cannot include a lease token');
+  const at = now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (findingId !== null) {
+      const row = db.prepare('SELECT status, lease_token, worker_id FROM primitive_reviews WHERE finding_id = ?').get(findingId);
+      primitiveLease(row, input.lease_token);
+      if (row.worker_id !== workerId) invalid('Primitive worker does not own this review', 409);
+      db.prepare('UPDATE primitive_reviews SET last_activity_at = ? WHERE finding_id = ?').run(at, findingId);
+    }
+    db.prepare(`INSERT INTO primitive_workers(worker_id, current_finding_id, started_at, last_seen_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET
+      current_finding_id = excluded.current_finding_id, last_seen_at = excluded.last_seen_at`)
+      .run(workerId, findingId, at, at);
+    db.prepare('DELETE FROM primitive_workers WHERE last_seen_at < ?')
+      .run(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  return { worker_id: workerId, last_seen_at: at };
+}
+
+export function completePrimitiveReview(db, findingId, summary, leaseToken) {
+  primitiveFindingId(findingId);
+  const normalized = summary === null || typeof summary === 'string' && !summary.trim()
+    ? null : value(summary, 'primitive review summary', MAX_PRIMITIVE_SUMMARY_BYTES, true);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = db.prepare('SELECT status, lease_token, summary FROM primitive_reviews WHERE finding_id = ?').get(findingId);
+    if (!row) invalid('Primitive review not found', 404);
+    if (row.status === 'complete') {
+      if (row.summary !== normalized) invalid('Primitive review already completed with different content', 409);
+      db.exec('COMMIT');
+      return { finding_id: findingId, status: 'complete', replayed: true };
+    }
+    primitiveLease(row, leaseToken);
+    db.prepare(`UPDATE primitive_reviews SET status = 'complete', summary = ?, completed_at = ?,
+      last_activity_at = ?, lease_token = NULL WHERE finding_id = ?`).run(normalized, now(), now(), findingId);
+    db.exec('COMMIT');
+    return { finding_id: findingId, status: 'complete', replayed: false };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function failPrimitiveReview(db, findingId, reason, leaseToken) {
+  primitiveFindingId(findingId);
+  const message = value(reason, 'primitive failure reason', 1000, true);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = db.prepare('SELECT status, lease_token, attempts FROM primitive_reviews WHERE finding_id = ?').get(findingId);
+    if (!row) invalid('Primitive review not found', 404);
+    primitiveLease(row, leaseToken);
+    if (row.attempts < 3) {
+      const retryAfter = new Date(Date.now() + 30_000 * 2 ** (row.attempts - 1)).toISOString();
+      db.prepare(`UPDATE primitive_reviews SET status = 'pending', summary = NULL, claimed_at = NULL,
+        last_activity_at = NULL, lease_token = NULL, worker_id = NULL, retry_after = ? WHERE finding_id = ?`)
+        .run(retryAfter, findingId);
+      db.exec('COMMIT');
+      return { finding_id: findingId, status: 'pending', retry_after: retryAfter };
+    }
+    db.prepare(`UPDATE primitive_reviews SET status = 'error', summary = ?, completed_at = ?,
+      lease_token = NULL, retry_after = NULL WHERE finding_id = ?`).run(message, now(), findingId);
+    db.exec('COMMIT');
+    return { finding_id: findingId, status: 'error', retry_after: null };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
 export function failSubmission(db, id, reason, leaseToken) {
   const row = db.prepare('SELECT status, lease_token FROM submissions WHERE id = ?').get(id);
   if (!row) invalid('Submission not found', 404);
@@ -539,6 +736,8 @@ export function completeSubmission(db, id, result, leaseToken) {
     }
     db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
       .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), at, id);
+    db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
+      .run(findingId, at);
     db.exec('COMMIT');
     return getSubmission(db, id);
   } catch (error) { db.exec('ROLLBACK'); throw error; }

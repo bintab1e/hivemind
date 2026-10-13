@@ -19,16 +19,32 @@ test('verification queue shows real worker and job stages, with empty and error 
   });
   for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked', 'queue-updated', 'queue-worker-count', 'queue-active-count', 'queue-pending-count', 'queue-blocked-count']) elements.set(id, makeElement('div'));
   const state = {
-    data: { tracks: [{ track_id: 'rc', label: '최신 RC', version_id: '7.3-rc7', repo_commit: 'abc123' }] },
+    data: { tracks: [
+      { track_id: 'rc', label: '최신 RC', version_id: '7.3-rc7', repo_commit: 'abc123' },
+      { track_id: 'stable', label: '최신 stable', version_id: '7.2.10', repo_commit: 'def456' },
+    ] },
     queue: {
       fetched_at: '2026-10-13T00:00:00Z', counts: { processing: 1, pending: 1, blocked: 2 },
-      workers: [{ worker_id: 'worker-1', status: 'busy', current_submission_id: 'run-1', target_commit: 'abc123', last_seen_at: '2026-10-13T00:00:00Z' }],
+      workers: [
+        { worker_id: 'worker-1', status: 'busy', current_submission_id: 'run-1', target_commit: 'abc123', last_seen_at: '2026-10-13T00:00:00Z' },
+        { worker_id: 'worker-2', status: 'idle', current_submission_id: null, target_commit: 'def456', last_seen_at: '2026-10-13T00:00:00Z' },
+        { role: 'primitive', worker_id: 'primitive-1', status: 'busy', current_finding_id: 'finding-5', current_management_id: 'A-043', current_title: 'new bug', pending_count: 2, last_seen_at: '2026-10-13T00:00:00Z' },
+      ],
       active: [{ submission_id: 'run-1', project: 'knfsd', title: 'active bug', agent_id: 'agent-1', status: 'processing', phase: 'qemu_reproduction', phase_updated_at: '2026-10-13T00:00:00Z', target_commit: 'abc123' }],
       pending: [{ submission_id: 'run-2', project: 'knfsd', title: 'pending bug', agent_id: 'web:opaque', origin: 'manual_upload', reporter: '연구원', position: 1, submitted_at: '2026-10-13T00:00:00Z', target_commit: 'def456' }],
       blocked: [
         { submission_id: 'run-3', project: 'knfsd', title: 'blocked bug', agent_id: 'agent-3', status: 'needs_evidence', reason: 'KASAN 증거 부족', target_commit: 'abc123' },
         { submission_id: 'run-4', project: 'knfsd', title: 'rejected bug', agent_id: 'agent-4', status: 'rejected', reason: 'PoC 재현 실패', target_commit: 'abc123' },
       ],
+      primitive: {
+        counts: { pending: 2, processing: 1, complete: 4, error: 1 },
+        pending: [
+          { finding_id: 'finding-6', management_id: 'A-044', title: 'next candidate' },
+          { finding_id: 'finding-7', management_id: 'A-045', title: 'another candidate' },
+        ],
+        active: [{ finding_id: 'finding-5', management_id: 'A-043', title: 'new bug' }],
+        errors: [{ finding_id: 'finding-3', management_id: 'A-041', title: 'review failed', summary: '검토 작업 중단' }],
+      },
     },
     queueError: null,
   };
@@ -42,6 +58,20 @@ test('verification queue shows real worker and job stages, with empty and error 
   const text = node => [node.textContent, ...node.children.map(text)].join(' ');
   context.renderQueue();
   assert.match(text(elements.get('queue-workers')), /작업 중/);
+  assert.match(text(elements.get('queue-workers')), /최신 stable · 7\.2\.10/);
+  const primitiveCard = elements.get('queue-workers').children[2];
+  assert.match(text(primitiveCard), /프리미티브 검토/);
+  assert.match(text(primitiveCard), /A-043 · new bug/);
+  assert.match(text(primitiveCard), /대기 2건/);
+  assert.doesNotMatch(text(primitiveCard), /커널|대상 커밋 없음/);
+  assert.equal(elements.get('queue-worker-count').textContent, '3개');
+  const primitiveBoard = elements.get('queue-workers').children[3];
+  assert.match(text(primitiveBoard), /대기 · 2건/);
+  assert.match(text(primitiveBoard), /A-044 next candidate/);
+  assert.match(text(primitiveBoard), /진행 중 · 1건/);
+  assert.match(text(primitiveBoard), /A-043 new bug/);
+  assert.match(text(primitiveBoard), /오류 · 1건/);
+  assert.match(text(primitiveBoard), /A-041 review failed 검토 작업 중단/);
   assert.match(text(elements.get('queue-workers')), /최신 RC · 7\.3-rc7/);
   assert.match(text(elements.get('queue-active')), /2VM PoC 재현/);
   assert.match(text(elements.get('queue-pending')), /def456/);
@@ -58,8 +88,10 @@ test('verification queue shows real worker and job stages, with empty and error 
   state.queue.pending = [];
   state.queue.blocked = [];
   state.queue.workers = [];
+  state.queue.primitive = { counts: { pending: 0, processing: 0, complete: 4, error: 0 }, pending: [], active: [], errors: [] };
   context.renderQueue();
   assert.match(text(elements.get('queue-pending')), /검증을 기다리는 신규 제출이 없습니다/);
+  assert.doesNotMatch(text(elements.get('queue-workers')), /next candidate|review failed/);
   state.queueError = new Error('서비스 오류');
   context.renderQueue();
   assert.match(text(elements.get('queue-active')), /서비스 오류/);

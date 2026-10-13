@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { HttpError, invalid } from './contract.mjs';
-import { claimSubmission, completeSubmission, failSubmission, heartbeatWorker, progressSubmission } from './submissions.mjs';
+import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, completeSubmission,
+  failPrimitiveReview, failSubmission, heartbeatPrimitiveWorker, heartbeatWorker,
+  progressSubmission } from './submissions.mjs';
 
 function reply(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -87,6 +89,23 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null) {
         const body = await inputJson(req);
         if (!/^[a-f0-9]{64}$/.test(body?.submission_id || '')) invalid('Invalid submission_id');
         return reply(res, 200, failSubmission(db, body.submission_id, body.reason, body.lease_token));
+      }
+      if (req.method === 'POST' && req.url === '/primitive/claim') {
+        const body = await inputJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).some(key => !['worker_id', 'supported_commits'].includes(key))) invalid('Invalid primitive claim request');
+        return reply(res, 200, { job: claimPrimitiveReview(db, body.worker_id, body.supported_commits) });
+      }
+      if (req.method === 'POST' && req.url === '/primitive/heartbeat') {
+        return reply(res, 200, heartbeatPrimitiveWorker(db, await inputJson(req)));
+      }
+      if (req.method === 'POST' && req.url === '/primitive/complete') {
+        const body = await inputJson(req);
+        return reply(res, 200, completePrimitiveReview(db, body?.finding_id, body?.summary, body?.lease_token));
+      }
+      if (req.method === 'POST' && req.url === '/primitive/fail') {
+        const body = await inputJson(req);
+        return reply(res, 200, failPrimitiveReview(db, body?.finding_id, body?.reason, body?.lease_token));
       }
       return reply(res, 404, { error: 'Not found' });
     } catch (error) {

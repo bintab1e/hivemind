@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidates"],
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["primitive", "source_path", "source_line", "basis", "missing_evidence"],
+        "properties": {
+          "primitive": { "type": "string", "enum": ["controlled_read", "controlled_write", "info_leak", "lpe", "rce"] },
+          "source_path": { "type": "string" },
+          "source_line": { "type": "integer" },
+          "basis": { "type": "string" },
+          "missing_evidence": { "type": "string" }
+        }
+      }
+    }
+  }
+}

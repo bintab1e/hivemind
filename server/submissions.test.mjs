@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openDatabase, setActiveTrack, startServer } from './server.mjs';
-import { claimSubmission, completeSubmission, getSubmission, getVerifiedArtifact, heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, progressSubmission, submitSubmission } from './submissions.mjs';
+import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, completeSubmission, failPrimitiveReview, getSubmission,
+  getVerifiedArtifact, heartbeatPrimitiveWorker, heartbeatWorker, listVerificationQueue,
+  listVerifiedArtifacts, progressSubmission, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
 import { postJson } from './verifier/worker.mjs';
 
@@ -45,6 +48,24 @@ const verdict = (status = 'observed', evidence = serial) => ({
     log: { filename: 'kasan.log', content: evidence.includes('BUG: KASAN:') ? trace : 'No KASAN evidence' },
   },
 });
+
+function socketPost(socketPath, endpoint, body) {
+  return new Promise((resolve, reject) => {
+    const encoded = JSON.stringify(body);
+    const request = http.request({ socketPath, path: endpoint, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(encoded) } }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        const result = JSON.parse(Buffer.concat(chunks).toString());
+        if (response.statusCode !== 200) reject(Object.assign(new Error(result.error), { status: response.statusCode }));
+        else resolve(result);
+      });
+    });
+    request.on('error', reject);
+    request.end(encoded);
+  });
+}
 
 test('unstructured submission stays out of registry until independent 2VM evidence promotes it once', t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-submissions-'));
@@ -351,4 +372,160 @@ test('agent HTTP intake and status require its token; verifier socket is local',
   assert.equal(await (await fetch(`${base}/report.md`, { headers: auth })).text(), report);
   assert.equal(await (await fetch(`${base}/poc.c`, { headers: auth })).text(), source);
   assert.equal((await fetch(`${base}/poc.py`, { headers: auth })).status, 404);
+  const primitiveWorker = 'e'.repeat(32);
+  await assert.rejects(socketPost(socketPath, '/primitive/claim', { worker_id: primitiveWorker }), error => error.status === 400);
+  await assert.rejects(socketPost(socketPath, '/primitive/claim', {
+    worker_id: primitiveWorker, supported_commits: [commit], extra: true,
+  }), error => error.status === 400);
+  const primitive = (await socketPost(socketPath, '/primitive/claim', {
+    worker_id: primitiveWorker, supported_commits: [commit],
+  })).job;
+  assert.equal(primitive.management_id, approved.management_id);
+  assert.equal(primitive.report, report);
+  assert.equal(primitive.poc_source, source);
+  assert.deepEqual(primitive.verified_impacts, ['kasan_read']);
+  await assert.rejects(socketPost(socketPath, '/primitive/complete', {
+    finding_id: primitive.finding_id, lease_token: '0'.repeat(64), summary: 'Potential further impact requires testing.',
+  }), error => error.status === 409);
+  await socketPost(socketPath, '/primitive/heartbeat', {
+    worker_id: primitiveWorker, finding_id: primitive.finding_id, lease_token: primitive.lease_token,
+  });
+  const primitiveQueue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
+  assert.equal(primitiveQueue.primitive.counts.processing, 1);
+  assert.equal(primitiveQueue.workers.find(worker => worker.role === 'primitive')?.current_management_id, approved.management_id);
+  assert.equal(JSON.stringify(primitiveQueue).includes(primitive.lease_token), false);
+  await socketPost(socketPath, '/primitive/complete', {
+    finding_id: primitive.finding_id, lease_token: primitive.lease_token,
+    summary: 'KASAN Read is verified; controlled access needs more evidence.',
+  });
+  assert.equal(listRegistry(db)[0].primitive_review_status, 'complete');
+  assert.match(listRegistry(db)[0].primitive_review_summary, /controlled access/);
+  assert.deepEqual(listRegistry(db)[0].verified_impacts, ['kasan_read']);
+});
+
+test('primitive review jobs follow approved submissions, survive restart, and retry expired leases', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-primitive-'));
+  const file = path.join(directory, 'db.sqlite3');
+  let db = openDatabase(file);
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  assert.equal(claimPrimitiveReview(db, 'a'.repeat(32), [commit]), null);
+  const first = submitSubmission(db, raw('primitive-first'), 'pc01').submission_id;
+  assert.equal(completeSubmission(db, first, verdict(), claimSubmission(db).lease_token).status, 'approved');
+  const second = submitSubmission(db, raw('primitive-second'), 'pc01').submission_id;
+  const secondSerial = serial.replace('slab-out-of-bounds', 'use-after-free');
+  const secondVerdict = verdict('observed', secondSerial);
+  secondVerdict.artifacts.log.content = secondSerial.slice(secondSerial.indexOf('BUG: KASAN:')).trim();
+  assert.equal(completeSubmission(db, second, secondVerdict, claimSubmission(db).lease_token).status, 'approved');
+  const before = db.prepare('SELECT finding_id, requested_at FROM primitive_reviews ORDER BY requested_at, finding_id').all();
+  assert.equal(before.length, 2);
+  db.prepare('UPDATE primitive_reviews SET requested_at = ? WHERE finding_id = ?').run('2026-01-01T00:00:00.000Z', before[0].finding_id);
+  db.prepare('UPDATE primitive_reviews SET requested_at = ? WHERE finding_id = ?').run('2026-01-02T00:00:00.000Z', before[1].finding_id);
+  const old = claimPrimitiveReview(db, 'a'.repeat(32), [commit]);
+  assert.equal(old.finding_id, before[0].finding_id);
+  assert.equal(listVerificationQueue(db).primitive.counts.pending, 1);
+  db.prepare('UPDATE primitive_reviews SET last_activity_at = ? WHERE finding_id = ?')
+    .run('2000-01-01T00:00:00.000Z', old.finding_id);
+  const noCandidate = claimPrimitiveReview(db, 'c'.repeat(32), [commit]);
+  assert.equal(noCandidate.finding_id, before[1].finding_id);
+  db.prepare('UPDATE primitive_reviews SET retry_after = ? WHERE finding_id = ?')
+    .run('2000-01-01T00:00:00.000Z', old.finding_id);
+  const retried = claimPrimitiveReview(db, 'b'.repeat(32), [commit]);
+  assert.equal(retried.finding_id, old.finding_id);
+  assert.notEqual(retried.lease_token, old.lease_token);
+  assert.throws(() => completePrimitiveReview(db, old.finding_id, 'Outdated review', old.lease_token), /lease/);
+  heartbeatPrimitiveWorker(db, { worker_id: 'b'.repeat(32), finding_id: retried.finding_id,
+    lease_token: retried.lease_token });
+  assert.equal(listVerificationQueue(db).workers.find(worker => worker.role === 'primitive').status, 'busy');
+  const summary = 'KASAN Read confirmed. Controlled Read and LPE are hypotheses requiring independent reproduction.';
+  assert.equal(completePrimitiveReview(db, retried.finding_id, summary, retried.lease_token).status, 'complete');
+  assert.equal(completePrimitiveReview(db, retried.finding_id, summary, retried.lease_token).replayed, true);
+  assert.throws(() => completePrimitiveReview(db, retried.finding_id, 'Different claim', retried.lease_token), /different content/);
+  assert.deepEqual(listRegistry(db).find(row => row.event_id === retried.finding_id).verified_impacts, ['kasan_read']);
+  assert.equal(claimPrimitiveReview(db, 'c'.repeat(32), [commit]), null);
+  assert.equal(completePrimitiveReview(db, noCandidate.finding_id, null, noCandidate.lease_token).status, 'complete');
+  assert.equal(completePrimitiveReview(db, noCandidate.finding_id, '', noCandidate.lease_token).replayed, true);
+  assert.equal(listRegistry(db).find(row => row.event_id === noCandidate.finding_id).primitive_review_summary, null);
+  assert.equal(listRegistry(db).find(row => row.event_id === noCandidate.finding_id).primitive_review_status, 'complete');
+  db.prepare('DELETE FROM primitive_reviews WHERE finding_id = ?').run(retried.finding_id);
+  db.close();
+  db = openDatabase(file);
+  assert.equal(db.prepare('SELECT status FROM primitive_reviews WHERE finding_id = ?').get(retried.finding_id).status, 'pending');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM primitive_reviews').get().count, 2);
+});
+
+test('primitive reviewer skips older unsupported commits and backs off transient failures', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-primitive-compat-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const first = submitSubmission(db, raw('primitive-incompatible'), 'pc01').submission_id;
+  const firstApproved = completeSubmission(db, first, verdict(), claimSubmission(db).lease_token);
+  assert.equal(firstApproved.status, 'approved');
+  const second = submitSubmission(db, raw('primitive-compatible'), 'pc01').submission_id;
+  const secondSerial = serial.replace('slab-out-of-bounds', 'use-after-free');
+  const secondVerdict = verdict('observed', secondSerial);
+  secondVerdict.artifacts.log.content = secondSerial.slice(secondSerial.indexOf('BUG: KASAN:')).trim();
+  const secondApproved = completeSubmission(db, second, secondVerdict, claimSubmission(db).lease_token);
+  assert.equal(secondApproved.status, 'approved');
+  const otherCommit = 'b'.repeat(40);
+  // Model an older approved finding from a different kernel track.
+  db.prepare('UPDATE events SET repo_commit = ? WHERE id = ?').run(otherCommit, firstApproved.finding_id);
+  db.prepare('UPDATE primitive_reviews SET requested_at = ? WHERE finding_id = ?')
+    .run('2026-01-01T00:00:00.000Z', firstApproved.finding_id);
+  db.prepare('UPDATE primitive_reviews SET requested_at = ? WHERE finding_id = ?')
+    .run('2026-01-02T00:00:00.000Z', secondApproved.finding_id);
+  assert.equal(claimPrimitiveReview(db, 'd'.repeat(32), []), null);
+  assert.throws(() => claimPrimitiveReview(db, 'd'.repeat(32), null), /supported_commits/);
+  assert.throws(() => claimPrimitiveReview(db, 'd'.repeat(32), [commit, commit]), /supported_commits/);
+  assert.throws(() => claimPrimitiveReview(db, 'd'.repeat(32), [commit.toUpperCase()]), /supported_commits/);
+  const compatible = claimPrimitiveReview(db, 'd'.repeat(32), [commit]);
+  assert.equal(compatible.finding_id, secondApproved.finding_id);
+  assert.equal(db.prepare('SELECT status FROM primitive_reviews WHERE finding_id = ?').get(firstApproved.finding_id).status, 'pending');
+  assert.equal(completePrimitiveReview(db, compatible.finding_id, null, compatible.lease_token).status, 'complete');
+  const older = claimPrimitiveReview(db, 'd'.repeat(32), [otherCommit]);
+  assert.equal(older.finding_id, firstApproved.finding_id);
+  const originalRequest = db.prepare('SELECT requested_at FROM primitive_reviews WHERE finding_id = ?').get(older.finding_id).requested_at;
+  const firstFailure = failPrimitiveReview(db, older.finding_id, 'Temporary Codex failure', older.lease_token);
+  assert.equal(firstFailure.status, 'pending');
+  assert.ok(Date.parse(firstFailure.retry_after) > Date.now());
+  assert.equal(claimPrimitiveReview(db, 'd'.repeat(32), [otherCommit]), null);
+  assert.equal(db.prepare('SELECT requested_at FROM primitive_reviews WHERE finding_id = ?').get(older.finding_id).requested_at, originalRequest);
+  db.prepare('UPDATE primitive_reviews SET retry_after = ? WHERE finding_id = ?').run('2000-01-01T00:00:00.000Z', older.finding_id);
+  const secondAttempt = claimPrimitiveReview(db, 'd'.repeat(32), [otherCommit]);
+  const secondFailure = failPrimitiveReview(db, older.finding_id, 'Temporary Codex failure', secondAttempt.lease_token);
+  assert.equal(secondFailure.status, 'pending');
+  assert.ok(Date.parse(secondFailure.retry_after) > Date.parse(firstFailure.retry_after));
+  db.prepare('UPDATE primitive_reviews SET retry_after = ? WHERE finding_id = ?').run('2000-01-01T00:00:00.000Z', older.finding_id);
+  const thirdAttempt = claimPrimitiveReview(db, 'd'.repeat(32), [otherCommit]);
+  assert.equal(failPrimitiveReview(db, older.finding_id, 'Codex failed after retries', thirdAttempt.lease_token).status, 'error');
+  assert.equal(claimPrimitiveReview(db, 'd'.repeat(32), [otherCommit]), null);
+  assert.equal(db.prepare('SELECT attempts FROM primitive_reviews WHERE finding_id = ?').get(older.finding_id).attempts, 3);
+});
+
+test('empty primitive support list reaps stale leases without claiming new jobs', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-primitive-reap-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const id = submitSubmission(db, raw('primitive-reap'), 'pc01').submission_id;
+  const approved = completeSubmission(db, id, verdict(), claimSubmission(db).lease_token);
+  assert.equal(approved.status, 'approved');
+  assert.equal(claimPrimitiveReview(db, 'f'.repeat(32), []), null);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const claimed = claimPrimitiveReview(db, 'f'.repeat(32), [commit]);
+    assert.equal(claimed.finding_id, approved.finding_id);
+    db.prepare('UPDATE primitive_reviews SET last_activity_at = ? WHERE finding_id = ?')
+      .run('2000-01-01T00:00:00.000Z', approved.finding_id);
+    assert.equal(claimPrimitiveReview(db, 'f'.repeat(32), []), null);
+    const row = db.prepare('SELECT status, retry_after, attempts FROM primitive_reviews WHERE finding_id = ?')
+      .get(approved.finding_id);
+    assert.equal(row.attempts, attempt);
+    assert.equal(row.status, attempt < 3 ? 'pending' : 'error');
+    if (attempt < 3) {
+      assert.ok(Date.parse(row.retry_after) > Date.now());
+      db.prepare('UPDATE primitive_reviews SET retry_after = ? WHERE finding_id = ?')
+        .run('2000-01-01T00:00:00.000Z', approved.finding_id);
+    } else assert.equal(row.retry_after, null);
+  }
 });
