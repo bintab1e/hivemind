@@ -49,7 +49,8 @@ export function stableWorkerId(config, hostname = os.hostname()) {
 
 export function postJson(socketPath, endpoint, body) {
   if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail', '/progress', '/heartbeat',
-    '/primitive/claim', '/primitive/complete', '/primitive/fail', '/primitive/heartbeat'].includes(endpoint)) throw new WorkerError('invalid_request');
+    '/primitive/claim', '/primitive/complete', '/primitive/fail', '/primitive/heartbeat',
+    '/duplicate/candidates', '/duplicate/result'].includes(endpoint)) throw new WorkerError('invalid_request');
   const encoded = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({ socketPath, path: endpoint, method: 'POST', timeout: 30_000,

@@ -217,6 +217,25 @@ test('IPC client sends JSON only to the local Unix socket', async t => {
   assert.deepEqual(await postJson(config.socketPath, '/claim', { target_commit: commit }), { job: null });
 });
 
+test('duplicate worker IPC routes are available on the same local socket', async t => {
+  const { config } = setup(t);
+  const routes = [];
+  const server = http.createServer(async (request, response) => {
+    routes.push(request.url);
+    assert.equal(request.method, 'POST');
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    assert.deepEqual(JSON.parse(body), {});
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(request.url === '/duplicate/candidates' ? { candidates: [] } : { status_changed: false }));
+  });
+  await new Promise(resolve => server.listen(config.socketPath, resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  assert.deepEqual(await postJson(config.socketPath, '/duplicate/candidates', {}), { candidates: [] });
+  assert.deepEqual(await postJson(config.socketPath, '/duplicate/result', {}), { status_changed: false });
+  assert.deepEqual(routes, ['/duplicate/candidates', '/duplicate/result']);
+});
+
 test('worker does not claim a job without a pinned full kernel commit', async t => {
   const { config } = setup(t);
   fs.writeFileSync(config.kernelInfoPath, JSON.stringify({ sourceCommit: 'main' }));
