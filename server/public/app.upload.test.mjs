@@ -9,6 +9,9 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-target', 'zip-file', 'zip-submit-result']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.match(html, /id="open-zip-submit"/);
+  assert.match(html, /<dialog id="zip-submit-dialog"[\s\S]*?<form id="zip-submit-form"[\s\S]*?<\/form>\s*<\/dialog>/);
+  assert.ok(html.indexOf('id="zip-submit-dialog"') > html.indexOf('</main>'));
   assert.doesNotMatch(html, /id="uploaded-panel"/);
   const start = source.indexOf('const uploadStatusLabels =');
   const end = source.indexOf('async function refresh()', start);
@@ -22,6 +25,10 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-target', 'zip-file', 'zip-submit-button', 'zip-submit-result']) {
     nodes.set(id, makeElement(id === 'zip-target' ? 'select' : 'div'));
   }
+  nodes.set('zip-submit-dialog', {
+    open: false, showModal() { this.open = true; }, close() { this.open = false; },
+  });
+  nodes.get('zip-title').focus = () => { nodes.get('zip-title').focused = true; };
   nodes.get('zip-submit-form').reset = () => {
     nodes.get('zip-title').value = '';
     nodes.get('zip-reporter').value = '';
@@ -29,9 +36,11 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
     nodes.get('zip-file').files = [];
   };
   let targets = [{ track_id: 'rc', label: 'RC', version_id: '7.3-rc7', repo_commit: 'a'.repeat(40) }];
+  let view = 'findings';
   const calls = [];
   const context = {
     document: { getElementById: id => nodes.get(id), createElement: makeElement },
+    activeView: () => view,
     btoa: input => Buffer.from(input, 'binary').toString('base64'),
     api: async (path, options) => {
       calls.push({ path, options });
@@ -47,9 +56,11 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
     const number = value => Number(value || 0).toLocaleString('ko-KR');
     const when = value => value || '—';
     ${source.slice(start, end)}
-    globalThis.upload = { loadUploadTargets, submitZip };
+    globalThis.upload = { openZipDialog, loadUploadTargets, submitZip };
   `, context);
-  await context.upload.loadUploadTargets();
+  await context.upload.openZipDialog();
+  assert.equal(nodes.get('zip-submit-dialog').open, true);
+  assert.equal(nodes.get('zip-title').focused, true);
   assert.match(nodes.get('zip-target').children[1].textContent, /RC · 7\.3-rc7/);
   nodes.get('zip-target').value = 'rc';
   nodes.get('zip-title').value = 'UAF in NFS';
@@ -78,4 +89,8 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   targets = [];
   await context.upload.loadUploadTargets();
   assert.equal(nodes.get('zip-submit-button').disabled, true);
+  nodes.get('zip-submit-dialog').close();
+  view = 'registry';
+  await context.upload.openZipDialog();
+  assert.equal(nodes.get('zip-submit-dialog').open, false);
 });

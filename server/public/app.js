@@ -64,7 +64,8 @@ function showView() {
   $('track-control').hidden = view !== 'coverage';
   $('coverage-footer').hidden = view !== 'coverage';
   $('findings-view').hidden = view !== 'findings' && view !== 'registry';
-  $('zip-submit-form').hidden = view !== 'findings';
+  $('open-zip-submit').hidden = view !== 'findings';
+  if (view !== 'findings' && $('zip-submit-dialog').open) $('zip-submit-dialog').close();
   $('finding-status-stats').hidden = view !== 'registry';
   $('queue-view').hidden = view !== 'queue';
   $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
@@ -956,6 +957,19 @@ const uploadStatusLabels = {
 let zipSubmitting = false;
 let uploadTargets = [];
 
+async function openZipDialog() {
+  if (activeView() !== 'findings') return;
+  const dialog = $('zip-submit-dialog');
+  if (dialog.open) return;
+  $('zip-submit-result').hidden = true;
+  $('zip-target').disabled = true;
+  $('zip-submit-button').disabled = true;
+  dialog.showModal();
+  $('zip-title').focus();
+  try { await loadUploadTargets(); }
+  catch (error) { uploadMessage(`대상 커널 조회 실패: ${error.message}`, true); }
+}
+
 function uploadMessage(message, error = false, submissionId = '') {
   const result = $('zip-submit-result');
   result.className = `zip-submit-result${error ? ' error' : ''}`;
@@ -1048,7 +1062,7 @@ async function refresh() {
       if (activeView() === 'coverage') await loadCoverage();
     }
     if (activeView() === 'queue') await loadVerificationQueue();
-    if (activeView() === 'findings') {
+    if (activeView() === 'findings' && $('zip-submit-dialog').open) {
       loadUploadTargets().catch(error => uploadMessage(`대상 커널 조회 실패: ${error.message}`, true));
     }
     $('error').hidden = true;
@@ -1058,6 +1072,12 @@ async function refresh() {
 }
 
 $('refresh').addEventListener('click', refresh);
+$('open-zip-submit').addEventListener('click', openZipDialog);
+$('close-zip-submit').addEventListener('click', () => $('zip-submit-dialog').close());
+$('zip-submit-dialog').addEventListener('click', event => {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  if (event.target === event.currentTarget && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) event.currentTarget.close();
+});
 $('zip-submit-form').addEventListener('submit', submitZip);
 $('finding-edit-mode').addEventListener('click', () => {
   if (state.editingFindingId) return;
@@ -1065,7 +1085,7 @@ $('finding-edit-mode').addEventListener('click', () => {
   renderFindings();
 });
 $('version').addEventListener('change', () => { setQuery({ track_id: $('version').value, version_id: '', repo_commit: '', agent_id: '' }); state.coveragePage = 1; state.coverageSortKey = 'unread'; state.coverageSortDir = 'desc'; refresh(); });
-for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); if (button.dataset.view === 'findings') loadUploadTargets().catch(error => uploadMessage(`대상 커널 조회 실패: ${error.message}`, true)); });
+for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); });
 for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).addEventListener(id === 'finding-search' ? 'input' : 'change', () => { if (state.editingFindingId) return; state.findingPage = 1; renderFindings(); });
 $('coverage-search').addEventListener('input', () => { state.coveragePage = 1; renderCoverage(); });
 $('coverage-component').addEventListener('change', () => { state.coveragePage = 1; renderCoverage(); });
