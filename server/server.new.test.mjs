@@ -17,7 +17,7 @@ test('direct knfsd finding, evidence, patch history and dashboard auth', async t
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-hub-'));
   const password = 'a-one-time-password';
   const salt = 'test-salt';
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'admin', dashboardPasswordHash: scryptSync(password, salt, 32).toString('hex'), dashboardPasswordSalt: salt });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'admin', dashboardPasswordHash: scryptSync(password, salt, 32).toString('hex'), dashboardPasswordSalt: salt });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const dashboardAuth = { Authorization: `Basic ${Buffer.from(`viewer:${password}`).toString('base64')}` };
   assert.equal((await fetch(`${url}/api/dashboard`)).status, 401);

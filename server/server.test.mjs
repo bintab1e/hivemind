@@ -21,7 +21,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
   oldDb.exec('CREATE TABLE batches (id TEXT PRIMARY KEY, agent_id TEXT, version_id TEXT, repo_commit TEXT, scope_hash TEXT, worktree_clean INTEGER, generated_at TEXT, received_at TEXT, files_json TEXT, coverage_json TEXT, progress_md TEXT)');
   oldDb.exec('CREATE TABLE agents (agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT)');
   oldDb.close();
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const agentTokens = {};
   for (const agent of ['pc1', 'pc2', 'pc3', 'pc4', 'pc5']) {
@@ -291,7 +291,7 @@ test('events remain immutable; conflicting checks and overlapping coverage stay 
 
 test('coverage exclusions report the exact failed merge condition', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-exclusions-'));
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const tokens = {};
   for (const agent of ['pc1', 'pc2', 'pc3', 'pc4', 'pc5']) {
@@ -341,7 +341,7 @@ test('coverage exclusions report the exact failed merge condition', async t => {
 
 test('gzip telemetry accepts detailed coverage above the legacy 10 MB limit', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-gzip-'));
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const created = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: 'gzip-agent' }) });
   const token = (await created.json()).token;
@@ -375,7 +375,7 @@ test('gzip telemetry accepts detailed coverage above the legacy 10 MB limit', as
 
 test('PoC and KASAN can be reported directly from an unverified hypothesis', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-direct-'));
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'test-token' });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'test-token' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const response = await fetch(`${url}/v1/admin/agents`, { method: 'POST', headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: 'pc1' }) });
   const { token } = await response.json();

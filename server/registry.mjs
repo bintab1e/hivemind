@@ -1,4 +1,4 @@
-import { hash, invalid, readFrontMatter, userspacePocError } from './contract.mjs';
+import { invalid, readFrontMatter } from './contract.mjs';
 
 const prefixes = { knfsd: 'A', 'NFS-Ganesha': 'B', libnfs: 'C' };
 const floors = { knfsd: 42, 'NFS-Ganesha': 21, libnfs: 1 };
@@ -82,10 +82,8 @@ export function initializeRegistry(db) {
   for (const correction of db.prepare("SELECT c.corrects_event_id, c.received_at FROM events c JOIN events f ON f.id = c.corrects_event_id WHERE c.kind = 'correction' AND f.kind = 'finding'").all()) {
     withdrawFinding(db, correction.corrects_event_id, correction.received_at);
   }
-  for (const row of db.prepare("SELECT e.id FROM events e JOIN finding_reviews v ON v.finding_id = e.id WHERE e.kind = 'finding' AND v.status = 'complete' AND v.verdict = 'likely' ORDER BY e.received_at, e.id").all()) {
-    db.exec('BEGIN IMMEDIATE');
-    try { promoteFinding(db, row.id); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
-  }
+  // A static review is advisory. The submission verifier assigns a number only
+  // after an independently observed two-VM reproduction.
 }
 
 export function registerFinding(db, id, data, createdAt) {
@@ -111,75 +109,14 @@ export function registerFinding(db, id, data, createdAt) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, ...Object.values(values), new Date().toISOString());
 }
 
-function hasEvidence(data) {
-  return typeof data.poc_source === 'string' && hash(data.poc_source) === data.poc_sha256 &&
-    !userspacePocError(data.poc_source, data.reproduction_command) &&
-    typeof data.kasan_log === 'string' && hash(data.kasan_log) === data.kasan_sha256 &&
-    /^[ \t]*(?:\[[^\]\r\n]{1,40}\][ \t]*)?BUG:[ \t]*KASAN:/im.test(data.kasan_log) &&
-    typeof data.vm_environment === 'string' && Boolean(data.vm_environment.trim());
-}
-
-// Caller holds BEGIN IMMEDIATE so review completion, sequence update and ID transfer commit together.
-export function promoteFinding(db, id) {
-  const row = db.prepare(`SELECT r.*, e.markdown, e.corrects_event_id, v.status AS review_status,
-    v.verdict AS review_verdict FROM finding_registry r JOIN events e ON e.id = r.finding_id
-    JOIN finding_reviews v ON v.finding_id = r.finding_id WHERE r.finding_id = ?`).get(id);
-  if (!row || row.management_id || row.superseded_by || row.withdrawn_at || row.report_status === '철회' || row.review_status !== 'complete' || row.review_verdict !== 'likely') return null;
-  const data = readFrontMatter(row.markdown).data;
-  if (!hasEvidence(data)) return null;
-  const approvedAt = new Date().toISOString();
-  const ancestors = [];
-  let ancestorId = row.corrects_event_id;
-  while (ancestorId) {
-    const ancestor = db.prepare('SELECT r.*, e.corrects_event_id, e.markdown FROM finding_registry r JOIN events e ON e.id = r.finding_id WHERE r.finding_id = ?').get(ancestorId);
-    if (!ancestor) break;
-    if (ancestor.target !== row.target) invalid('Finding revision cannot change registry target', 422);
-    ancestors.push(ancestor);
-    ancestorId = ancestor.corrects_event_id;
-  }
-  const previous = ancestors.find(item => item.management_id);
-  let managementId, number;
-  if (previous) {
-    managementId = previous.management_id;
-    number = previous.number;
-    db.prepare('UPDATE finding_registry SET management_id = NULL, updated_at = ?, revision = revision + 1 WHERE finding_id = ?').run(approvedAt, previous.finding_id);
-    const overrides = new Set(JSON.parse(row.admin_overrides_json));
-    const inheritedRows = ancestors.map(item => ({
-      ...item,
-      submitted: readFrontMatter(item.markdown).data,
-      overrides: new Set(JSON.parse(item.admin_overrides_json)),
-    }));
-    const inherited = Object.fromEntries(metadataFields.map(key => [key,
-      overrides.has(key) || Object.hasOwn(data, `registry_${key}`)
-        ? row[key]
-        : inheritedRows.find(item => item.overrides.has(key) || Object.hasOwn(item.submitted, `registry_${key}`) || !item.corrects_event_id)?.[key] ?? row[key],
-    ]));
-    db.prepare(`UPDATE finding_registry SET option = ?, privilege = ?, report_project = ?, owner = ?,
-      nfs_version = ?, vulnerability_type = ?, methodology = ?, found_date = ?, exploit = ?, cve = ?,
-      report_status = ?, withdrawn_at = ?, title_override = ? WHERE finding_id = ?`).run(
-      ...metadataFields.map(key => inherited[key]), overrides.has('report_status') ? row.report_status : previous.report_status,
-      overrides.has('report_status') ? row.withdrawn_at : previous.withdrawn_at,
-      row.title_override ?? ancestors.find(item => item.title_override)?.title_override ?? null, id);
-  } else {
-    const sequence = db.prepare('UPDATE registry_sequences SET last_number = last_number + 1 WHERE target = ? RETURNING last_number').get(row.target);
-    if (!sequence) invalid('Invalid registry target');
-    number = sequence.last_number;
-    managementId = `${prefixes[row.target]}-${String(number).padStart(3, '0')}`;
-  }
-  for (const ancestor of ancestors) db.prepare('UPDATE finding_registry SET superseded_by = ?, updated_at = ?, revision = revision + 1 WHERE finding_id = ?').run(id, approvedAt, ancestor.finding_id);
-  db.prepare('UPDATE finding_registry SET management_id = ?, number = ?, approved_at = ?, updated_at = ?, revision = revision + 1 WHERE finding_id = ?').run(managementId, number, approvedAt, approvedAt, id);
-  return managementId;
-}
-
 export function completeFindingReview(db, id, review) {
   if (!['likely', 'unlikely', 'uncertain'].includes(review.verdict) || typeof review.summary !== 'string' || !review.summary.trim()) invalid('Invalid static review');
   db.exec('BEGIN IMMEDIATE');
   try {
     const changed = db.prepare("UPDATE finding_reviews SET status = 'complete', verdict = ?, summary = ?, completed_at = ? WHERE finding_id = ? AND status = 'processing'").run(review.verdict, review.summary, new Date().toISOString(), id).changes;
     if (!changed) invalid('Finding review is not processing', 409);
-    const managementId = review.verdict === 'likely' ? promoteFinding(db, id) : null;
     db.exec('COMMIT');
-    return managementId;
+    return null;
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
@@ -202,7 +139,7 @@ export function withdrawFinding(db, id, at = new Date().toISOString()) {
 export function listRegistry(db) {
   const live = db.prepare(`SELECT r.*, e.title, e.agent_id, e.created_at, e.markdown,
     e.corrects_event_id AS replaces_event_id, v.status AS review_status,
-    v.verdict AS review_verdict, v.summary AS review_summary,
+    v.verdict AS review_verdict, v.summary AS review_summary, v.provider AS review_provider,
     EXISTS(SELECT 1 FROM patches p WHERE p.finding_id = r.finding_id) AS has_patch
     FROM finding_registry r JOIN events e ON e.id = r.finding_id
     LEFT JOIN finding_reviews v ON v.finding_id = r.finding_id
@@ -223,7 +160,7 @@ export function listRegistry(db) {
     const { manual_overrides_json, ...record } = row;
     return {
     ...record, event_id: `history:${row.management_id}`, origin: 'history',
-    agent_id: null, created_at: null, review_status: null, review_verdict: null,
+    agent_id: null, created_at: null, review_status: null, review_verdict: null, review_provider: null,
     review_summary: null, registration_status: 'history', verified_at: null,
     updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null, has_patch: 0,
     file_path: null, code_refs: [], access_requirements: [], verified_impacts: [],

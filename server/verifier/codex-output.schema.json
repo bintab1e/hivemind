@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reason", "normalized"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["likely", "unlikely", "uncertain"] },
+    "reason": { "type": "string" },
+    "normalized": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "report", "file_path", "code_refs", "source_evidence", "options", "permission", "nfs_version", "vulnerability_type", "found_date", "claimed_impacts", "poc_file_index", "poc_language", "build_command", "run_command", "log_file_indexes"],
+      "properties": {
+        "title": { "type": ["string", "null"] },
+        "report": { "type": ["string", "null"] },
+        "file_path": { "type": ["string", "null"] },
+        "code_refs": { "type": "array", "items": { "type": "string" } },
+        "source_evidence": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["path", "line"], "properties": { "path": { "type": "string" }, "line": { "type": "integer" } } } },
+        "options": { "type": ["string", "null"] },
+        "permission": { "type": ["string", "null"] },
+        "nfs_version": { "type": ["string", "null"] },
+        "vulnerability_type": { "type": ["string", "null"] },
+        "found_date": { "type": ["string", "null"] },
+        "claimed_impacts": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["kasan_read", "kasan_write", "controlled_read", "controlled_write", "rce", "lpe", "info_leak"] }
+        },
+        "poc_file_index": { "type": ["integer", "null"] },
+        "poc_language": { "type": ["string", "null"], "enum": ["c", "python", null] },
+        "build_command": { "type": ["string", "null"] },
+        "run_command": { "type": ["string", "null"] },
+        "log_file_indexes": { "type": "array", "items": { "type": "integer" } }
+      }
+    }
+  }
+}

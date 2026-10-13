@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mjs';
 import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
 import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
+import { getSubmission, initializeSubmissions, listSubmissions, retrySubmission, submitSubmission } from './submissions.mjs';
+import { startVerifierIpc } from './verifier-ipc.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -87,6 +89,7 @@ export function openDatabase(file) {
   if (!agentColumns.has('model_id')) db.exec('ALTER TABLE agents ADD COLUMN model_id TEXT');
   initializeRegistry(db);
   initializeHistoryArtifacts(db);
+  initializeSubmissions(db);
   return db;
 }
 
@@ -136,10 +139,11 @@ function exposedModes(db, agentId, hypothesisId, before = now()) {
   return db.prepare('SELECT DISTINCT mode FROM exposures WHERE agent_id = ? AND hypothesis_id = ? AND seen_at <= ?').all(agentId, hypothesisId, before).map(row => row.mode);
 }
 
-function addEvent(db, input, agentId) {
+function addEvent(db, input, agentId, allowLegacyFindings = false) {
   const event = validateEvent(input);
   if (event.agentId !== agentId) invalid('agent_id does not match token', 403);
   const { sourcePath, markdown, digest, data } = event;
+  if (!allowLegacyFindings && data.kind === 'finding') invalid('Submit findings through /v1/submissions for two-VM verification', 409);
   if (data.kind === 'finding') validateRegistryMetadata(data);
   const id = hash(`${data.version_id}\0${agentId}\0${sourcePath}`);
   if (data.kind === 'analysis') {
@@ -758,6 +762,7 @@ export async function startServer(options = {}) {
   const host = options.host ?? process.env.HIVEMIND_HOST ?? '127.0.0.1';
   const port = options.port ?? Number(process.env.HIVEMIND_PORT ?? 8765);
   const dataDir = options.dataDir ?? process.env.HIVEMIND_DATA_DIR ?? path.join(root, 'runtime', 'server');
+  const verifierSocketPath = options.verifierSocketPath ?? process.env.HIVEMIND_VERIFIER_SOCKET;
   const dashboardPassword = options.dashboardPassword ?? process.env.HIVEMIND_DASHBOARD_PASSWORD ?? '';
   const dashboardPasswordHash = options.dashboardPasswordHash ?? process.env.HIVEMIND_DASHBOARD_PASSWORD_HASH ?? '';
   const dashboardPasswordSalt = options.dashboardPasswordSalt ?? process.env.HIVEMIND_DASHBOARD_PASSWORD_SALT ?? '';
@@ -779,7 +784,8 @@ export async function startServer(options = {}) {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
       const admin = url.pathname.startsWith('/v1/admin/');
-      const agentRoute = ['/v1/exchange/events', '/v1/telemetry/batches', '/v1/sync/health', '/mcp'].includes(url.pathname);
+      const agentRoute = ['/v1/exchange/events', '/v1/telemetry/batches', '/v1/sync/health', '/v1/submissions', '/mcp'].includes(url.pathname)
+        || /^\/v1\/submissions\/[a-f0-9]{64}$/.test(url.pathname);
       if (url.pathname === '/mcp' && req.headers.origin) {
         const port = server.address().port;
         const allowed = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`, ...(process.env.HIVEMIND_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)]);
@@ -804,6 +810,9 @@ export async function startServer(options = {}) {
         }
       }
       if (url.pathname === '/v1/admin/agents' && req.method === 'GET') return send(res, 200, { agents: db.prepare('SELECT agent_id, client_name, model_id, created_at, last_seen_at FROM agents ORDER BY agent_id').all() });
+      if (url.pathname === '/v1/admin/submissions' && req.method === 'GET') return send(res, 200, { submissions: listSubmissions(db) });
+      const submissionRetry = /^\/v1\/admin\/submissions\/([a-f0-9]{64})\/retry$/.exec(url.pathname);
+      if (submissionRetry && req.method === 'POST') return send(res, 200, retrySubmission(db, submissionRetry[1]));
       const registryAdminMatch = /^\/v1\/admin\/registry\/([a-f0-9]{64})$/.exec(url.pathname);
       if (registryAdminMatch && req.method === 'PATCH') return send(res, 200, updateRegistry(db, registryAdminMatch[1], await readJson(req)));
       const registryRetryMatch = /^\/v1\/admin\/registry\/([a-f0-9]{64})\/retry-review$/.exec(url.pathname);
@@ -828,14 +837,17 @@ export async function startServer(options = {}) {
         const row = db.prepare('SELECT agent_id, version_id, repo_commit, manifest_json, lcov, coverage_json, progress_md FROM batches WHERE id = ?').get(batchMatch[1]);
         return row ? send(res, 200, { agent_id: row.agent_id, version_id: row.version_id, repo_commit: row.repo_commit, manifest: JSON.parse(row.manifest_json), lcov: row.lcov, coverage_json: row.coverage_json, progress_md: row.progress_md }) : send(res, 404, { error: 'Batch not found' });
       }
-      if (req.method === 'POST' && url.pathname === '/v1/exchange/events') return send(res, 200, addEvent(db, await readJson(req), agentId));
+      if (req.method === 'POST' && url.pathname === '/v1/exchange/events') return send(res, 200, addEvent(db, await readJson(req), agentId, options.allowLegacyFindings === true));
+      if (req.method === 'POST' && url.pathname === '/v1/submissions') return send(res, 202, submitSubmission(db, await readJson(req), agentId));
+      const submissionStatusMatch = /^\/v1\/submissions\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (req.method === 'GET' && submissionStatusMatch) return send(res, 200, getSubmission(db, submissionStatusMatch[1], agentId));
       if (req.method === 'POST' && url.pathname === '/v1/telemetry/batches') return send(res, 200, addBatch(db, await readJson(req), agentId));
       if (req.method === 'GET' && url.pathname === '/v1/sync/health') return send(res, 200, {
         ok: true,
         agent_id: agentId,
         agent_profile: db.prepare('SELECT client_name, model_id FROM agents WHERE agent_id = ?').get(agentId),
         server_time: now(),
-        exchange: { finding_revisions: true },
+        exchange: { finding_revisions: options.allowLegacyFindings === true },
         telemetry: { content_encodings: ['identity', 'gzip'], limits: telemetryLimits },
       });
       if (url.pathname === '/mcp' && req.method === 'GET') return send(res, 405, { error: 'SSE stream not supported' });
@@ -847,6 +859,7 @@ export async function startServer(options = {}) {
       }
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
+      if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
       const registryRowMatch = /^\/api\/registry\/rows\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'PATCH' && registryRowMatch) {
         if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to edit registry rows' });
@@ -926,6 +939,15 @@ export async function startServer(options = {}) {
     }
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+  let verifierServer;
+  if (verifierSocketPath) {
+    try { verifierServer = await startVerifierIpc(db, verifierSocketPath, options.verifierUser ?? process.env.HIVEMIND_VERIFIER_USER); }
+    catch (error) {
+      await new Promise(resolve => server.close(resolve));
+      db.close();
+      throw error;
+    }
+  }
   let kimiBusy = false;
   let sashikoBusy = false;
   const timer = setInterval(() => {
@@ -939,8 +961,8 @@ export async function startServer(options = {}) {
     }
   }, 2_000);
   timer.unref();
-  server.on('close', () => clearInterval(timer));
-  return { server, db, url: `http://${host}:${server.address().port}`, tokenPath };
+  server.on('close', () => { clearInterval(timer); verifierServer?.close(); });
+  return { server, verifierServer, db, url: `http://${host}:${server.address().port}`, tokenPath };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -15,10 +15,14 @@ sh agent/setup.sh 'http://<server-ip>:8765' rc
 
 설치가 끝나면 출력된 커널 폴더에서 **새 Codex/Claude 세션**을 여세요. Codex에서는 프로젝트와 `/hooks`에 표시되는 AgentCov `PostToolUse` 명령을 확인하고 신뢰해야 실제 열람이 기록됩니다. Claude에서는 프로젝트 `.mcp.json`의 서버를 확인·승인하세요. Claude Code의 코드 열람은 같은 체크아웃의 세션 기록에서 동기화 에이전트가 AgentCov로 가져옵니다. Windows에서 WSL에 설치했다면 Codex/Claude도 **같은 WSL 커널 체크아웃에서 실행**해야 WSL AgentCov에 열람이 잡힙니다. 네이티브 Windows 도구는 [수동 설치](MANUAL.md)가 필요합니다.
 
-stdio MCP는 2 VM에서 검증한 취약점 보고서·PoC·KASAN 로그를 즉시 서버로 보내고, 동기화 에이전트는 `fs/nfsd/`, `fs/nfs/`, `fs/nfs_common/`, `fs/lockd/`, `fs/exportfs/`, `net/sunrpc/`와 로컬 include 의존성 범위의 LCOV와 요약 JSON을 5분마다 보냅니다. 이 범위 외 KNFSD 실행 의존성은 모든 에이전트의 `coverage_prefixes`에 동일하게 추가하세요. 세션 원문·분석 PC의 절대 경로·로컬 자유 형식 진행 메모는 전송하지 않습니다. 로컬 telemetry 배치는 최신 1개만 유지합니다. Linux에서는 `systemctl --user status hivemind-agent`, macOS에서는 `launchctl print gui/$(id -u)/org.hivemind.knfsd-agent`로 동기화 상태를 확인합니다.
+stdio MCP의 `submit_vulnerability`는 원본 취약점 보고와 PoC·로그를 서버 검증 대기열로 보냅니다. KASAN 로그가 없어도 접수할 수 있으며, 서버의 검증과 2 VM 재현이 끝나기 전에는 취약점으로 확정되지 않습니다. 파일은 커널 체크아웃 또는 에이전트 `runtime/evidence/` 안에 두고 `files`에 `{ "path": "...", "kind": "poc" }` 형식으로 지정합니다. `kind`는 `report`, `poc`, `log`, `other` 중 하나이며 생략하면 확장자로 추정합니다. 보고서는 `report` 문자열 또는 파일로 제출할 수 있습니다. 파일은 최대 20개, 각 2 MB, 보고서 포함 총 8 MB입니다. 전송 실패 시 원본은 로컬 전용 outbox에 남고 동기화 에이전트가 같은 `client_submission_id`로 재전송합니다. 토큰·키·개인 경로는 첨부하지 마세요.
 
-`list_findings`와 `get_coverage_gaps`로 기존 보고와 조사 공백을 확인합니다. 취약점은 `queue_finding`으로 직접 제출하며 가설 ID가 필요하지 않습니다. 보고에는 두 VM의 역할·커널·연결을 `vm_environment`에 적고, 한국어 분석 보고서, 독립 사용자 공간 C PoC, 실제 KASAN 로그를 포함합니다. `verified_impacts`에는 직접 확인한 영향만 표시합니다. 수정은 `queue_finding_revision`에 기존 `event_id`와 새 전체 자료를 넣어 제출합니다. 토큰·비밀번호·SSH 키·개인 경로를 보고서나 진행도에 넣지 마세요. **코드 열람률은 검증 결과가 아닙니다.**
+이전 버전에서 `exchange/outbox/`에 작성한 finding Markdown은 자동 제출하지 않고 원본을 보존합니다. 검증에 필요한 PoC·로그를 확인한 뒤 `submit_vulnerability`로 다시 제출하세요.
 
-관리표의 대상·옵션·권한·제보 프로젝트·담당자·NFS 버전·취약점 유형·방법론·발견일·익스플로잇·CVE는 `queue_finding`의 `registry_*` 선택 필드로 전달할 수 있습니다. 확인한 값만 넣고, 관리 번호와 제보 상태는 넣지 않습니다. 제보 상태는 관리자가 관리합니다.
+동기화 에이전트는 `fs/nfsd/`, `fs/nfs/`, `fs/nfs_common/`, `fs/lockd/`, `fs/exportfs/`, `net/sunrpc/`와 로컬 include 의존성 범위의 LCOV와 요약 JSON을 5분마다 보냅니다. 이 범위 외 KNFSD 실행 의존성은 모든 에이전트의 `coverage_prefixes`에 동일하게 추가하세요. 세션 원문·분석 PC의 절대 경로·로컬 자유 형식 진행 메모는 전송하지 않습니다. 로컬 telemetry 배치는 최신 1개만 유지합니다. Linux에서는 `systemctl --user status hivemind-agent`, macOS에서는 `launchctl print gui/$(id -u)/org.hivemind.knfsd-agent`로 동기화 상태를 확인합니다.
+
+`list_findings`와 `get_coverage_gaps`로 기존 보고와 조사 공백을 확인합니다. 신규 후보는 `submit_vulnerability`에 확인한 내용과 원본 자료를 보내세요. C PoC를 우선 첨부하고 없을 때 Python 코드를 첨부할 수 있습니다. PoC의 빌드·실행 명령, NFS 서버와 클라이언트의 전제 조건을 보고서나 `metadata`에 기록합니다. 확인하지 않은 KASAN·LPE·RCE 등은 검증 완료로 표시하지 마세요. 정정 자료도 새 제출로 보내고 이전 `submission_id`를 보고서에 명시하세요. **코드 열람률은 검증 결과가 아닙니다.**
+
+옵션·권한·NFS 버전·취약점 유형·발견일·영향 등 확인한 값은 `metadata`에 넣을 수 있습니다. 관리 번호와 제보 상태는 서버가 관리합니다.
 
 네이티브 Windows 수동 설치: [MANUAL.md](MANUAL.md). 중앙 서버 운영: [server/README.md](../server/README.md).

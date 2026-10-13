@@ -44,6 +44,8 @@ WantedBy=default.target
 
 현재 공용 서버는 사용자 서비스 `knfsd-hub`로 운영합니다. 서비스 파일 변경 후 `systemctl --user daemon-reload`와 `systemctl --user restart knfsd-hub`를 실행하고 `curl -fsS http://SERVER_LAN_IP:8765/healthz`로 확인합니다. 인터넷 포트 포워딩은 사용하지 않습니다. 이 배포 절차는 방화벽 설정을 변경하지 않습니다.
 
+새 제보의 Codex 정적 검토와 QEMU 2 VM 검증은 별도 `bintable` 사용자 서비스에서 실행합니다. 웹 서버의 전용 Unix 소켓 설정, VM 이미지 설치와 워커 실행 절차는 [검증 워커 배포 문서](verifier/README.md)를 따릅니다. 검증 워커가 준비되지 않았을 때 새 제보는 대기열에 남고 취약점 관리 번호가 발급되지 않습니다.
+
 ## 관리 명령
 
 관리 명령에도 서비스와 같은 `HIVEMIND_DATA_DIR`을 지정해야 합니다. 에이전트 토큰은 PC별로 발급되며 명령 실행 시 한 번만 표시됩니다.

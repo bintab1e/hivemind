@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { gzip } from 'node:zlib';
 import { parseLcov, readFrontMatter } from './contract.mjs';
 import { buildCoverageScope, defaultCoveragePrefixes } from './coverage-scope.mjs';
+import { syncSubmissions } from './submissions.mjs';
 
 const run = promisify(execFile);
 const gzipAsync = promisify(gzip);
@@ -161,7 +162,6 @@ export async function syncExchange(config, token) {
   const ackFolder = path.join(config.home, 'exchange', 'ack', config.agent_id);
   await fs.mkdir(folder, { recursive: true });
   await fs.mkdir(ackFolder, { recursive: true });
-  let health;
   for (const entry of (await fs.readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
     const file = path.join(folder, entry.name);
@@ -176,12 +176,9 @@ export async function syncExchange(config, token) {
     if (await fs.stat(ack).catch(() => null)) continue;
     try {
       const event = readFrontMatter(markdown).data;
-      if (event.kind === 'finding' && event.corrects_event_id) {
-        health ||= await syncHealth(config, token);
-        if (!supportsFindingRevisions(health)) {
-          console.error(`${entry.name}: waiting for server capability: finding_revisions`);
-          continue;
-        }
+      if (event.kind === 'finding') {
+        console.error(`${entry.name}: legacy finding retained locally; resubmit its evidence with submit_vulnerability`);
+        continue;
       }
       const result = await post(config, token, '/v1/exchange/events', { agent_id: config.agent_id, source_path: sourcePath, markdown, sha256 });
       await fs.writeFile(ack, JSON.stringify({ source_path: sourcePath, sha256, result, at: timestamp() }, null, 2));
@@ -322,7 +319,9 @@ export async function startSyncAgent(configInput, token) {
   const exchangeTick = async () => {
     if (exchangeBusy) return;
     exchangeBusy = true;
-    try { await syncExchange(config, token); } catch (error) { console.error(error.message); } finally { exchangeBusy = false; }
+    try { await syncExchange(config, token); } catch (error) { console.error(error.message); }
+    try { await syncSubmissions(config, token); } catch (error) { console.error(error.message); }
+    exchangeBusy = false;
   };
   const telemetryTick = async () => {
     if (telemetryBusy) return;

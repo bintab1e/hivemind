@@ -133,8 +133,7 @@ const needsVerification = finding => finding.origin !== 'history' && !isRegister
 const newFindingStarts = { A: 43, B: 22, C: 2 };
 const historicalNoOffset = { knfsd: 0, 'NFS-Ganesha': 42, libnfs: 63 };
 function isNewFinding(finding) {
-  if (finding.origin === 'history') return false;
-  if (!finding.management_id) return true;
+  if (finding.origin === 'history' || !isRegistered(finding)) return false;
   const match = /^([ABC])-(\d+)$/.exec(finding.management_id);
   return !!match && Number(match[2]) >= newFindingStarts[match[1]];
 }
@@ -164,12 +163,22 @@ const previousFinding = finding => finding.replaces_event_id
   : null;
 const reviewLabel = finding => {
   const revision = !!finding.replaces_event_id;
-  if (isRegistered(finding)) return revision ? '수정본 · 정적 검증 통과' : '정적 검증 통과';
+  if (isRegistered(finding)) {
+    const label = finding.review_provider === 'codex_qemu' ? '2VM 검증 완료' : '정적 검증 통과';
+    return revision ? `수정본 · ${label}` : label;
+  }
   if (finding.review_status === 'unconfigured' || !finding.review_status) return `${revision ? '수정본 검증 대기' : '검증 대기'} · Kimi 미설정`;
   if (finding.review_status === 'error') return revision ? '수정본 검증 오류' : '검증 오류';
   if (finding.review_verdict === 'unlikely') return revision ? '수정본 검증 보류' : '정적 검증 보류';
   if (finding.review_verdict === 'uncertain') return revision ? '수정본 추가 검토' : '추가 검토';
   return revision ? '수정본 검증 대기' : '검증 대기';
+};
+const impactEvidence = (finding, present) => {
+  if (!present) return '기록 없음';
+  if (!isRegistered(finding)) return '제출 주장, 정적 검증 대기';
+  return finding.review_provider === 'codex_qemu'
+    ? '서버 2VM 재현으로 확인'
+    : '제출 증빙 포함, Kimi likely 정적 판정. 서버 독립 재현 아님';
 };
 
 function renderFindingStats(findings) {
@@ -471,7 +480,7 @@ function renderFindings() {
     for (const [key, label] of impacts) {
       const present = verified.has(key);
       const cell = element('td', `impact-td ${present && isRegistered(finding) ? 'verified' : present ? 'claimed' : ''}`, present ? (isRegistered(finding) ? '✓' : '◇') : '—');
-      const evidence = present ? (isRegistered(finding) ? '제출 증빙 포함, Kimi likely 정적 판정. 서버 독립 재현 아님' : '제출 주장, 정적 검증 대기') : '기록 없음';
+      const evidence = impactEvidence(finding, present);
       cell.setAttribute('aria-label', `${label}: ${evidence}`);
       cell.title = `${label}: ${evidence}`;
       row.append(cell);
@@ -723,7 +732,7 @@ function openFinding(finding, tab = 'report') {
     return;
   }
   $('detail-summary').append(
-    detailFact('관리번호 / 정적 검증', `${isRegistered(finding) ? finding.management_id : '미부여'} · ${reviewLabel(finding)}`),
+    detailFact('관리번호 / 검증', `${isRegistered(finding) ? finding.management_id : '미부여'} · ${reviewLabel(finding)}`),
     detailFact('담당자 / 제보 여부', `${finding.owner || '—'} · ${finding.report_status || '—'}`),
     detailFact('보고 에이전트', agentName(finding.agent_id)),
     detailFact('코드 위치', finding.file_path || (finding.code_refs || [])[0]),

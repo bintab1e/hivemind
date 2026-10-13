@@ -12,9 +12,9 @@ const commit = 'a'.repeat(40);
 const poc = 'int main(void) { return 0; }\n';
 const kasan = 'BUG: KASAN: slab-out-of-bounds in nfsd_test\nWrite of size 8 at addr deadbeef\n';
 
-test('registry numbers only approved evidence and preserves sequence floors and admin ownership', async t => {
+test('legacy static review remains advisory while admin edits stay intact', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-registry-'));
-  const { server, db, url } = await startServer({ port: 0, dataDir, apiToken: 'admin', dashboardPassword: 'test-password' });
+  const { server, db, url } = await startServer({ port: 0, dataDir, allowLegacyFindings: true, apiToken: 'admin', dashboardPassword: 'test-password' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
   const { token } = issueAgentToken(db, 'pc1');
   const basic = { Authorization: `Basic ${Buffer.from('viewer:test-password').toString('base64')}` };
@@ -59,57 +59,30 @@ test('registry numbers only approved evidence and preserves sequence floors and 
   assert.equal(completeFindingReview(db, first, { verdict: 'uncertain', summary: '코드 경로 추가 확인 필요' }), null);
   assert.equal((await registry()).findings[0].management_id, null);
   db.prepare("UPDATE finding_reviews SET status = 'processing' WHERE finding_id = ?").run(first);
-  assert.equal(completeFindingReview(db, first, { verdict: 'likely', summary: '제출된 코드 경로상 결함 가능성 높음' }), 'A-043');
+  assert.equal(completeFindingReview(db, first, { verdict: 'likely', summary: '제출된 코드 경로상 결함 가능성 높음' }), null);
   result = await registry();
-  assert.equal(result.findings[0].management_id, 'A-043');
-  assert.equal(result.findings[0].number, 43);
+  assert.equal(result.findings[0].management_id, null);
+  assert.equal(result.findings[0].number, null);
   assert.equal(result.findings[0].report_status, '제보 완료');
   assert.equal(result.findings[0].title, 'Curated finding title');
   assert.equal(result.findings[0].owner, '담당자');
   assert.equal(result.findings[0].report_project, 'Kernel security');
   assert.equal(result.findings[0].methodology, 'Manual');
   assert.equal(result.findings[0].found_date, '2026-09-07');
-  assert.equal(result.findings[0].registration_status, 'verified');
+  assert.equal(result.findings[0].registration_status, 'pending');
   assert.equal(result.findings[0].has_patch, 0);
   db.prepare("INSERT INTO patches(id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, 'fix.patch', ?, 'diff', 'unconfigured', '2026-10-12T00:00:00Z')")
     .run('b'.repeat(64), first, sha('diff'));
   assert.equal((await registry()).findings[0].has_patch, 1);
-  assert.equal(result.sequences[0].next_id, 'A-044');
-  const second = await submit('second', first);
-  result = await registry();
-  assert.equal(result.findings.length, 2);
-  assert.equal(result.findings.find(item => item.event_id === second).replaces_event_id, first);
-  assert.equal(result.findings.find(item => item.event_id === first).management_id, 'A-043');
-  db.prepare("UPDATE finding_reviews SET status = 'processing' WHERE finding_id = ?").run(second);
-  completeFindingReview(db, second, { verdict: 'unlikely', summary: '정적 근거 부족' });
-  assert.equal((await registry()).findings.find(item => item.event_id === first).management_id, 'A-043');
-  const third = await submit('third', second);
-  db.prepare("UPDATE finding_reviews SET status = 'processing' WHERE finding_id = ?").run(third);
-  assert.equal(completeFindingReview(db, third, { verdict: 'likely', summary: '정적 근거 보강됨' }), 'A-043');
-  result = await registry();
-  assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].event_id, third);
-  assert.equal(result.findings[0].management_id, 'A-043');
-  assert.equal(result.findings[0].report_status, '제보 완료');
-  assert.equal(result.findings[0].title, 'Curated finding title');
-  assert.equal(result.findings[0].report_project, 'Kernel security');
-  assert.equal(result.findings[0].methodology, 'Manual');
-  assert.equal(result.findings[0].found_date, '2026-09-07');
-  assert.equal(result.sequences[0].next_id, 'A-044');
-  const correctionMarkdown = `---\nschema_version: 1\nkind: correction\nversion_id: 7.2.5\nrepo_commit: ${commit}\ntitle: "Finding withdrawn"\ncorrects_event_id: "${third}"\nscope:\n  - "fs/nfsd/"\nangle: correction\ncreated_at: "2026-10-12T01:00:00Z"\n---\n\n## 정정\n보고를 철회함.\n`;
-  const correctionResponse = await fetch(`${url}/v1/exchange/events`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: 'pc1', source_path: 'exchange/outbox/pc1/withdraw.md', markdown: correctionMarkdown, sha256: sha(correctionMarkdown) }) });
-  assert.equal(correctionResponse.status, 200, await correctionResponse.text());
-  result = await registry();
-  assert.equal(result.findings[0].management_id, 'A-043');
-  assert.equal(result.findings[0].report_status, '철회');
+  assert.equal(result.sequences[0].next_id, 'A-043');
 });
 
-test('startup reconciliation is idempotent for a completed static review', async t => {
+test('restart does not promote a completed Kimi-only review', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-registry-restart-'));
   const file = path.join(dataDir, 'hivemind.sqlite3');
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   let db = openDatabase(file);
-  // This checks sequence persistence after a previous process committed a review but crashed before numbering.
+  // An older static-only review must remain unnumbered after deployment or restart.
   const fake = 'f'.repeat(64);
   const markdown = `---\nschema_version: 1\nkind: finding\nvm_environment: "두 VM"\npoc_source: ${JSON.stringify(poc)}\npoc_sha256: "${sha(poc)}"\nkasan_log: ${JSON.stringify(kasan)}\nkasan_sha256: "${sha(kasan)}"\nreproduction_command: "cc -o poc poc.c && ./poc"\n---\n보고서`;
   db.prepare(`INSERT INTO events (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title, scope_json, created_at, received_at, markdown)
@@ -124,10 +97,10 @@ test('startup reconciliation is idempotent for a completed static review', async
     VALUES (?, 'pc1', 'exchange/outbox/pc1/correction.md', ?, 'correction', '7.2.5', ?, 'Correction', '[]', ?, '2026-10-12T00:00:02Z', '2026-10-12T00:00:02Z', 'withdrawal')`).run(correction, sha('withdrawal'), commit, withdrawn);
   db.close();
   db = openDatabase(file);
-  assert.equal(db.prepare('SELECT management_id FROM finding_registry WHERE finding_id = ?').get(fake).management_id, 'A-043');
+  assert.equal(db.prepare('SELECT management_id FROM finding_registry WHERE finding_id = ?').get(fake).management_id, null);
   assert.deepEqual({ ...db.prepare('SELECT management_id, report_status FROM finding_registry WHERE finding_id = ?').get(withdrawn) }, { management_id: null, report_status: '철회' });
   db.close();
   db = openDatabase(file);
-  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
+  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
   db.close();
 });

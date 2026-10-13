@@ -54,3 +54,44 @@ test('finding filters use registry fields, split comma values, and preserve sele
   populateFindingFilters(rows.slice(1));
   assert.equal(selects.get('finding-target').value, '');
 });
+
+test('new findings include only numbered verified rows and show the right verification basis', () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('const isRegistered =');
+  const end = source.indexOf('function renderFindingStats', start);
+  assert.ok(start >= 0 && end > start);
+  const rows = [
+    { event_id: 'pending', origin: 'agent', management_id: null, registration_status: 'pending' },
+    { event_id: 'unverified', origin: 'agent', management_id: 'A-043', registration_status: 'pending' },
+    { event_id: 'old-agent', origin: 'agent', management_id: 'A-042', registration_status: 'verified' },
+    { event_id: 'old-ganesha', origin: 'agent', management_id: 'B-021', registration_status: 'verified' },
+    { event_id: 'old-libnfs', origin: 'agent', management_id: 'C-001', registration_status: 'verified' },
+    { event_id: 'old-history', origin: 'history', management_id: 'B-022', registration_status: 'history' },
+    { event_id: 'knfsd', origin: 'agent', management_id: 'A-043', registration_status: 'verified', review_provider: 'codex_qemu' },
+    { event_id: 'ganesha', origin: 'agent', management_id: 'B-022', registration_status: 'verified' },
+    { event_id: 'libnfs', origin: 'agent', management_id: 'C-002', registration_status: 'verified' },
+  ];
+  const context = { testState: { registry: { findings: rows } }, testView: 'findings' };
+  vm.runInNewContext(
+    'const state = globalThis.testState; const activeView = () => globalThis.testView;\n' +
+    source.slice(start, end) +
+    '\nglobalThis.findingView = { isNewFinding, visibleFindings, reviewLabel, impactEvidence };',
+    context,
+  );
+  const { isNewFinding, visibleFindings, reviewLabel, impactEvidence } = context.findingView;
+  assert.deepEqual(Array.from(visibleFindings(), row => row.event_id), ['knfsd', 'ganesha', 'libnfs']);
+  assert.equal(isNewFinding(rows[0]), false);
+  assert.equal(isNewFinding(rows[1]), false);
+  assert.equal(isNewFinding(rows[2]), false);
+  assert.equal(isNewFinding(rows[3]), false);
+  assert.equal(isNewFinding(rows[4]), false);
+  assert.equal(isNewFinding(rows[5]), false);
+  assert.equal(reviewLabel(rows[6]), '2VM 검증 완료');
+  assert.equal(impactEvidence(rows[6], true), '서버 2VM 재현으로 확인');
+  assert.equal(reviewLabel(rows[7]), '정적 검증 통과');
+  assert.match(impactEvidence(rows[7], true), /서버 독립 재현 아님/);
+  assert.equal(impactEvidence(rows[0], true), '제출 주장, 정적 검증 대기');
+  assert.equal(impactEvidence(rows[6], false), '기록 없음');
+  context.testView = 'registry';
+  assert.equal(visibleFindings().length, rows.length);
+});
