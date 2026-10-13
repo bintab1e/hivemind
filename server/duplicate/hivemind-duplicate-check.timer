@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Hivemind registry against public mail and maintainer branches at 06:00 KST
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+Unit=hivemind-duplicate-check.service
+
+[Install]
+WantedBy=timers.target

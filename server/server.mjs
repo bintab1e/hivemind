@@ -14,6 +14,7 @@ import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact }
 import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
 import { getSubmission, getVerifiedArtifact, initializeSubmissions, listSubmissions, listVerificationQueue, listVerifiedArtifacts, retrySubmission, submitSubmission } from './submissions.mjs';
 import { startVerifierIpc } from './verifier-ipc.mjs';
+import { initializeDuplicateRegistry } from './duplicate-registry.mjs';
 import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -98,6 +99,7 @@ export function openDatabase(file) {
   initializeHistoryArtifacts(db);
   initializeHistoryVerifications(db);
   initializeSubmissions(db);
+  initializeDuplicateRegistry(db);
   return db;
 }
 
@@ -989,7 +991,7 @@ export async function startServer(options = {}) {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   let verifierServer;
   if (verifierSocketPath) {
-    try { verifierServer = await startVerifierIpc(db, verifierSocketPath, options.verifierUser ?? process.env.HIVEMIND_VERIFIER_USER); }
+    try { verifierServer = await startVerifierIpc(db, verifierSocketPath, options.verifierUser ?? process.env.HIVEMIND_VERIFIER_USER, dataDir); }
     catch (error) {
       await new Promise(resolve => server.close(resolve));
       db.close();

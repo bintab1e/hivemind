@@ -714,6 +714,29 @@ function detailFact(label, value) {
   return fact;
 }
 
+function appendDuplicateReview(finding) {
+  const review = finding.duplicate_review;
+  if (!review) return;
+  const label = review.outcome === 'manual_override' ? '수동 수정 유지' :
+    review.verdict === 'duplicate' && review.outcome !== 'changed' ? '중복 의견 · 상태 유지' :
+    { duplicate: '중복 확인', no_match: '일치 근거 없음', uncertain: '추가 확인 필요', error: '검사 오류' }[review.verdict] || '검사 완료';
+  const fact = detailFact('공개 자료 중복 검사', `${label} · ${when(review.checked_at)}\n${review.reason}`);
+  fact.classList.add('duplicate-review');
+  const sources = (review.evidence || []).filter(item => item?.url && item?.title);
+  if (sources.length) {
+    const links = element('div', 'duplicate-evidence');
+    for (const source of sources) {
+      const link = element('a', 'detail-link', source.title);
+      link.href = source.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      links.append(link);
+    }
+    fact.append(links);
+  }
+  $('detail-summary').append(fact);
+}
+
 function openFinding(finding, tab = 'report') {
   state.finding = finding;
   state.detailTab = tab;
@@ -742,6 +765,7 @@ function openFinding(finding, tab = 'report') {
         detailFact('재검증 사유', verification.reason),
       );
     }
+    appendDuplicateReview(finding);
     if (!$('detail').open) $('detail').showModal();
     showDetailTab();
     return;
@@ -774,6 +798,7 @@ function openFinding(finding, tab = 'report') {
     review.classList.add('review-summary');
     $('detail-summary').append(review);
   }
+  appendDuplicateReview(finding);
   if (!$('detail').open) $('detail').showModal();
   showDetailTab();
 }

@@ -7,6 +7,7 @@ import { HttpError, invalid } from './contract.mjs';
 import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, completeSubmission,
   failPrimitiveReview, failSubmission, heartbeatPrimitiveWorker, heartbeatWorker,
   progressSubmission } from './submissions.mjs';
+import { listDuplicateCandidates, recordDuplicateResult } from './duplicate-registry.mjs';
 
 function reply(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -53,7 +54,7 @@ function allowVerifierUser(socketPath, user) {
   execFileSync('setfacl', ['-m', `u:${user}:rw`, socketPath], { stdio: 'ignore' });
 }
 
-export async function startVerifierIpc(db, socketPath, verifierUser = null) {
+export async function startVerifierIpc(db, socketPath, verifierUser = null, dataDir = null) {
   if (!path.isAbsolute(socketPath) || path.resolve(socketPath) !== socketPath) throw new Error('Verifier socket path must be absolute and normalized');
   const parent = path.dirname(socketPath);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -65,6 +66,14 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null) {
   await removeStaleSocket(socketPath);
   const server = http.createServer(async (req, res) => {
     try {
+      if (req.method === 'POST' && req.url === '/duplicate/candidates') {
+        const body = await inputJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) invalid('Invalid duplicate candidates request');
+        return reply(res, 200, { candidates: listDuplicateCandidates(db, dataDir) });
+      }
+      if (req.method === 'POST' && req.url === '/duplicate/result') {
+        return reply(res, 200, recordDuplicateResult(db, await inputJson(req)));
+      }
       if (req.method === 'POST' && req.url === '/claim') {
         const body = await inputJson(req);
         if (!body || typeof body !== 'object' || Array.isArray(body) ||

@@ -74,4 +74,14 @@ test('finding detail appends only available primitive review under the existing 
   context.openFinding({ ...finding, primitive_review_status: 'error', primitive_review_summary: 'review_failed' });
   const failedPrimitive = elements.get('detail-summary').children.find(item => item.className.includes('review-summary'));
   assert.equal(failedPrimitive.children[1].textContent, '기존 정적 검토\n재현 확인');
+
+  context.openFinding({ ...finding, report_status: '중복', duplicate_review: {
+    verdict: 'duplicate', outcome: 'changed', checked_at: '2026-10-13T00:00:00Z', reason: '동일한 원인과 수정이 공개됨',
+    evidence: [{ kind: 'branch', title: '공개 수정 커밋', url: 'https://github.com/torvalds/linux/commit/0123456789012345678901234567890123456789' }],
+  } });
+  const duplicate = elements.get('detail-summary').children.find(item => item.className.includes('duplicate-review'));
+  assert.ok(duplicate);
+  assert.match(duplicate.children[1].textContent, /동일한 원인과 수정이 공개됨/);
+  assert.equal(duplicate.children[2].children[0].href, 'https://github.com/torvalds/linux/commit/0123456789012345678901234567890123456789');
+  assert.equal(duplicate.children[2].children[0].rel, 'noopener noreferrer');
 });

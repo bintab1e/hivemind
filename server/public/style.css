@@ -203,6 +203,9 @@ footer a{color:#b9a8fb}
 .detail-fact{background:#1b2030;border:1px solid #303747;border-radius:6px;padding:10px;min-width:0}
 .detail-fact.review-summary{grid-column:1/-1}
 .detail-fact.review-summary strong{white-space:pre-wrap}
+.detail-fact.duplicate-review{grid-column:1/-1}
+.detail-fact.duplicate-review strong{white-space:pre-wrap}
+.duplicate-evidence{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:8px}
 .detail-fact span{display:block;color:#8792a8;font-size:10px;margin-bottom:6px}
 .detail-fact strong{display:block;color:#dce2ed;font-size:11px;overflow-wrap:anywhere;line-height:1.4}
 .detail-link{border:0;background:transparent;color:#c7b6ff;text-decoration:underline;padding:0;text-align:left;font-size:inherit}

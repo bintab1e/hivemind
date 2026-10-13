@@ -237,7 +237,7 @@ function validTrustedSource(value) {
   return value;
 }
 
-async function runStructuredCodex(prompt, outputSchema, options) {
+export async function runStructuredCodex(prompt, outputSchema, options) {
   const cliPath = options.cliPath ?? process.env.HIVEMIND_CODEX_CLI;
   if (!cliPath || !path.isAbsolute(cliPath)) throw new VerifierUnavailableError();
   const timeoutMs = options.timeoutMs ?? 300_000;
