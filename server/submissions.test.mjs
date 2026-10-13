@@ -4,13 +4,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openDatabase, setActiveTrack, startServer } from './server.mjs';
-import { claimSubmission, completeSubmission, getSubmission, heartbeatWorker, listVerificationQueue, progressSubmission, submitSubmission } from './submissions.mjs';
+import { claimSubmission, completeSubmission, getSubmission, getVerifiedArtifact, heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, progressSubmission, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
 import { postJson } from './verifier/worker.mjs';
 
 const commit = 'a'.repeat(40);
 const source = 'int main(void) { return 0; }\n';
 const serial = 'boot complete\nBUG: KASAN: slab-out-of-bounds in nfsd_test\nRead of size 8 at addr deadbeef\n nfsd_test+0x12/0x30\n';
+const trace = serial.slice(serial.indexOf('BUG: KASAN:')).trim();
+const report = `## Summary\n\nA server-side NFS request reaches the reviewed bounds error.\n\n## Root cause\n\nfs/nfsd/nfs4proc.c:42\n\n\`\`\`c\nreturn nfsd_test(rqstp);\n\`\`\`\n\n## Reproduction environment\n\nTwo QEMU VMs, NFS 4.2, kernel ${commit}.\n\n## PoC\n\nThe C client sends the request.\n\n## Impact analysis\n\nThe server KASAN trace confirms a read; no other impact was proven.\n`;
 const raw = client_submission_id => ({
   project: 'knfsd', client_submission_id, title: 'NFS boundary issue',
   report: 'The submitted report has no KASAN log yet.',
@@ -32,10 +34,16 @@ const verdict = (status = 'observed', evidence = serial) => ({
     },
   },
   reproduction: {
-    status, kernelCommit: commit, reason: status === 'observed' ? 'KASAN in server guest' : 'No KASAN in server guest',
+    status, kernelCommit: commit, nfsVersion: '4.2', reason: status === 'observed' ? 'KASAN in server guest' : 'No KASAN in server guest',
     observation: { guestCompleted: true, targetCommitMatch: true, baselineClean: true, pocStarted: true, serverEvidenceAfterPoc: true },
   },
   server_serial: evidence,
+  artifacts: {
+    report: { filename: 'report.md', content: report },
+    poc: { filename: 'poc.c', source_index: 0, source },
+    reproduction: { filename: 'reproduction.md', content: `Two QEMU VMs, NFS 4.2, kernel ${commit}.` },
+    log: { filename: 'kasan.log', content: evidence.includes('BUG: KASAN:') ? trace : 'No KASAN evidence' },
+  },
 });
 
 test('unstructured submission stays out of registry until independent 2VM evidence promotes it once', t => {
@@ -59,8 +67,62 @@ test('unstructured submission stays out of registry until independent 2VM eviden
   assert.deepEqual(findings[0].verified_impacts, ['kasan_read']);
   assert.equal(findings[0].management_id, 'A-043');
   assert.equal(findings[0].review_provider, 'codex_qemu');
+  assert.equal(findings[0].privilege, 'AUTH_SYS');
+  assert.equal(findings[0].nfs_version, '4.2');
+  assert.equal(findings[0].vulnerability_type, 'OOB Read');
   assert.match(findings[0].reproduction_command, /\/tmp\/hivemind-poc 10\.77\.0\.1 \/mnt\/nfs/);
+  assert.deepEqual(listVerifiedArtifacts(db, findings[0].event_id).map(item => item.name), ['report.md', 'poc.c', 'reproduction.md', 'kasan.log']);
+  assert.equal(getVerifiedArtifact(db, findings[0].event_id, 'report.md').toString(), report);
+  assert.equal(getVerifiedArtifact(db, findings[0].event_id, 'poc.c').toString(), source);
+  assert.equal(getVerifiedArtifact(db, findings[0].event_id, 'kasan.log').toString(), trace);
   assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
+});
+
+test('inconsistent metadata or missing canonical files never receives a management number', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-format-gates-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const cases = [
+    ['tested-version', result => { result.reproduction.nfsVersion = '3'; }],
+    ['submitted-version', result => { result.review.normalized.nfs_version = '4.1'; }],
+    ['unknown-permission', result => { result.review.normalized.permission = 'root maybe'; }],
+    ['unknown-type', result => { result.review.normalized.vulnerability_type = 'possible problem'; }],
+    ['report-section', result => { result.artifacts.report.content = result.artifacts.report.content.replace('## Impact analysis', '## Conclusions'); }],
+    ['untrusted-snippet', result => { result.artifacts.report.content = result.artifacts.report.content.replace('return nfsd_test(rqstp);', 'invented source'); }],
+    ['no-reproduction', result => { delete result.artifacts.reproduction; }],
+    ['no-c-poc', result => { result.review.normalized.poc.language = 'python'; }],
+    ['unsupported-impact', result => { result.review.normalized.claimed_impacts = ['lpe', 'rce']; }],
+  ];
+  for (const [name, change] of cases) {
+    const id = submitSubmission(db, raw(`gate-${name}`), 'pc01').submission_id;
+    const claimed = claimSubmission(db, commit);
+    const result = verdict();
+    change(result);
+    const outcome = completeSubmission(db, id, result, claimed.lease_token);
+    if (name === 'unsupported-impact') {
+      assert.equal(outcome.status, 'approved');
+      assert.deepEqual(listRegistry(db).find(row => row.management_id === outcome.management_id).verified_impacts, ['kasan_read']);
+    } else assert.equal(outcome.status, 'needs_review', name);
+  }
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
+});
+
+test('KASAN evidence selects the relevant later block and supports multiple observed flags', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-multiple-traces-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const id = submitSubmission(db, raw('multi-trace'), 'pc01').submission_id;
+  const claimed = claimSubmission(db, commit);
+  const result = verdict();
+  const relevant = 'BUG: KASAN: slab-out-of-bounds in nfsd_test\nRead of size 8 at addr deadbeef\nWrite of size 8 at addr deadbeef\n nfsd_test+0x12/0x30';
+  result.server_serial = `BUG: KASAN: slab-out-of-bounds in unrelated_driver\nRead of size 8 at addr aaa\n unrelated_driver+0x1/0x2\n${relevant}\n`;
+  result.artifacts.log.content = relevant;
+  const outcome = completeSubmission(db, id, result, claimed.lease_token);
+  assert.equal(outcome.status, 'approved');
+  assert.deepEqual(listRegistry(db)[0].verified_impacts, ['kasan_read', 'kasan_write']);
+  assert.equal(getVerifiedArtifact(db, listRegistry(db)[0].event_id, 'kasan.log').toString(), relevant);
 });
 
 test('verified manual upload carries its validated reporter into the registry owner', t => {
@@ -248,4 +310,14 @@ test('agent HTTP intake and status require its token; verifier socket is local',
   assert.equal(queue.workers[0].status, 'busy');
   assert.equal(JSON.stringify(queue).includes(claimed.lease_token), false);
   assert.equal(JSON.stringify(queue).includes(source), false);
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const approved = completeSubmission(db, id, verdict(), claimed.lease_token);
+  assert.equal(approved.status, 'approved');
+  const finding = listRegistry(db).find(row => row.management_id === approved.management_id);
+  const base = `${url}/api/events/${finding.event_id}/artifacts`;
+  const artifacts = await (await fetch(base, { headers: auth })).json();
+  assert.deepEqual(artifacts.artifacts.map(file => file.name), ['report.md', 'poc.c', 'reproduction.md', 'kasan.log']);
+  assert.equal(await (await fetch(`${base}/report.md`, { headers: auth })).text(), report);
+  assert.equal(await (await fetch(`${base}/poc.c`, { headers: auth })).text(), source);
+  assert.equal((await fetch(`${base}/poc.py`, { headers: auth })).status, 404);
 });

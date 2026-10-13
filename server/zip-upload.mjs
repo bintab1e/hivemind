@@ -128,18 +128,22 @@ export function uploadedSubmission(db, input) {
     try { content = decoder.decode(entry.content); }
     catch { invalid(`ZIP member must be UTF-8 text: ${entry.path}`); }
     if (!content.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(content)) invalid(`Empty or binary ZIP member: ${entry.path}`);
-    const type = ext === '.c' || ext === '.py' ? 'poc' : ext === '.log' ? 'log' : ['.md', '.txt', '.rst'].includes(ext) ? 'report' : 'other';
-    return { original: entry.path, name, type, content };
+    const type = ext === '.c' ? 'poc' : ext === '.log' ? 'log' : ['.md', '.txt', '.rst'].includes(ext) ? 'report' : 'other';
+    return { original: entry.path, name, type, ext, content };
   });
-  const reportRank = file => /(?:report|analysis|finding|분석|보고서)/i.test(file.original) ? 2 : /readme/i.test(file.original) ? 1 : 0;
+  const reportRank = file => /(?:report|analysis|finding|분석|보고서)/i.test(file.original) ? 2
+    : /readme/i.test(file.original) ? 1 : /(?:repro|steps|run|재현)/i.test(file.original) ? -1 : 0;
   const reports = classified.filter(file => file.type === 'report').sort((left, right) => reportRank(right) - reportRank(left));
   if (!reports.length) invalid('ZIP needs a UTF-8 .md, .txt, or .rst analysis report');
   const report = reports[0];
   const cPocs = classified.filter(file => file.name.endsWith('.c') && isStandaloneUserspacePoc(file.content, 'cc -o poc poc.c'));
-  const pyPocs = classified.filter(file => file.name.endsWith('.py'));
   if (classified.some(file => file.name.endsWith('.c') && /\b(?:int|signed|void)\s+main\s*\(/.test(file.content) && !cPocs.includes(file))) invalid('C PoC with main must be a standalone userspace program, not a patch or kernel module');
   if (cPocs.some(file => /^\s*#\s*include\s*"/m.test(file.content))) invalid('C PoC must compile as one file using system headers; local include files are not mounted in the verifier VM');
-  if (!cPocs.length && !pyPocs.length) invalid('ZIP needs a standalone userspace C PoC, or a Python PoC when C is unavailable');
+  if (!cPocs.length) invalid('ZIP needs a standalone userspace C PoC');
+  const reproduction = classified.find(file => file !== report && (file.ext === '.md' || file.ext === '.sh'));
+  if (!reproduction) invalid('ZIP needs a separate reproduction .md or .sh file');
+  reproduction.type = 'other';
+  if (!classified.some(file => file.type === 'log' && /\b(?:KASAN|KCSAN)\b/i.test(file.content))) invalid('ZIP needs a KASAN or KCSAN .log file');
   const allText = classified.map(file => file.content).join('\n');
   if (![...allText.matchAll(sourcePath)].some(([name]) => name.split('/').every(part => part && part !== '.' && part !== '..')))
     invalid('Report or evidence must reference a knfsd kernel source path (for example fs/nfsd/nfs4proc.c)');
@@ -147,7 +151,7 @@ export function uploadedSubmission(db, input) {
     content_base64: Buffer.from(file.content).toString('base64') }));
   if (Buffer.byteLength(report.content) > 150_000) invalid('Analysis report exceeds the 150,000-byte verifier preview limit', 413);
   if (files.some(file => Buffer.byteLength(file.content_base64, 'base64') > 600_000) ||
-      cPocs.concat(pyPocs).some(file => Buffer.byteLength(file.content) > 250_000)) invalid('ZIP text exceeds verifier limits', 413);
+      cPocs.some(file => Buffer.byteLength(file.content) > 250_000)) invalid('ZIP text exceeds verifier limits', 413);
   const metadata = { version_id: target.version_id, repo_commit: target.repo_commit, track_id: input.track_id, reporter,
     ...(nfsVersion ? { nfs_version: nfsVersion } : {}) };
   const reviewBytes = Buffer.byteLength(JSON.stringify({ project: 'knfsd', title, report: report.content, metadata,

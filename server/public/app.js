@@ -829,6 +829,33 @@ async function showDetailTab() {
       }
       return;
     }
+    const canonicalBase = `/api/events/${encodeURIComponent(finding.event_id)}/artifacts`;
+    const canonical = await api(canonicalBase).then(response => response.json()).catch(error => {
+      if (error.status === 404) return { artifacts: [] };
+      throw error;
+    });
+    if (id !== state.detailId) return;
+    if (canonical.artifacts?.length) {
+      clear(content);
+      const names = tab === 'report' ? ['report.md'] : tab === 'poc' ? ['poc.c', 'reproduction.md'] : ['kasan.log'];
+      for (const name of names) {
+        const file = canonical.artifacts.find(item => item.name === name);
+        if (!file) continue;
+        const url = `${canonicalBase}/${name}`;
+        const section = element('section', 'detail-section artifact-section');
+        const header = element('div', 'artifact-head');
+        const link = element('a', 'detail-link', '다운로드');
+        link.href = url;
+        link.download = name;
+        header.append(element('h3', '', name), element('span', 'muted', `${number(file.size)} B`), link);
+        section.append(header);
+        const preview = element('pre', '', await (await api(url)).text());
+        if (id !== state.detailId) return;
+        section.append(preview);
+        content.append(section);
+      }
+      return;
+    }
     const endpoint = tab === 'report' ? `/api/events/${encodeURIComponent(finding.event_id)}` : `/api/events/${encodeURIComponent(finding.event_id)}/${tab === 'verification' ? 'kasan' : tab}`;
     const response = await api(endpoint);
     const text = tab === 'report' ? (await response.json()).markdown : await response.text();

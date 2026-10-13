@@ -26,7 +26,7 @@
           "items": { "type": "string", "enum": ["kasan_read", "kasan_write", "controlled_read", "controlled_write", "rce", "lpe", "info_leak"] }
         },
         "poc_file_index": { "type": ["integer", "null"] },
-        "poc_language": { "type": ["string", "null"], "enum": ["c", "python", null] },
+        "poc_language": { "type": ["string", "null"], "enum": ["c", null] },
         "build_command": { "type": ["string", "null"] },
         "run_command": { "type": ["string", "null"] },
         "log_file_indexes": { "type": "array", "items": { "type": "integer" } }

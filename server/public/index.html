@@ -87,7 +87,7 @@
         <label>증거 ZIP <input id="zip-file" name="archive" type="file" accept=".zip,application/zip" required></label>
         <button id="zip-submit-button" type="submit" disabled>검증 큐에 제출</button>
       </div>
-      <p class="zip-submit-note">ZIP 8 MB 이하 · 코드 경로를 적은 보고서(.md/.txt/.rst) · 단일 C PoC(C가 없으면 Python) · .log 선택</p>
+      <p class="zip-submit-note">ZIP 8 MB 이하 · 분석 보고서(report.md, 다른 이름도 가능) · 독립 실행형 C PoC · 재현 절차(.md/.sh) · KASAN/KCSAN .log 필수</p>
       <p id="zip-submit-result" class="zip-submit-result" role="status" aria-live="polite" hidden></p>
     </form>
   </dialog>

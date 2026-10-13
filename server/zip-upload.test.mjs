@@ -67,6 +67,7 @@ function zip(files) {
 const bundle = () => zip([
   { name: 'finding/분석 보고서.md', content: report },
   { name: 'finding/PoC.c', content: poc },
+  { name: 'finding/VM-steps.md', content: 'cc -o poc PoC.c\n./poc 10.77.0.1 /mnt/nfs\n' },
   { name: 'finding/kasan.log', content: 'BUG: KASAN: slab-out-of-bounds in nfsd_test\nRead of size 8\n' },
 ]);
 
@@ -102,7 +103,7 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   assert.equal(row.report, report.trim());
   assert.deepEqual(JSON.parse(row.metadata_json), { version_id: '7.3-rc7', repo_commit: commit, track_id: 'rc', reporter: '이진표', nfs_version: '4.2' });
   const files = db.prepare('SELECT name, kind FROM submission_artifacts WHERE submission_id = ? ORDER BY ordinal').all(repeated.submission_id);
-  assert.deepEqual(files.map(file => ({ ...file })), [{ name: 'source-02.c', kind: 'poc' }, { name: 'evidence-03.log', kind: 'log' }]);
+  assert.deepEqual(files.map(file => ({ ...file })), [{ name: 'source-02.c', kind: 'poc' }, { name: 'document-03.md', kind: 'other' }, { name: 'evidence-04.log', kind: 'log' }]);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_registry').get().n, 0);
   const queue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
   assert.equal(queue.pending[0].submission_id, repeated.submission_id);
@@ -111,12 +112,24 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   assert.equal(queue.blocked[0].submission_id, accepted.submission_id);
   assert.equal((await fetch(`${url}/api/submissions/uploaded`, { headers: auth })).status, 404);
   assert.equal((await fetch(`${url}/api/submissions/upload/${accepted.submission_id}`, { headers: auth })).status, 404);
-  const pythonOnly = zip([{ name: 'report.md', content: report }, { name: 'poc.py', content: 'import sys\nprint(sys.argv[1:])\n' }]);
+  const pythonOnly = zip([{ name: 'report.md', content: report }, { name: 'poc.py', content: 'import sys\nprint(sys.argv[1:])\n' },
+    { name: 'run.sh', content: 'python3 poc.py\n' }, { name: 'kcsan.log', content: 'BUG: KCSAN: data-race in nfsd_test\n' }]);
   const python = await fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth,
     body: JSON.stringify({ ...input, title: 'Python fallback', zip_base64: pythonOnly.toString('base64') }) });
-  assert.equal(python.status, 202, await python.clone().text());
-  const pythonId = (await python.json()).submission_id;
-  assert.equal(db.prepare("SELECT name FROM submission_artifacts WHERE submission_id = ? AND kind = 'poc'").get(pythonId).name, 'source-02.py');
+  assert.equal(python.status, 400, await python.clone().text());
+  const kcsanBundle = zip([{ name: 'case/analysis.txt', content: report }, { name: 'case/trigger.c', content: poc },
+    { name: 'case/replay.sh', content: 'cc -o trigger trigger.c\n./trigger 10.77.0.1 /mnt/nfs\n' },
+    { name: 'case/race.log', content: 'BUG: KCSAN: data-race in nfsd_test\n' }]);
+  const kcsan = await fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth,
+    body: JSON.stringify({ ...input, title: 'KCSAN candidate', zip_base64: kcsanBundle.toString('base64') }) });
+  assert.equal(kcsan.status, 202, await kcsan.clone().text());
+  const unnamedReport = zip([{ name: 'reproduction.md', content: 'cc -o trigger trigger.c\n./trigger 10.77.0.1 /mnt/nfs\n' },
+    { name: 'notes.md', content: report }, { name: 'trigger.c', content: poc },
+    { name: 'trace.log', content: 'BUG: KCSAN: data-race in nfsd_test\n' }]);
+  const unnamed = await fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth,
+    body: JSON.stringify({ ...input, title: 'Arbitrary report name', zip_base64: unnamedReport.toString('base64') }) });
+  assert.equal(unnamed.status, 202, await unnamed.clone().text());
+  assert.equal(db.prepare('SELECT report FROM submissions WHERE id = ?').get((await unnamed.json()).submission_id).report, report.trim());
 });
 
 test('malformed, unsafe and oversized ZIP entries fail before queue insertion', async t => {
@@ -138,13 +151,25 @@ test('malformed, unsafe and oversized ZIP entries fail before queue insertion', 
   }
   const noPoc = await request(zip([{ name: 'report.md', content: report }]));
   assert.equal(noPoc.status, 400);
+  const noReproduction = await request(zip([{ name: 'report.md', content: report }, { name: 'poc.c', content: poc },
+    { name: 'kasan.log', content: 'BUG: KASAN: out-of-bounds\n' }]));
+  assert.equal(noReproduction.status, 400);
+  const noLog = await request(zip([{ name: 'report.md', content: report }, { name: 'poc.c', content: poc },
+    { name: 'steps.sh', content: 'cc -o poc poc.c\n./poc\n' }]));
+  assert.equal(noLog.status, 400);
+  const irrelevantLog = await request(zip([{ name: 'report.md', content: report }, { name: 'poc.c', content: poc },
+    { name: 'steps.sh', content: 'cc -o poc poc.c\n./poc\n' }, { name: 'run.log', content: 'No kernel sanitizer output\n' }]));
+  assert.equal(irrelevantLog.status, 400);
   const duplicate = await request(zip([{ name: 'report.md', content: report }, { name: 'PoC.c', content: poc }, { name: 'poc.c', content: poc }]));
   assert.equal(duplicate.status, 400);
-  const noSource = await request(zip([{ name: 'report.md', content: 'No path' }, { name: 'poc.c', content: poc }]));
+  const noSource = await request(zip([{ name: 'report.md', content: 'No path' }, { name: 'poc.c', content: poc },
+    { name: 'steps.sh', content: 'cc -o poc poc.c\n./poc\n' }, { name: 'kasan.log', content: 'BUG: KASAN: out-of-bounds\n' }]));
   assert.equal(noSource.status, 400);
-  const huge = await request(zip([{ name: 'report.md', content: report }, { name: 'poc.c', content: poc }, { name: 'large.log', content: 'x'.repeat(600_001) }]));
+  const huge = await request(zip([{ name: 'report.md', content: report }, { name: 'poc.c', content: poc },
+    { name: 'steps.sh', content: 'cc -o poc poc.c\n./poc\n' }, { name: 'large.log', content: 'BUG: KASAN:\n' + 'x'.repeat(600_001) }]));
   assert.equal(huge.status, 413);
-  const longReport = await request(zip([{ name: 'report.md', content: report + 'x'.repeat(150_000) }, { name: 'poc.c', content: poc }]));
+  const longReport = await request(zip([{ name: 'report.md', content: report + 'x'.repeat(150_000) }, { name: 'poc.c', content: poc },
+    { name: 'steps.sh', content: 'cc -o poc poc.c\n./poc\n' }, { name: 'kasan.log', content: 'BUG: KASAN: out-of-bounds\n' }]));
   assert.equal(longReport.status, 413);
   const checksum = bundle();
   checksum[35] ^= 1;

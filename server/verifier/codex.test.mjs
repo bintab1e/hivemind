@@ -32,8 +32,8 @@ const answer = {
   verdict: 'likely',
   reason: 'The code path is plausible but requires reproduction.',
   normalized: {
-    title: 'NFS 경계 오류',
-    report: '## 분석\n정적 검토상 가능성이 있으나 재현 전입니다.',
+    title: 'NFSv4 COMPOUND boundary out-of-bounds read',
+    report: '## Summary\n경계 검사가 의심됩니다.\n\n## Root cause\nfs/nfsd/nfs4proc.c:1 코드에서 검사가 필요합니다.\n```c\nint nfsd4_proc_compound(void) { return 0; }\n```\n\n## Reproduction environment\n제출 환경만 확인했고 2VM 실행 전입니다.\n\n## PoC\nC 프로그램이 경계를 검사합니다.\n\n## Impact analysis\n제출 로그는 KASAN 읽기를 주장하지만 재현 전입니다.',
     file_path: 'fs/nfsd/nfs4proc.c',
     code_refs: ['fs/nfsd/nfs4proc.c:nfsd4_proc_compound'],
     source_evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1 }],
@@ -69,8 +69,9 @@ process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
   return cli;
 }
 
-test('uses a C PoC before Python, retains original evidence, and never claims reproduction', async t => {
-  const result = await reviewSubmissionWithCodex({ ...submission, auth_token: 'HIGHLY_SENSITIVE', metadata: { secret: 'HIGHLY_SENSITIVE', nfs_version: '4.2' } }, options(fakeCli(t, answer)));
+test('uses a C PoC, includes impact allegations, retains original evidence, and never claims reproduction', async t => {
+  const result = await reviewSubmissionWithCodex({ ...submission, auth_token: 'HIGHLY_SENSITIVE', metadata: { secret: 'HIGHLY_SENSITIVE', nfs_version: '4.2', claimed_impacts: ['kasan_read', 'lpe'] } },
+    options(fakeCli(t, answer, { type: 'turn.completed' }, 0, '"claimed_impacts":["kasan_read","lpe"]')));
   assert.deepEqual([result.verdict, result.model], ['likely', 'codex-default']);
   assert.deepEqual(result.normalized.poc, {
     filename: 'poc.c', original_name: 'candidate.c', source_index: 1,
@@ -83,7 +84,7 @@ test('uses a C PoC before Python, retains original evidence, and never claims re
   assert.equal(Object.hasOwn(result, 'approved'), false);
 });
 
-test('fills omitted PoC command hints from the isolated guest defaults', async t => {
+test('fills omitted C PoC command hints and requires a C PoC for a likely verdict', async t => {
   const cAnswer = structuredClone(answer);
   cAnswer.normalized.build_command = null;
   cAnswer.normalized.run_command = null;
@@ -95,9 +96,27 @@ test('fills omitted PoC command hints from the isolated guest defaults', async t
   const pythonOnly = { ...submission, files: [submission.files[0], submission.files[2]] };
   const pythonAnswer = structuredClone(answer);
   Object.assign(pythonAnswer.normalized, { poc_file_index: 0, poc_language: 'python', build_command: null, run_command: null, log_file_indexes: [1] });
-  const pythonReview = await reviewSubmissionWithCodex(pythonOnly, options(fakeCli(t, pythonAnswer)));
-  assert.deepEqual([pythonReview.normalized.poc.filename, pythonReview.normalized.poc.run_command],
-    ['poc.py', 'python3 /mnt/job/poc.py 10.77.0.1 /mnt/nfs']);
+  await assert.rejects(reviewSubmissionWithCodex(pythonOnly, options(fakeCli(t, pythonAnswer))), error => error.code === 'invalid_output');
+  const missingPoc = structuredClone(answer);
+  Object.assign(missingPoc.normalized, { poc_file_index: null, poc_language: null, build_command: null, run_command: null, log_file_indexes: [1] });
+  await assert.rejects(reviewSubmissionWithCodex(pythonOnly, options(fakeCli(t, missingPoc))), error => error.code === 'ungrounded_output');
+});
+
+test('canonicalizes common permission and NFS version aliases, rejecting ambiguous versions and unstructured reports', async t => {
+  const aliases = structuredClone(answer);
+  aliases.normalized.title = '  NFSv4   COMPOUND  boundary out-of-bounds read  ';
+  aliases.normalized.permission = 'AUTH_UNIX';
+  aliases.normalized.nfs_version = 'NFSv4.2';
+  aliases.normalized.vulnerability_type = 'Race; Use-after-free';
+  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, aliases)));
+  assert.deepEqual([reviewed.normalized.title, reviewed.normalized.permission, reviewed.normalized.nfs_version, reviewed.normalized.vulnerability_type],
+    ['NFSv4 COMPOUND boundary out-of-bounds read', 'AUTH_SYS', '4.2', 'Race, UAF']);
+  const ambiguous = structuredClone(answer);
+  ambiguous.normalized.nfs_version = '4.1, 4.2';
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ambiguous))), error => error.code === 'invalid_output');
+  const unstructured = structuredClone(answer);
+  unstructured.normalized.report = '## Summary\nOnly one section.';
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unstructured))), error => error.code === 'invalid_output');
 });
 
 test('fails closed when CLI is missing or submitted paths are unsafe', async () => {

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadTrustedKernelSource, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { canonicalArtifacts } from './canonical.mjs';
 import { symbolizeKasanFrames } from './symbolize.mjs';
 import { runTwoVmReproduction } from './qemu/run.mjs';
 
@@ -81,8 +82,9 @@ function decodeJob(job) {
 }
 
 function version(value) {
-  const match = /^(?:NFSv)?(3|4|4\.1|4\.2)$/i.exec(String(value || '').trim());
-  return match && NFS_VERSIONS.has(match[1]) ? match[1] : null;
+  const match = /^(?:NFS\s*v)?(3|4(?:\.0|\.1|\.2)?)$/i.exec(String(value || '').trim());
+  const normalized = match?.[1] === '4.0' ? '4' : match?.[1];
+  return NFS_VERSIONS.has(normalized) ? normalized : null;
 }
 
 function selectedPoc(review, files) {
@@ -90,10 +92,8 @@ function selectedPoc(review, files) {
   if (!poc || !Number.isInteger(poc.source_index) || poc.source_index < 0 || poc.source_index >= files.length) return null;
   const original = files[poc.source_index];
   if (poc.source !== original.content || poc.original_name !== original.name ||
-      !['c', 'python'].includes(poc.language) || poc.filename !== (poc.language === 'c' ? 'poc.c' : 'poc.py')) throw new WorkerError('poc_source_mismatch');
+      poc.language !== 'c' || poc.filename !== 'poc.c' || !/\.c$/i.test(original.name)) throw new WorkerError('c_poc_required');
   if (Buffer.byteLength(poc.source) > 250_000) throw new WorkerError('poc_too_large_for_registry');
-  const cExists = files.some(file => (/\.c$/i.test(file.name) || file.kind === 'poc') && /\b(?:int|signed|void)\s+main\s*\(/.test(file.content));
-  if (cExists && poc.language !== 'c') throw new WorkerError('c_poc_required');
   return poc;
 }
 
@@ -116,6 +116,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
   let reproduction = inconclusive('Reproduction was not run');
   let serverSerial = '';
+  let artifacts;
   let privateDir;
   try {
     const submission = decodeJob(job);
@@ -140,8 +141,13 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     }
     const poc = selectedPoc(review, submission.files);
     if (!poc) return { review, reproduction: inconclusive('No original userspace PoC was selected'), server_serial: '' };
-    const nfsVersion = version(submission.metadata?.nfs_version) || version(review.normalized?.nfs_version);
-    if (!nfsVersion) return { review, reproduction: inconclusive('NFS version is missing or ambiguous'), server_serial: '' };
+    const submittedVersion = submission.metadata?.nfs_version;
+    const reviewedVersion = review.normalized?.nfs_version;
+    const nfsVersion = version(submittedVersion) || version(reviewedVersion);
+    if (!nfsVersion || submittedVersion && version(submittedVersion) !== nfsVersion ||
+        reviewedVersion && version(reviewedVersion) !== nfsVersion) {
+      return { review, reproduction: inconclusive('NFS version is missing, ambiguous, or disagrees with static review'), server_serial: '' };
+    }
     privateDir = fs.mkdtempSync(path.join(config.workRoot, 'hv-'));
     fs.chmodSync(privateDir, 0o700);
     const bundleDir = path.join(privateDir, 'bundle');
@@ -157,7 +163,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       rootfsImage: config.rootfsImage, outputDir });
     serverSerial = serialExcerpt(result.evidence.serverSerialPath, result.observation?.serverEvidenceStartOffset);
     const { evidence, ...portable } = result;
-    reproduction = portable;
+    reproduction = { ...portable, nfsVersion };
     if (result.status === 'observed' && (result.kernelCommit !== targetCommit || result.observation?.guestCompleted !== true ||
         result.observation?.targetCommitMatch !== true || result.observation?.pocStarted !== true ||
         result.observation?.baselineClean !== true || result.observation?.serverEvidenceAfterPoc !== true)) {
@@ -181,6 +187,15 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
         }
       }
       if (review.relevance.verdict !== 'supports') reproduction = inconclusive('KASAN trace relevance was not confirmed');
+      else if (reproduction.status === 'observed') {
+        artifacts = canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit: targetCommit, nfsVersion });
+        if (!artifacts) reproduction = inconclusive('Canonical report lacks grounded source, PoC, or relevant server KASAN evidence');
+        else {
+          review.normalized.title = artifacts.title;
+          review.normalized.report = artifacts.report.content;
+          review.normalized.nfs_version = nfsVersion;
+        }
+      }
     }
   } catch (error) {
     reproduction = inconclusive(error instanceof WorkerError ? error.code : 'Verifier environment unavailable');
@@ -188,7 +203,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
   } finally {
     if (privateDir) fs.rmSync(privateDir, { recursive: true, force: true });
   }
-  return { review, reproduction, server_serial: serverSerial };
+  return { review, reproduction, server_serial: serverSerial, ...(artifacts ? { artifacts } : {}) };
 }
 
 export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, workerId = null } = {}) {

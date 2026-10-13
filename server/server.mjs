@@ -12,7 +12,7 @@ import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mj
 import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
 import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
-import { getSubmission, initializeSubmissions, listSubmissions, listVerificationQueue, retrySubmission, submitSubmission } from './submissions.mjs';
+import { getSubmission, getVerifiedArtifact, initializeSubmissions, listSubmissions, listVerificationQueue, listVerifiedArtifacts, retrySubmission, submitSubmission } from './submissions.mjs';
 import { startVerifierIpc } from './verifier-ipc.mjs';
 import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
 
@@ -939,6 +939,17 @@ export async function startServer(options = {}) {
         return patch ? send(res, 200, patch.patch, 'text/plain; charset=utf-8') : send(res, 404, { error: 'Patch not found' });
       }
       const evidenceMatch = /^\/api\/events\/([a-f0-9]{64})\/(poc|kasan)$/.exec(url.pathname);
+      const verifiedArtifactsMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts$/.exec(url.pathname);
+      if (req.method === 'GET' && verifiedArtifactsMatch) return send(res, 200, { artifacts: listVerifiedArtifacts(db, verifiedArtifactsMatch[1]) });
+      const verifiedArtifactMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts\/(report\.md|poc\.c|reproduction\.md|kasan\.log)$/.exec(url.pathname);
+      if (req.method === 'GET' && verifiedArtifactMatch) {
+        const content = getVerifiedArtifact(db, verifiedArtifactMatch[1], verifiedArtifactMatch[2]);
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': content.length,
+          'Content-Disposition': `attachment; filename="${verifiedArtifactMatch[2]}"`,
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+        res.end(content);
+        return;
+      }
       if (req.method === 'GET' && evidenceMatch) {
         const row = db.prepare("SELECT markdown FROM events WHERE id = ? AND kind = 'finding'").get(evidenceMatch[1]);
         if (!row) return send(res, 404, { error: 'Finding not found' });

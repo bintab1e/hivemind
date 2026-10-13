@@ -171,6 +171,21 @@ export function getSubmission(db, id, agentId = null) {
   return row;
 }
 
+export function listVerifiedArtifacts(db, findingId) {
+  return db.prepare(`SELECT a.name, a.kind, a.sha256, a.size
+    FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
+    WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal BETWEEN 1000 AND 1003
+    ORDER BY a.ordinal`).all(findingId);
+}
+
+export function getVerifiedArtifact(db, findingId, filename) {
+  if (!Object.values(artifactFiles).includes(filename)) invalid('Unknown artifact', 404);
+  const row = db.prepare(`SELECT a.content FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
+    WHERE s.finding_id = ? AND s.status = 'approved' AND a.name = ? AND a.ordinal BETWEEN 1000 AND 1003`).get(findingId, filename);
+  if (!row) invalid('Artifact not found', 404);
+  return Buffer.from(row.content);
+}
+
 export function retrySubmission(db, id) {
   const row = db.prepare('SELECT status FROM submissions WHERE id = ?').get(id);
   if (!row) invalid('Submission not found', 404);
@@ -210,15 +225,14 @@ function checkedPoc(db, submissionId, normalized) {
   if (!poc || typeof poc !== 'object') return null;
   const source = poc.source;
   if (typeof source !== 'string' || !source.trim() || Buffer.byteLength(source) > 250_000 || source.includes('\0')) invalid('Invalid normalized PoC');
-  if (!['c', 'python'].includes(poc.language)) invalid('Invalid PoC language');
+  if (poc.language !== 'c') invalid('A standalone C PoC is required', 422);
   const files = db.prepare('SELECT ordinal, name, kind, content FROM submission_artifacts WHERE submission_id = ? ORDER BY ordinal').all(submissionId);
-  const cSource = file => (file.kind === 'poc' || /\.c$/i.test(file.name)) && /\b(?:int|signed|void)\s+main\s*\(/.test(utf8(file.content) || '');
-  if (files.some(cSource) && poc.language !== 'c') invalid('C PoC must be preferred to Python', 422);
+  const cSource = file => /\.c$/i.test(file.name) && /\b(?:int|signed|void)\s+main\s*\(/.test(utf8(file.content) || '');
   const selected = files.find(file => file.ordinal === poc.source_index && file.name === poc.original_name &&
-    utf8(file.content) === source && (poc.language === 'c' ? cSource(file) : /\.py$/i.test(file.name) || file.kind === 'poc'));
+    utf8(file.content) === source && cSource(file));
   if (!selected) invalid('Normalized PoC must match a submitted source file', 422);
-  if (poc.language === 'c' && !isStandaloneUserspacePoc(source, 'cc -o poc poc.c')) invalid('PoC is not a standalone userspace C program', 422);
-  return { source, language: poc.language, filename: poc.language === 'c' ? 'poc.c' : 'poc.py' };
+  if (!isStandaloneUserspacePoc(source, 'cc -o poc poc.c')) invalid('PoC is not a standalone userspace C program', 422);
+  return { source, language: 'c', filename: 'poc.c' };
 }
 
 function kasanEvidence(serial, filePath, codeRefs, relevance) {
@@ -240,7 +254,7 @@ function kasanEvidence(serial, filePath, codeRefs, relevance) {
     const traceLine = relevance?.trace_line;
     const matchesSymbolizedFrame = typeof traceLine === 'string' && traceLine.trim() &&
       !/BUG:\s*KASAN:/.test(traceLine) && log.split(/\r?\n/).some(line => line.trim() === traceLine.trim());
-    if (matchesPath || matchesSymbol || matchesSymbolizedFrame) return { log, impacts };
+    if (matchesSymbolizedFrame && (matchesPath || matchesSymbol || relevance?.symbolized_path === filePath)) return { log, impacts };
   }
   return null;
 }
@@ -280,6 +294,66 @@ function mark(db, id, status, reason, summary) {
 function checkLease(row, token) {
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token) ||
       !row?.lease_token || !timingSafeEqual(Buffer.from(row.lease_token, 'hex'), Buffer.from(token, 'hex'))) invalid('Invalid or expired verifier lease', 409);
+}
+
+const reportSections = ['Summary', 'Root cause', 'Reproduction environment', 'PoC', 'Impact analysis'];
+const artifactFiles = { report: 'report.md', poc: 'poc.c', reproduction: 'reproduction.md', log: 'kasan.log' };
+
+function canonicalTitle(input) {
+  if (typeof input !== 'string') return null;
+  const title = input.replace(/^\s*#+\s*/, '').replace(/\s+/g, ' ').trim();
+  return title.length >= 8 && Buffer.byteLength(title) <= 300 && !/[\x00-\x1f\x7f]/.test(title) ? title : null;
+}
+
+function canonicalNfsVersion(input) {
+  const match = /^(?:NFS\s*v?)?\s*(3|4(?:\.0|\.1|\.2)?)$/i.exec(String(input ?? '').trim());
+  return match ? (match[1] === '4.0' ? '4' : match[1]) : null;
+}
+
+function canonicalPermission(input) {
+  const value = String(input ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+  if (['AUTH_SYS', 'AUTH_UNIX', 'SEC=SYS'].includes(value)) return 'AUTH_SYS';
+  if (['AUTH_NONE', 'AUTH_NULL'].includes(value)) return 'AUTH_NONE';
+  if (['RPCSEC_GSS', 'KERBEROS', 'SEC=KRB5'].includes(value)) return 'RPCSEC_GSS';
+  if (value === 'AUTH DOMAIN') return 'Auth domain';
+  return null;
+}
+
+function canonicalVulnerabilityType(input) {
+  const aliases = new Map([
+    ['race', 'Race'], ['uaf', 'UAF'], ['use after free', 'UAF'], ['oob read', 'OOB Read'],
+    ['out of bounds read', 'OOB Read'], ['oob write', 'OOB Write'], ['out of bounds write', 'OOB Write'],
+    ['uninitialized read', 'Uninitialized Read'], ['integer overflow', 'Integer Overflow'],
+    ['resource leak', 'Resource Leak'], ['memory leak', 'Resource Leak'], ['logical', 'Logical'],
+    ['double free', 'Double Free'], ['null dereference', 'NULL Dereference'], ['type confusion', 'Type Confusion'],
+  ]);
+  if (typeof input !== 'string') return null;
+  const parts = input.split(',').map(part => aliases.get(part.trim().toLowerCase()));
+  const order = ['Race', 'UAF', 'OOB Read', 'OOB Write', 'Uninitialized Read', 'Integer Overflow',
+    'Resource Leak', 'Logical', 'Double Free', 'NULL Dereference', 'Type Confusion'];
+  return parts.length && parts.length <= 4 && parts.every(Boolean)
+    ? [...new Set(parts)].sort((left, right) => order.indexOf(left) - order.indexOf(right)).join(', ') : null;
+}
+
+function checkedArtifacts(result, review, poc, evidence) {
+  const bundle = result.artifacts;
+  if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return null;
+  const limits = { report: MAX_REPORT_BYTES, poc: 250_000, reproduction: 100_000, log: 500_000 };
+  for (const [role, filename] of Object.entries(artifactFiles)) {
+    const item = bundle[role];
+    const content = role === 'poc' ? item?.source : item?.content;
+    if (!item || typeof item !== 'object' || Array.isArray(item) || item.filename !== filename ||
+        typeof content !== 'string' || !content.trim() || Buffer.byteLength(content) > limits[role] || content.includes('\0')) return null;
+  }
+  if (bundle.poc.source !== poc.source ||
+      bundle.poc.source_index !== review.normalized?.poc?.source_index || bundle.log.content.trim() !== evidence.log) return null;
+  const headings = [...bundle.report.content.matchAll(/^##\s+(.+?)\s*$/gm)].map(match => match[1]);
+  if (headings.length !== reportSections.length || headings.some((heading, index) => heading !== reportSections[index])) return null;
+  const sections = bundle.report.content.split(/^##\s+.+?\s*$/gm).slice(1);
+  if (sections.length !== reportSections.length || sections.some(section => !section.trim())) return null;
+  if (!review.grounding?.evidence?.some(line => line.path === review.normalized.file_path &&
+      typeof line.text === 'string' && line.text.trim() && sections[1].includes(line.text.trim()))) return null;
+  return bundle;
 }
 
 export function progressSubmission(db, id, phase, leaseToken) {
@@ -367,11 +441,17 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     const normalized = object(review.normalized, 'normalized finding');
-    const title = value(normalized.title, 'normalized title', 300) || row.title;
-    const report = value(normalized.report, 'normalized report', MAX_REPORT_BYTES) || row.report;
+    const title = canonicalTitle(normalized.title);
     const filePath = value(normalized.file_path, 'file_path', 300);
-    if (!title || !report || !filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..')) {
-      const out = mark(db, id, 'needs_review', 'Verified finding lacks a valid NFS code path or report', summary);
+    const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
+    const testedVersion = canonicalNfsVersion(run.nfsVersion);
+    const submittedVersion = metadata.nfs_version == null ? null : canonicalNfsVersion(metadata.nfs_version);
+    const privilege = canonicalPermission(normalized.permission);
+    const vulnerabilityType = canonicalVulnerabilityType(normalized.vulnerability_type);
+    if (!title || !filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..') ||
+        !nfsVersion || !testedVersion || nfsVersion !== testedVersion ||
+        metadata.nfs_version != null && submittedVersion !== nfsVersion || !privilege || !vulnerabilityType) {
+      const out = mark(db, id, 'needs_review', 'Verified finding lacks consistent title, source path, tested NFS version, permission or vulnerability type', summary);
       db.exec('COMMIT'); return out;
     }
     const evidence = kasanEvidence(result.server_serial, filePath, normalized.code_refs, review.relevance);
@@ -390,6 +470,11 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', 'Codex could not link the trusted source, original PoC and post-run KASAN trace', summary);
       db.exec('COMMIT'); return out;
     }
+    const artifacts = checkedArtifacts(result, review, poc, evidence);
+    if (!artifacts) {
+      const out = mark(db, id, 'needs_review', 'Verifier did not produce a grounded report.md, poc.c, reproduction.md and KASAN log', summary);
+      db.exec('COMMIT'); return out;
+    }
     const kasanHeader = evidence.log.split(/\r?\n/, 1)[0].replace(/\+0x[0-9a-f]+\/[0-9a-f]+/gi, '').trim();
     const fingerprint = hash(`${commit}\0${filePath}\0${kasanHeader}`);
     const duplicate = db.prepare("SELECT management_id FROM submissions WHERE fingerprint = ? AND status = 'approved' LIMIT 1").get(fingerprint);
@@ -398,23 +483,20 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     const at = now();
-    const privilege = value(normalized.permission, 'permission', 200);
     const access = /AUTH_NONE|AUTH_NULL/i.test(privilege || '') ? ['auth_null'] : /AUTH_SYS|AUTH_UNIX/i.test(privilege || '') ? ['auth_unix'] : [];
     const foundDate = /^\d{4}-\d{2}-\d{2}$/.test(normalized.found_date || '') ? normalized.found_date : row.submitted_at.slice(0, 10);
     const data = {
       schema_version: 1, kind: 'finding', version_id: version, repo_commit: commit, title,
       file_path: filePath, scope: [filePath], code_refs: Array.isArray(normalized.code_refs) ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.length <= 300).slice(0, 30) : [],
       angle: 'qemu-two-vm-reproduction', created_at: at,
-      vm_environment: `QEMU server/client, NFS ${value(normalized.nfs_version, 'nfs_version', 100) || 'unspecified'}, kernel ${commit}`,
+      vm_environment: `QEMU server/client, NFS ${nfsVersion}, kernel ${commit}`,
       verified_impacts: evidence.impacts, access_requirements: access,
-      impact: value(normalized.vulnerability_type, 'vulnerability_type', 200) || evidence.impacts.join(', '),
-      reproduction_command: poc.language === 'c'
-        ? 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c && /tmp/hivemind-poc 10.77.0.1 /mnt/nfs'
-        : 'python3 /mnt/job/poc.py 10.77.0.1 /mnt/nfs',
+      impact: vulnerabilityType,
+      reproduction_command: 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c && /tmp/hivemind-poc 10.77.0.1 /mnt/nfs',
       poc_source: poc.source, poc_sha256: hash(poc.source), kasan_log: evidence.log, kasan_sha256: hash(evidence.log),
       registry_target: 'knfsd', registry_option: value(normalized.options, 'options', 200),
-      registry_privilege: privilege, registry_nfs_version: value(normalized.nfs_version, 'nfs_version', 100),
-      registry_vulnerability_type: value(normalized.vulnerability_type, 'vulnerability_type', 200),
+      registry_privilege: privilege, registry_nfs_version: nfsVersion,
+      registry_vulnerability_type: vulnerabilityType,
       registry_found_date: foundDate, registry_methodology: 'LLM', registry_report_project: 'Linux kernel',
       ...(row.origin === 'manual_upload' && typeof metadata.reporter === 'string' && metadata.reporter.length <= 100
         ? { registry_owner: metadata.reporter } : {}),
@@ -424,7 +506,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       if (!error.status) throw error;
       const out = mark(db, id, 'needs_review', error.message, summary); db.exec('COMMIT'); return out;
     }
-    const markdown = frontMatter(data, report);
+    const markdown = frontMatter(data, artifacts.report.content);
     const findingId = hash(`verified-submission\0${id}`);
     db.prepare(`INSERT INTO events
       (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title,
@@ -440,7 +522,12 @@ export function completeSubmission(db, id, result, leaseToken) {
     const managementId = `A-${String(sequence.last_number).padStart(3, '0')}`;
     db.prepare('UPDATE finding_registry SET management_id = ?, number = ?, approved_at = ?, updated_at = ? WHERE finding_id = ?')
       .run(managementId, sequence.last_number, at, at, findingId);
-    db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, 1000, 'server-kasan.log', 'log', hash(evidence.log), Buffer.byteLength(evidence.log), Buffer.from(evidence.log));
+    const insertArtifact = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
+    for (const [ordinal, role] of Object.keys(artifactFiles).entries()) {
+      const content = role === 'poc' ? artifacts.poc.source : artifacts[role].content;
+      const kind = role === 'reproduction' ? 'other' : role === 'log' ? 'log' : role === 'poc' ? 'poc' : 'report';
+      insertArtifact.run(id, 1000 + ordinal, artifactFiles[role], kind, hash(content), Buffer.byteLength(content), Buffer.from(content));
+    }
     db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
       .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), at, id);
     db.exec('COMMIT');

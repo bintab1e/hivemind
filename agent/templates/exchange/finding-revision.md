@@ -1,15 +1,3 @@
-# 취약점 후보 정정 보고서
+# 취약점 후보 정정
 
-## 이전 제출
-
-이전 `submission_id`와 정정 이유를 적는다. 새 제출은 별도 검증을 받으며 이전 기록을 자동으로 덮어쓰지 않는다.
-
-## 정정한 코드 근거와 재현 절차
-
-수정된 전체 보고서, C 우선 PoC(없으면 Python), 재현에 필요한 NFS 버전·옵션·권한, 빌드·실행 명령, 관찰 결과를 적는다. 로그가 있으면 원본을 첨부하고, 없으면 없다고 적는다.
-
-## 영향과 미확인 사항
-
-확인한 영향과 아직 재현되지 않은 영향을 구분한다. 관리 번호·CVE·제보 상태를 추측하지 않는다.
-
-로컬 MCP의 `submit_vulnerability`로 **새 제출**을 만들고 이 보고서를 `report` 또는 `kind: "report"` 파일로, 수정한 PoC·로그를 `files`로 보낸다. `metadata`에 확인한 조건만 넣는다. 응답의 새 `submission_id`와 `status`를 기록한다.
+정정도 `templates/report.md`를 복사해 **새 `report.md`**로 제출한다. `Summary`에 이전 `submission_id`와 정정 이유를 적고, 나머지 네 절을 수정된 전체 근거로 다시 작성한다. `poc.c`, `reproduction.md` 또는 `reproduce.sh`, 실제 KASAN/KCSAN `.log`도 함께 제출한다. 이전 제출은 자동으로 덮어쓰지 않으며 새 `submission_id`와 `status`를 확인한다. 관리 번호·CVE·제보 상태를 추측하지 않는다.

@@ -4,6 +4,8 @@
 
 현재 자동 승인 범위는 **knfsd 커널 스택의 NFSv3/v4 TCP PoC에서 서버 VM이 PoC 실행 후 KASAN read/write를 기록한 경우**입니다. 정적 검토의 `likely` 판정만으로는 등록하거나 관리 번호를 발급하지 않습니다. PoC가 정상 종료했지만 서버에서 재현되지 않으면 `rejected`, 빌드·마운트·환경 문제나 증거 부족은 `needs_evidence`, 정적 판단이 불확실하거나 정리된 정보가 부족하면 `needs_review`로 남습니다. RPC/RDMA, 특수 pNFS 구성, NFS-Ganesha, libnfs, KASAN으로 입증되지 않는 논리적 취약점·LPE·RCE 등은 이 이미지로 자동 승인하지 않습니다.
 
+승인된 제출은 `report.md`, 원본 C `poc.c`, 실제 2 VM 설정을 적은 `reproduction.md`, 관련 서버 KASAN 블록의 `kasan.log`로 정리됩니다. 보고서는 `Summary`, `Root cause`, `Reproduction environment`, `PoC`, `Impact analysis` 순서이며 `Root cause`에 고정 커밋에서 읽은 소스 조각을 넣습니다. 제출·정적 검토·VM 실행의 NFS 버전이 어긋나거나 제목·권한·취약점 유형에 근거가 부족하면 관리 번호를 발급하지 않습니다. 최종 영향 플래그는 제출자가 주장한 값 대신 서버 VM에서 확인한 KASAN Read/Write를 사용합니다. 여러 영향이 같은 관련 증거에서 확인되면 배열에 함께 기록할 수 있지만, Controlled Read/Write·LPE·RCE·Info Leak은 현 자동 검증 범위에 들어 있지 않습니다.
+
 ## 1. 호스트와 이미지 준비
 
 두 계정이 같은 버전의 서버 코드를 읽을 수 있어야 합니다. 공용 서버에서는 기존 `hivemind` 서비스 체크아웃을 유지하고, `bintable` 계정에 코드만 별도로 체크아웃해도 됩니다. 두 체크아웃은 같은 Git 커밋으로 맞춥니다. DB·로그·원본 PoC와 Codex 로그인 상태는 Git 체크아웃에 복사하지 않습니다.

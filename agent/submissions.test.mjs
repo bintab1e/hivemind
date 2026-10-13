@@ -16,6 +16,7 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
   await mkdir(path.join(home, 'evidence'), { recursive: true });
   await writeFile(path.join(root, 'poc.c'), 'int main(void) { return 0; }\n');
   await writeFile(path.join(root, 'notes.md'), '# 원본 분석\n');
+  await writeFile(path.join(root, 'reproduction.md'), '# VM 절차\n');
   await writeFile(path.join(home, 'evidence', 'repro.py'), 'print("repro")\n');
   await writeFile(path.join(home, 'pc1.token'), 'private token');
   execFileSync('git', ['init', root], { stdio: 'ignore' });
@@ -44,7 +45,7 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
   assert(listed.result.tools.some(tool => tool.name === 'submit_vulnerability'));
 
   const args = { title: 'Potential knfsd issue', report: 'Observed suspicious path', metadata: { nfs_version: '4.1', repo_commit: 'forged' }, files: [
-    { path: 'poc.c' }, { path: 'notes.md', kind: 'report' }, { path: path.join(home, 'evidence', 'repro.py') },
+    { path: 'poc.c' }, { path: 'notes.md', kind: 'report' }, { path: 'reproduction.md' }, { path: path.join(home, 'evidence', 'repro.py') },
   ] };
   const first = (await invoke(args)).result.structuredContent;
   assert.equal(first.delivered, true);
@@ -52,7 +53,7 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
   assert.equal(received[0].project, 'knfsd');
   assert.equal(received[0].metadata.repo_commit, commit);
   assert.equal(received[0].metadata.nfs_version, '4.1');
-  assert.deepEqual(received[0].files.map(file => file.kind), ['poc', 'report', 'poc']);
+  assert.deepEqual(received[0].files.map(file => file.kind), ['poc', 'report', 'other', 'poc']);
   assert.equal(Buffer.from(received[0].files[0].content_base64, 'base64').toString('utf8'), 'int main(void) { return 0; }\n');
   assert(!JSON.stringify(received[0]).includes(root));
   assert(!JSON.stringify(received[0]).includes('private token'));

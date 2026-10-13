@@ -10,17 +10,29 @@ import { buildSubmission, deliverSubmission, queueSubmission, rejectSubmission }
 
 const run = promisify(execFile);
 const localTools = [
-  { name: 'submit_vulnerability', description: 'knfsd 취약점 후보의 원본 보고서와 PoC·로그 파일을 서버 검증 대기열에 제출한다. 파일 형식과 KASAN 로그는 아직 없어도 된다. 서버의 2VM 재현 전에는 취약점으로 확정되지 않는다.', inputSchema: {
+  { name: 'submit_vulnerability', description: 'knfsd 취약점 후보를 서버 검증 대기열에 제출한다. 새 분석은 report.md(표준 5개 섹션), poc.c, reproduction.md 또는 reproduce.sh, 실제 KASAN/KCSAN .log를 첨부한다. 원본이 다른 형식이어도 서버 검증 에이전트가 정규화하며, 2VM 재현 전에는 취약점으로 확정되지 않는다.', inputSchema: {
     type: 'object', additionalProperties: false,
     properties: {
       project: { type: 'string', enum: ['knfsd'], description: '현재 지원 대상은 knfsd뿐이다.' },
-      title: { type: 'string', maxLength: 300 },
-      report: { type: 'string', description: '원본 분석 보고서. 파일로 첨부해도 된다.' },
-      metadata: { type: 'object', description: '확인한 옵션·권한·NFS 버전·유형·발견일·영향 등. 미확인 값은 추측하지 않는다.' },
+      title: { type: 'string', maxLength: 300, description: '영향받는 기능, 원인, 결과를 담은 짧고 중립적인 제목. 서버가 근거에 맞게 정규화한다.' },
+      report: { type: 'string', description: '원본 분석 보고서. report.md로 files에 첨부하면 생략한다.' },
+      metadata: { type: 'object', description: '분석 PC에서 직접 확인한 조건과 주장. 최종 체크·분류는 서버 2VM 검증 결과로 결정한다.', properties: {
+        file_path: { type: 'string', description: '커널 체크아웃 기준 상대 경로' },
+        code_refs: { type: 'array', items: { type: 'string' }, description: '커널 소스의 경로와 함수·줄 번호' },
+        options: { type: 'string', description: '필요한 NFS 옵션' },
+        permission: { type: 'string', description: '필요한 인증·권한(예: AUTH_SYS)' },
+        nfs_version: { type: 'string', description: '실제 재현한 NFS 버전' },
+        vulnerability_type: { type: 'string', description: '근거 있는 취약점 유형' },
+        found_date: { type: 'string', description: 'YYYY-MM-DD' },
+        reproduction_command: { type: 'string', description: '첨부 C PoC의 빌드·실행 명령' },
+        vm_environment: { type: 'string', description: '서버·클라이언트 VM 조건' },
+        access_requirements: { type: 'array', items: { type: 'string', enum: ['auth_null', 'auth_unix', 'rpcsec_gss', 'authenticated_client', 'malicious_server', 'local_user', 'local_privileged'] } },
+        claimed_impacts: { type: 'array', items: { type: 'string', enum: ['kasan_read', 'kasan_write', 'controlled_read', 'controlled_write', 'lpe', 'rce', 'info_leak'] }, description: '분석 PC가 직접 관찰했다고 주장하는 항목만. 서버가 독립 검증하여 최종 체크한다.' },
+      } },
       files: { type: 'array', maxItems: 20, items: { type: 'object', additionalProperties: false, properties: {
         path: { type: 'string', description: 'repo_root 또는 에이전트 home/evidence 아래의 파일 경로. 원문이 전송된다.' },
         name: { type: 'string', description: '선택: 서버에 보일 파일 이름.' },
-        kind: { type: 'string', enum: ['report', 'poc', 'log', 'other'], description: '선택: 파일 분류 힌트.' },
+        kind: { type: 'string', enum: ['report', 'poc', 'log', 'other'], description: 'report.md=report, poc.c=poc, KASAN/KCSAN .log=log, reproduction.md/reproduce.sh=other.' },
       }, required: ['path'] } },
       client_submission_id: { type: 'string', description: '선택: 재시도 때 같은 ID를 쓰기 위한 멱등 키.' },
     },

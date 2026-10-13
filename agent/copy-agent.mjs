@@ -7,7 +7,7 @@ export const agentSourceFiles = [
     'contract.mjs', 'coverage-scope.mjs', 'mcp-headers.mjs', 'mcp-agent.mjs', 'submissions.mjs',
     'sync-agent.mjs', 'setup.mjs', 'copy-agent.mjs', 'install.sh', 'setup.sh',
     'requirements.txt', 'knfsd-AGENTS.md',
-    'templates/exchange/finding.md', 'templates/exchange/finding-revision.md',
+    'templates/report.md', 'templates/exchange/finding-revision.md',
     'templates/telemetry/progress.md', 'templates/team-status.md',
 ];
 

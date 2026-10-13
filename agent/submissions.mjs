@@ -23,6 +23,7 @@ function attachmentName(name) {
 
 function inferKind(name) {
   const extension = path.extname(name).toLowerCase();
+  if (name.toLowerCase() === 'reproduction.md') return 'other';
   if (extension === '.c' || extension === '.py') return 'poc';
   if (extension === '.log') return 'log';
   if (extension === '.md' || extension === '.txt') return 'report';
