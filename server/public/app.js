@@ -64,7 +64,6 @@ function showView() {
   $('track-control').hidden = view !== 'coverage';
   $('coverage-footer').hidden = view !== 'coverage';
   $('findings-view').hidden = view !== 'findings' && view !== 'registry';
-  $('finding-demo-toggle').hidden = view !== 'findings';
   $('open-zip-submit').hidden = view !== 'findings';
   if (view !== 'findings' && $('zip-submit-dialog').open) $('zip-submit-dialog').close();
   $('finding-status-stats').hidden = view !== 'registry';
@@ -137,20 +136,6 @@ const isRegistered = finding => !!finding.management_id && finding.registration_
 const needsVerification = finding => finding.origin !== 'history' && !isRegistered(finding) && finding.report_status !== '철회' && finding.review_verdict !== 'unlikely';
 const newFindingStarts = { A: 43, B: 22, C: 2 };
 const historicalNoOffset = { knfsd: 0, 'NFS-Ganesha': 42, libnfs: 63 };
-const demoFinding = {
-  event_id: 'demo-preview', origin: 'demo', management_id: 'DEMO', registration_status: 'demo',
-  title: '[예시] NFSv4 READ 길이 검사', target: 'knfsd', option: 'NFSv4.1', privilege: 'AUTH_SYS',
-  report_project: '—', report_status: '예시', owner: '화면 예시', nfs_version: '4.1',
-  vulnerability_type: 'OOB Read (가상)', methodology: '화면 예시', agent_id: '화면 예시',
-  file_path: 'fs/nfsd/example.c (가상 경로)', vm_environment: '2VM 미실행 (화면 예시)',
-  review_summary: '실제 취약점 제출·검증 기록이 아닙니다.', verified_impacts: [],
-};
-const demoContents = {
-  report: '# 분석 보고서 예시\n\n이 자료는 상세 화면을 확인하기 위한 가상 예시입니다. 실제 취약점, 검증 결과 또는 제보가 아닙니다.\n\n- 대상: knfsd / NFSv4.1 (예시)\n- 코드 위치: fs/nfsd/example.c (가상 경로)\n- 검증 상태: 서버 검증 및 2VM 재현을 실행하지 않음',
-  poc: '/* poc_demo.c — 화면 예시 전용. NFS 요청을 보내지 않습니다. */\n#include <stdio.h>\n\nint main(void) {\n    puts("UI preview only; no NFS request sent");\n    return 0;\n}',
-  verification: '실제 KASAN 로그가 없습니다. 이 항목은 2VM에서 실행되지 않은 화면 예시입니다.',
-};
-const demoEnabled = () => typeof location !== 'undefined' && new URLSearchParams(location.search).get('demo') === '1';
 function isNewFinding(finding) {
   if (finding.origin === 'history' || !isRegistered(finding)) return false;
   const match = /^([ABC])-(\d+)$/.exec(finding.management_id);
@@ -158,7 +143,7 @@ function isNewFinding(finding) {
 }
 const visibleFindings = () => activeView() === 'registry'
   ? state.registry?.findings || []
-  : [...(activeView() === 'findings' && demoEnabled() ? [demoFinding] : []), ...(state.registry?.findings || []).filter(isNewFinding)];
+  : (state.registry?.findings || []).filter(isNewFinding);
 function findingGroups(findings) {
   const byId = new Map(findings.map(finding => [finding.event_id, finding]));
   const groups = new Map();
@@ -181,7 +166,6 @@ const previousFinding = finding => finding.replaces_event_id
   ? (state.registry?.findings || []).find(item => item.event_id === finding.replaces_event_id)
   : null;
 const reviewLabel = finding => {
-  if (finding.origin === 'demo') return '화면 예시 · 실제 검증 아님';
   const revision = !!finding.replaces_event_id;
   if (isRegistered(finding)) {
     const label = finding.review_provider === 'codex_qemu' ? '2VM 검증 완료' : '정적 검증 통과';
@@ -266,10 +250,6 @@ function syncFindingEditControls() {
   toggle.textContent = state.editMode ? '수정 종료' : '수정 모드';
   toggle.setAttribute('aria-pressed', String(state.editMode));
   toggle.disabled = editing;
-  const demoToggle = $('finding-demo-toggle');
-  demoToggle.textContent = demoEnabled() ? '예시 숨기기' : '예시 보기';
-  demoToggle.setAttribute('aria-pressed', String(demoEnabled()));
-  demoToggle.disabled = editing;
   $('refresh').disabled = editing;
   for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).disabled = editing;
   for (const button of document.querySelectorAll('.tabs button')) button.disabled = editing;
@@ -354,7 +334,7 @@ function findingEditInput(finding, key, label) {
 }
 
 function findingEditActions(cell, finding) {
-  if (!state.editMode || finding.origin === 'demo') return;
+  if (!state.editMode) return;
   const actions = element('div', 'row-edit-actions');
   if (state.editingFindingId === finding.event_id) {
     const save = element('button', 'row-edit-button primary', state.editSaving ? '저장 중…' : '저장');
@@ -457,7 +437,7 @@ function renderFindings() {
   syncFindingEditControls();
   const findings = visibleFindings();
   populateFindingFilters(findings);
-  renderFindingStats(findings.filter(finding => finding.origin !== 'demo'));
+  renderFindingStats(findings);
   const search = $('finding-search').value.trim().toLowerCase();
   const selectedFilters = findingFilters.map(([id, key]) => [key, $(id).value]).filter(([, value]) => value);
   const filtered = findings.filter(item =>
@@ -473,7 +453,7 @@ function renderFindings() {
   });
   const pages = Math.max(1, Math.ceil(filtered.length / 20));
   state.findingPage = Math.min(state.findingPage, pages);
-  $('finding-count').textContent = `${number(filtered.filter(finding => finding.origin !== 'demo').length)} / ${number(findings.filter(finding => finding.origin !== 'demo').length)}행${demoEnabled() && activeView() === 'findings' ? ' · 예시 미리보기' : ''}`;
+  $('finding-count').textContent = `${number(filtered.length)} / ${number(findings.length)}행`;
   const scrollLeft = $('findings').scrollLeft;
   const scrollTop = $('findings').scrollTop;
   clear($('findings'));
@@ -498,7 +478,7 @@ function renderFindings() {
     const serial = finding.origin === 'history' && Number.isInteger(finding.number)
       ? historicalNoOffset[finding.target] + finding.number
       : offset + index + 1;
-    row.append(element('td', 'registry-row-number', finding.origin === 'demo' ? '예시' : number(serial)));
+    row.append(element('td', 'registry-row-number', number(serial)));
     for (const [key] of findingColumns) row.append(findingCell(finding, key));
     const verified = new Set(finding.verified_impacts || []);
     for (const [key, label] of impacts) {
@@ -806,11 +786,6 @@ async function showDetailTab() {
   clear(content);
   content.append(element('p', '', '자료를 불러오는 중…'));
   try {
-    if (finding.origin === 'demo') {
-      clear(content);
-      content.append(element('pre', '', demoContents[tab]));
-      return;
-    }
     if (finding.origin === 'history') {
       const base = `/api/registry/history/${encodeURIComponent(finding.management_id)}/artifacts`;
       const { artifacts } = await (await api(base)).json();
@@ -1101,12 +1076,6 @@ async function refresh() {
 }
 
 $('refresh').addEventListener('click', refresh);
-$('finding-demo-toggle').addEventListener('click', () => {
-  if (state.editingFindingId) return;
-  setQuery({ demo: demoEnabled() ? '' : '1' });
-  state.findingPage = 1;
-  renderFindings();
-});
 $('open-zip-submit').addEventListener('click', openZipDialog);
 $('close-zip-submit').addEventListener('click', () => $('zip-submit-dialog').close());
 $('zip-submit-dialog').addEventListener('click', event => {
