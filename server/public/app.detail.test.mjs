@@ -81,7 +81,15 @@ test('finding detail appends only available primitive review under the existing 
   } });
   const duplicate = elements.get('detail-summary').children.find(item => item.className.includes('duplicate-review'));
   assert.ok(duplicate);
-  assert.match(duplicate.children[1].textContent, /동일한 원인과 수정이 공개됨/);
+  assert.equal(duplicate.children[1].textContent, '2026-10-13T00:00:00Z');
+  assert.equal(duplicate.children[2].children[0].textContent, 'https://github.com/torvalds/linux/commit/0123456789012345678901234567890123456789');
   assert.equal(duplicate.children[2].children[0].href, 'https://github.com/torvalds/linux/commit/0123456789012345678901234567890123456789');
   assert.equal(duplicate.children[2].children[0].rel, 'noopener noreferrer');
+
+  context.openFinding({ ...finding, duplicate_review: {
+    verdict: 'no_match', checked_at: '2026-10-13T01:00:00Z', reason: '화면에 노출하지 않을 긴 검토 의견', evidence: [],
+  } });
+  const reviewed = elements.get('detail-summary').children.find(item => item.className.includes('duplicate-review'));
+  assert.equal(reviewed.children.length, 2);
+  assert.equal(reviewed.children[1].textContent, '2026-10-13T01:00:00Z');
 });
