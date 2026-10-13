@@ -719,6 +719,7 @@ function openFinding(finding, tab = 'report') {
   clear($('detail-summary'));
   $('detail').querySelector('.detail-tabs').hidden = false;
   if (finding.origin === 'history') {
+    const verification = finding.latest_verification;
     $('detail-summary').append(
       detailFact('관리번호 / 대상', `${finding.management_id} · ${finding.target}`),
       detailFact('담당자 / 제보 여부', `${finding.owner || '—'} · ${finding.report_status || '—'}`),
@@ -727,6 +728,16 @@ function openFinding(finding, tab = 'report') {
       detailFact('취약점 유형 / 방법론', `${finding.vulnerability_type || '—'} · ${finding.methodology || '—'}`),
       detailFact('찾은 날짜 / 익스플로잇 / CVE', `${finding.found_date || '—'} · ${finding.exploit || '—'} · ${finding.cve || '—'}`),
     );
+    if (verification) {
+      const result = { verified: '2VM 재검증 확인', not_reproduced: '2VM에서 재현되지 않음', inconclusive: '2VM 재검증 미확정' }[verification.result] || '2VM 재검증 미확정';
+      const observed = verification.observed_impacts.map(impact => impacts.find(([key]) => key === impact)?.[1] || impact).join(', ');
+      $('detail-summary').append(
+        detailFact('재검증 결과', `${result} · ${when(verification.completed_at)}`),
+        detailFact('재검증 커널 / 동적 관찰', `${verification.kernel_commit} · ${verification.reproduction_status}`),
+        detailFact('재검증 영향', observed || '확정되지 않음'),
+        detailFact('재검증 사유', verification.reason),
+      );
+    }
     if (!$('detail').open) $('detail').showModal();
     showDetailTab();
     return;

@@ -144,8 +144,8 @@ function validateResult(parsed, submission, trustedSource) {
   if (foundDate && (!/^\d{4}-\d{2}-\d{2}$/.test(foundDate) || !Number.isFinite(parsedDate) || new Date(parsedDate).toISOString().slice(0, 10) !== foundDate)) throw new CodexReviewError('invalid_output');
   if (!Array.isArray(answer.claimed_impacts) || answer.claimed_impacts.length > impactTypes.size || new Set(answer.claimed_impacts).size !== answer.claimed_impacts.length || answer.claimed_impacts.some(value => !impactTypes.has(value))) throw new CodexReviewError('invalid_output');
   if (!Array.isArray(answer.log_file_indexes) || answer.log_file_indexes.length > 5 || new Set(answer.log_file_indexes).size !== answer.log_file_indexes.length || answer.log_file_indexes.some(index => !Number.isInteger(index) || index < 0 || index >= submission.files.length)) throw new CodexReviewError('invalid_output');
-  const buildCommand = field(answer.build_command, 1000);
-  const runCommand = field(answer.run_command, 1000);
+  let buildCommand = field(answer.build_command, 1000);
+  let runCommand = field(answer.run_command, 1000);
   let poc = null;
   if (answer.poc_file_index !== null) {
     const index = answer.poc_file_index;
@@ -153,7 +153,12 @@ function validateResult(parsed, submission, trustedSource) {
     const file = submission.files[index];
     if (answer.poc_language === 'c' && !cSource(file) || answer.poc_language === 'python' && !pythonSource(file)) throw new CodexReviewError('invalid_output');
     if (answer.poc_language === 'python' && submission.files.some(cSource)) throw new CodexReviewError('invalid_output');
-    if (!runCommand || answer.poc_language === 'c' && !buildCommand) throw new CodexReviewError('invalid_output');
+    if (answer.poc_language === 'c') {
+      buildCommand ||= 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c';
+      runCommand ||= '/tmp/hivemind-poc 10.77.0.1 /mnt/nfs';
+    } else {
+      runCommand ||= 'python3 /mnt/job/poc.py 10.77.0.1 /mnt/nfs';
+    }
     poc = { filename: answer.poc_language === 'c' ? 'poc.c' : 'poc.py', original_name: file.name, source_index: index, source: file.content, language: answer.poc_language, build_command: buildCommand, run_command: runCommand };
   } else if (answer.poc_language !== null || buildCommand !== null || runCommand !== null) {
     throw new CodexReviewError('invalid_output');

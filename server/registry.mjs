@@ -1,4 +1,5 @@
 import { invalid, readFrontMatter } from './contract.mjs';
+import { latestHistoryVerifications } from './history-verifications.mjs';
 
 const prefixes = { knfsd: 'A', 'NFS-Ganesha': 'B', libnfs: 'C' };
 const floors = { knfsd: 42, 'NFS-Ganesha': 21, libnfs: 1 };
@@ -137,6 +138,7 @@ export function withdrawFinding(db, id, at = new Date().toISOString()) {
 }
 
 export function listRegistry(db) {
+  const historyVerifications = latestHistoryVerifications(db);
   const live = db.prepare(`SELECT r.*, e.title, e.agent_id, e.created_at, e.markdown,
     e.corrects_event_id AS replaces_event_id, v.status AS review_status,
     v.verdict AS review_verdict, v.summary AS review_summary, v.provider AS review_provider,
@@ -160,6 +162,7 @@ export function listRegistry(db) {
     const { manual_overrides_json, ...record } = row;
     return {
     ...record, event_id: `history:${row.management_id}`, origin: 'history',
+    latest_verification: historyVerifications.get(row.management_id) ?? null,
     agent_id: null, created_at: null, review_status: null, review_verdict: null, review_provider: null,
     review_summary: null, registration_status: 'history', verified_at: null,
     updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null, has_patch: 0,

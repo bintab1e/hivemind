@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mjs';
 import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
 import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
+import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
 import { getSubmission, initializeSubmissions, listSubmissions, retrySubmission, submitSubmission } from './submissions.mjs';
 import { startVerifierIpc } from './verifier-ipc.mjs';
 
@@ -89,6 +90,7 @@ export function openDatabase(file) {
   if (!agentColumns.has('model_id')) db.exec('ALTER TABLE agents ADD COLUMN model_id TEXT');
   initializeRegistry(db);
   initializeHistoryArtifacts(db);
+  initializeHistoryVerifications(db);
   initializeSubmissions(db);
   return db;
 }
@@ -811,6 +813,9 @@ export async function startServer(options = {}) {
       }
       if (url.pathname === '/v1/admin/agents' && req.method === 'GET') return send(res, 200, { agents: db.prepare('SELECT agent_id, client_name, model_id, created_at, last_seen_at FROM agents ORDER BY agent_id').all() });
       if (url.pathname === '/v1/admin/submissions' && req.method === 'GET') return send(res, 200, { submissions: listSubmissions(db) });
+      if (url.pathname === '/v1/admin/history-verifications' && req.method === 'POST') {
+        return send(res, 201, appendHistoryVerification(db, await readJson(req)));
+      }
       const submissionRetry = /^\/v1\/admin\/submissions\/([a-f0-9]{64})\/retry$/.exec(url.pathname);
       if (submissionRetry && req.method === 'POST') return send(res, 200, retrySubmission(db, submissionRetry[1]));
       const registryAdminMatch = /^\/v1\/admin\/registry\/([a-f0-9]{64})$/.exec(url.pathname);

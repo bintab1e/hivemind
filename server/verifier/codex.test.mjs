@@ -83,6 +83,23 @@ test('uses a C PoC before Python, retains original evidence, and never claims re
   assert.equal(Object.hasOwn(result, 'approved'), false);
 });
 
+test('fills omitted PoC command hints from the isolated guest defaults', async t => {
+  const cAnswer = structuredClone(answer);
+  cAnswer.normalized.build_command = null;
+  cAnswer.normalized.run_command = null;
+  const cReview = await reviewSubmissionWithCodex({ ...submission, metadata: { reproduction_command: 'cc candidate.c && ./a.out' } }, options(fakeCli(t, cAnswer)));
+  assert.equal(cReview.verdict, 'likely');
+  assert.deepEqual([cReview.normalized.poc.source_index, cReview.normalized.poc.source, cReview.normalized.poc.build_command, cReview.normalized.poc.run_command],
+    [1, submission.files[1].content, 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c', '/tmp/hivemind-poc 10.77.0.1 /mnt/nfs']);
+
+  const pythonOnly = { ...submission, files: [submission.files[0], submission.files[2]] };
+  const pythonAnswer = structuredClone(answer);
+  Object.assign(pythonAnswer.normalized, { poc_file_index: 0, poc_language: 'python', build_command: null, run_command: null, log_file_indexes: [1] });
+  const pythonReview = await reviewSubmissionWithCodex(pythonOnly, options(fakeCli(t, pythonAnswer)));
+  assert.deepEqual([pythonReview.normalized.poc.filename, pythonReview.normalized.poc.run_command],
+    ['poc.py', 'python3 /mnt/job/poc.py 10.77.0.1 /mnt/nfs']);
+});
+
 test('fails closed when CLI is missing or submitted paths are unsafe', async () => {
   await assert.rejects(reviewSubmissionWithCodex(submission, options('')), error => error instanceof VerifierUnavailableError && error.code === 'not_configured');
   await assert.rejects(reviewSubmissionWithCodex(submission, { cliPath: '/missing/codex' }), error => error instanceof CodexReviewError && error.code === 'trusted_source_missing');
