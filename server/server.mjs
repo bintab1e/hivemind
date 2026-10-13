@@ -22,9 +22,14 @@ const gunzipAsync = promisify(gunzip);
 const telemetryLimits = Object.freeze({ compressed_request: 8_000_000, decompressed_request: 128_000_000, coverage_json: 64_000_000 });
 const reviewExtensionsEnabled = () => process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS === 'true';
 const sashikoConfigured = () => Boolean(reviewExtensionsEnabled() && process.env.SASHIKO_CLI && process.env.SASHIKO_REPO && process.env.LLM_API_KEY);
+function secureDataDirectory(directory) {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const mode = fs.statSync(directory).mode & 0o777;
+  // Group execute may be the ACL mask that lets the verifier reach verifier.sock.
+  if ((mode & 0o700) !== 0o700 || (mode & 0o067)) fs.chmodSync(directory, 0o700 | (mode & 0o010));
+}
 export function openDatabase(file) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.chmodSync(path.dirname(file), 0o700);
+  secureDataDirectory(path.dirname(file));
   const db = new DatabaseSync(file);
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -771,8 +776,7 @@ export async function startServer(options = {}) {
   const dashboardUser = options.dashboardUser ?? process.env.HIVEMIND_DASHBOARD_USER ?? 'viewer';
   if (Boolean(dashboardPasswordHash) !== Boolean(dashboardPasswordSalt)) throw new Error('Dashboard hash and salt must be configured together');
   if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !dashboardPassword && !dashboardPasswordHash) throw new Error('Configure dashboard authentication before binding beyond localhost');
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dataDir, 0o700);
+  secureDataDirectory(dataDir);
   const tokenPath = path.join(dataDir, 'api-token.txt');
   const adminToken = options.apiToken ?? process.env.HIVEMIND_API_TOKEN ?? (fs.existsSync(tokenPath) ? fs.readFileSync(tokenPath, 'utf8').trim() : randomBytes(24).toString('hex'));
   if (!adminToken) throw new Error('Admin API token is empty');
