@@ -1,0 +1,950 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomBytes, scryptSync } from 'node:crypto';
+import { gunzip } from 'node:zlib';
+import { promisify } from 'node:util';
+import { hash, evidenceLimits, verifiedImpactTypes, accessRequirementTypes, HttpError, invalid, required, safeEqual, readFrontMatter, validateEvent, parseLcov, mcpTools } from './contract.mjs';
+export { evidenceLimits, verifiedImpactTypes, accessRequirementTypes, validateEvent, parseLcov, mcpTools } from './contract.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
+import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mjs';
+import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
+import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(root, 'public');
+const now = () => new Date().toISOString();
+const gunzipAsync = promisify(gunzip);
+const telemetryLimits = Object.freeze({ compressed_request: 8_000_000, decompressed_request: 128_000_000, coverage_json: 64_000_000 });
+const reviewExtensionsEnabled = () => process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS === 'true';
+const sashikoConfigured = () => Boolean(reviewExtensionsEnabled() && process.env.SASHIKO_CLI && process.env.SASHIKO_REPO && process.env.LLM_API_KEY);
+export function openDatabase(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.dirname(file), 0o700);
+  const db = new DatabaseSync(file);
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
+    CREATE TABLE IF NOT EXISTS events (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, source_path TEXT NOT NULL,
+      sha256 TEXT NOT NULL, kind TEXT NOT NULL, version_id TEXT NOT NULL,
+      repo_commit TEXT NOT NULL, title TEXT NOT NULL,
+      claim_key TEXT, hypothesis_id TEXT, verification_of TEXT, verdict TEXT,
+      method TEXT, prior_exposure TEXT, based_on_json TEXT, scope_json TEXT NOT NULL,
+      related_hypothesis_id TEXT, corrects_event_id TEXT, created_at TEXT NOT NULL,
+      received_at TEXT NOT NULL, markdown TEXT NOT NULL,
+      UNIQUE(version_id, agent_id, source_path)
+    );
+    CREATE INDEX IF NOT EXISTS events_version ON events(version_id, received_at);
+    CREATE TABLE IF NOT EXISTS batches (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, version_id TEXT NOT NULL,
+      repo_commit TEXT NOT NULL, scope_hash TEXT NOT NULL,
+      worktree_clean INTEGER NOT NULL, generated_at TEXT NOT NULL,
+      received_at TEXT NOT NULL, files_json TEXT NOT NULL,
+      manifest_json TEXT NOT NULL, lcov TEXT NOT NULL,
+      coverage_json TEXT NOT NULL, progress_md TEXT NOT NULL,
+      missing_includes INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS batches_version ON batches(version_id, repo_commit, generated_at);
+    CREATE TABLE IF NOT EXISTS agents (
+      agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL, last_seen_at TEXT,
+      client_name TEXT, model_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS exposures (
+      agent_id TEXT NOT NULL, hypothesis_id TEXT NOT NULL,
+      mode TEXT NOT NULL, seen_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS exposures_lookup ON exposures(agent_id, hypothesis_id, seen_at);
+    CREATE TABLE IF NOT EXISTS track_targets (
+      track_id TEXT NOT NULL, version_id TEXT NOT NULL, repo_commit TEXT NOT NULL,
+      active INTEGER NOT NULL, activated_at TEXT NOT NULL,
+      PRIMARY KEY(track_id, version_id, repo_commit), UNIQUE(version_id, repo_commit)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS active_track ON track_targets(track_id) WHERE active = 1;
+    CREATE TABLE IF NOT EXISTS finding_reviews (
+      finding_id TEXT PRIMARY KEY REFERENCES events(id),
+      provider TEXT NOT NULL, status TEXT NOT NULL, verdict TEXT,
+      summary TEXT, requested_at TEXT NOT NULL, completed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS patches (
+      id TEXT PRIMARY KEY, finding_id TEXT NOT NULL REFERENCES events(id),
+      filename TEXT NOT NULL, sha256 TEXT NOT NULL, patch TEXT NOT NULL,
+      status TEXT NOT NULL, result TEXT, uploaded_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS patches_finding ON patches(finding_id, uploaded_at);
+  `);
+  fs.chmodSync(file, 0o600);
+  const batchColumns = new Set(db.prepare('PRAGMA table_info(batches)').all().map(column => column.name));
+  if (!batchColumns.has('manifest_json')) db.exec('ALTER TABLE batches ADD COLUMN manifest_json TEXT');
+  if (!batchColumns.has('lcov')) db.exec('ALTER TABLE batches ADD COLUMN lcov TEXT');
+  if (!batchColumns.has('missing_includes')) db.exec('ALTER TABLE batches ADD COLUMN missing_includes INTEGER');
+  const agentColumns = new Set(db.prepare('PRAGMA table_info(agents)').all().map(column => column.name));
+  if (!agentColumns.has('client_name')) db.exec('ALTER TABLE agents ADD COLUMN client_name TEXT');
+  if (!agentColumns.has('model_id')) db.exec('ALTER TABLE agents ADD COLUMN model_id TEXT');
+  initializeRegistry(db);
+  initializeHistoryArtifacts(db);
+  return db;
+}
+
+function readAgentProfile(input, mandatory = false) {
+  const hasClient = input?.client_name != null;
+  const hasModel = input?.model_id != null;
+  if (hasClient !== hasModel || mandatory && !hasClient) invalid('client_name and model_id are required together');
+  if (!hasClient) return { client_name: null, model_id: null };
+  return { client_name: required(input.client_name, 'client_name', 64), model_id: required(input.model_id, 'model_id', 100) };
+}
+
+export function issueAgentToken(db, agentId, rotate = false, profileInput = null) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(agentId)) invalid('Invalid agent_id');
+  const token = randomBytes(32).toString('hex');
+  if (rotate) {
+    if (!db.prepare('UPDATE agents SET token_hash = ? WHERE agent_id = ?').run(hash(token), agentId).changes) invalid('Unknown agent', 404);
+  } else {
+    if (db.prepare('SELECT 1 FROM agents WHERE agent_id = ?').get(agentId)) invalid('Agent already exists', 409);
+    const profile = readAgentProfile(profileInput);
+    db.prepare('INSERT INTO agents (agent_id, token_hash, created_at, last_seen_at, client_name, model_id) VALUES (?, ?, ?, NULL, ?, ?)').run(agentId, hash(token), now(), profile.client_name, profile.model_id);
+  }
+  return { agent_id: agentId, token };
+}
+
+function setAgentProfile(db, agentId, input) {
+  const profile = readAgentProfile(input, true);
+  const current = db.prepare('SELECT client_name, model_id FROM agents WHERE agent_id = ?').get(agentId);
+  if (!current) invalid('Unknown agent', 404);
+  if (current.client_name && (current.client_name !== profile.client_name || current.model_id !== profile.model_id)) invalid('Agent profile is immutable; create a new agent_id for a different client or model', 409);
+  db.prepare('UPDATE agents SET client_name = ?, model_id = ? WHERE agent_id = ?').run(profile.client_name, profile.model_id, agentId);
+  return { agent_id: agentId, ...profile };
+}
+
+function bearer(req) {
+  return /^Bearer ([a-z0-9._~-]+)$/i.exec(req.headers.authorization || '')?.[1] || '';
+}
+
+function authenticatedAgent(db, req) {
+  const token = bearer(req);
+  const row = token && db.prepare('SELECT agent_id FROM agents WHERE token_hash = ?').get(hash(token));
+  if (!row) invalid('Agent token required', 401);
+  db.prepare('UPDATE agents SET last_seen_at = ? WHERE agent_id = ?').run(now(), row.agent_id);
+  return row.agent_id;
+}
+
+function exposedModes(db, agentId, hypothesisId, before = now()) {
+  return db.prepare('SELECT DISTINCT mode FROM exposures WHERE agent_id = ? AND hypothesis_id = ? AND seen_at <= ?').all(agentId, hypothesisId, before).map(row => row.mode);
+}
+
+function addEvent(db, input, agentId) {
+  const event = validateEvent(input);
+  if (event.agentId !== agentId) invalid('agent_id does not match token', 403);
+  const { sourcePath, markdown, digest, data } = event;
+  if (data.kind === 'finding') validateRegistryMetadata(data);
+  const id = hash(`${data.version_id}\0${agentId}\0${sourcePath}`);
+  if (data.kind === 'analysis') {
+    const warning = targetWarning(db, data.version_id, data.repo_commit);
+    return { event_id: id, hypothesis_id: data.hypothesis_id || null, accepted: false, discarded: true, reason: 'intermediate_analysis_disabled', warnings: [...(warning ? [warning] : []), 'intermediate_analysis_discarded'] };
+  }
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const existing = db.prepare('SELECT id, sha256, hypothesis_id, verification_of, related_hypothesis_id FROM events WHERE version_id = ? AND agent_id = ? AND source_path = ?').get(data.version_id, agentId, sourcePath);
+    if (existing) {
+      if (existing.sha256 !== digest) invalid('immutable_event_changed', 409);
+      db.exec('COMMIT');
+      const warning = targetWarning(db, data.version_id, data.repo_commit);
+      return { event_id: existing.id, hypothesis_id: existing.hypothesis_id || existing.verification_of || existing.related_hypothesis_id, replayed: true, possible_matches: [], warnings: warning ? [warning] : [] };
+    }
+    if (data.kind === 'verification' || (data.kind === 'finding' && data.finding_of)) {
+      const target = db.prepare("SELECT version_id, repo_commit FROM events h WHERE hypothesis_id = ? AND kind = 'hypothesis' AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id)").get(data.verification_of || data.finding_of || data.hypothesis_id);
+      if (!target || (target.version_id !== data.version_id && (!trackFor(db, data.version_id, data.repo_commit) || trackFor(db, data.version_id, data.repo_commit) !== trackFor(db, target.version_id, target.repo_commit)))) invalid('Unknown hypothesis', 422);
+    }
+    if (data.kind === 'finding' && data.finding_of) {
+      const linked = new Set(db.prepare("SELECT v.id FROM events v WHERE v.kind = 'verification' AND v.verification_of = ? AND v.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = v.id)").all(data.finding_of, data.repo_commit).map(row => row.id));
+      if ((data.evidence_event_ids || []).some(id => !linked.has(id))) {
+        if (data.evidence_event_ids.some(id => !db.prepare('SELECT 1 FROM events WHERE id = ?').get(id))) invalid('Unknown verification', 422);
+        invalid('Finding evidence must reference active verifications of the same hypothesis and commit', 422);
+      }
+    }
+    if (data.corrects_event_id) {
+      const target = db.prepare('SELECT id, kind, version_id, repo_commit, agent_id, related_hypothesis_id FROM events WHERE id = ?').get(data.corrects_event_id);
+      if (!target) invalid('Unknown corrected event', 422);
+      if (target.version_id !== data.version_id || target.agent_id !== agentId) invalid('Corrected event must have the same version and author', 422);
+      if (db.prepare('SELECT 1 FROM events WHERE corrects_event_id = ?').get(target.id)) invalid('Corrected event already has a correction or replacement', 409);
+      if (data.kind === 'finding' && (target.kind !== 'finding' || target.repo_commit !== data.repo_commit || (target.related_hypothesis_id || null) !== (data.finding_of || null))) invalid('Finding revision must replace a finding for the same target and commit', 422);
+    }
+    const trackId = trackFor(db, data.version_id, data.repo_commit);
+    const matches = data.kind !== 'hypothesis' ? [] : trackId
+      ? db.prepare("SELECT h.* FROM events h JOIN track_targets t ON t.version_id = h.version_id AND t.repo_commit = h.repo_commit WHERE h.kind = 'hypothesis' AND t.track_id = ? AND (h.claim_key = ? OR lower(h.title) = lower(?)) AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id) ORDER BY h.received_at DESC LIMIT 8").all(trackId, data.claim_key, data.title)
+      : db.prepare("SELECT h.* FROM events h WHERE h.kind = 'hypothesis' AND h.version_id = ? AND (h.claim_key = ? OR lower(h.title) = lower(?)) AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id) ORDER BY h.received_at DESC LIMIT 8").all(data.version_id, data.claim_key, data.title);
+    const possibleMatches = matches.map(row => ({ hypothesis_id: row.hypothesis_id, title: row.title, agent_id: row.agent_id, code_refs: readFrontMatter(row.markdown).data.code_refs || [], status: claimStatus(hypothesisState(db, row, data.repo_commit, activeChecks(db, row.hypothesis_id)).status) }));
+    const exposure = data.kind === 'verification' ? exposedModes(db, agentId, data.verification_of) : [];
+    const exposureConflict = (exposure.some(mode => ['full', 'summary'].includes(mode)) && ['none', 'claim_only'].includes(data.prior_exposure)) || (exposure.includes('claim_only') && data.prior_exposure === 'none');
+    const warnings = exposureConflict ? ['prior_exposure_differs_from_server_log'] : [];
+    const warning = targetWarning(db, data.version_id, data.repo_commit);
+    if (warning) warnings.push(warning);
+    const hypothesisId = data.kind === 'hypothesis' ? `H-${id.slice(0, 12)}` : null;
+    db.prepare(`INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, agentId, sourcePath, digest, data.kind, data.version_id,
+      data.repo_commit, data.title, data.claim_key || null, hypothesisId,
+      data.verification_of || null, data.verdict || null, data.method || null,
+      data.prior_exposure || null, JSON.stringify(data.evidence_event_ids || data.based_on_event_ids || []),
+      JSON.stringify(data.scope), data.finding_of || data.hypothesis_id || data.related_hypothesis_id || null,
+      data.corrects_event_id || null, data.created_at, now(), markdown,
+    );
+    if (data.kind === 'finding') {
+      db.prepare('INSERT INTO finding_reviews (finding_id, provider, status, requested_at) VALUES (?, ?, ?, ?)').run(id, 'kimi', process.env.KIMI_API_KEY ? 'pending' : 'unconfigured', now());
+      registerFinding(db, id, data, data.created_at);
+    }
+    if (data.kind === 'correction' && data.corrects_event_id) withdrawFinding(db, data.corrects_event_id);
+    db.exec('COMMIT');
+    return { event_id: id, hypothesis_id: hypothesisId || data.verification_of || data.finding_of || data.hypothesis_id || null, replayed: false, possible_matches: possibleMatches, warnings };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function addBatch(db, input, agentId) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) invalid('Invalid batch');
+  const { manifest, lcov, coverage_json: coverageJson, progress_md: progressMd } = input;
+  if (!manifest || typeof manifest !== 'object') invalid('Missing manifest');
+  if (manifest.schema_version !== 1) invalid('Unsupported batch schema');
+  for (const key of ['agent_id', 'version_id', 'repo_commit', 'coverage_scope_hash', 'generated_at', 'repo_root']) required(manifest[key], key, key === 'repo_root' ? 1000 : 200);
+  if (manifest.agent_id !== agentId) invalid('agent_id does not match token', 403);
+  if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(manifest.version_id)) invalid('Invalid version_id');
+  if (!/^[a-z0-9][a-z0-9_-]*$/i.test(manifest.agent_id) || !/^[a-f0-9]{40,64}$/i.test(manifest.repo_commit)) invalid('Invalid agent or commit');
+  if (manifest.worktree_clean !== true && manifest.worktree_clean !== false) invalid('worktree_clean must be boolean');
+  if (!Number.isFinite(Date.parse(manifest.generated_at))) invalid('Invalid generated_at');
+  if (typeof coverageJson !== 'string') invalid('Invalid coverage.json');
+  if (Buffer.byteLength(coverageJson) > telemetryLimits.coverage_json) invalid('coverage.json is too large', 413);
+  if (typeof progressMd !== 'string' || Buffer.byteLength(progressMd) > 1_000_000) invalid('Invalid progress.md');
+  const files = parseLcov(lcov, manifest.repo_root);
+  let coverage;
+  try { coverage = JSON.parse(coverageJson); } catch { invalid('Invalid coverage.json'); }
+  const missingIncludes = Array.isArray(coverage?.hivemind_scope?.missing_includes) ? coverage.hivemind_scope.missing_includes.length : 0;
+  const progressMeta = readFrontMatter(progressMd).data;
+  if (progressMeta.schema_version !== 1 || progressMeta.version_id !== manifest.version_id || progressMeta.repo_commit !== manifest.repo_commit) invalid('Progress file version or commit mismatch');
+  const hashes = { 'agentcov.info': hash(lcov), 'coverage.json': hash(coverageJson), 'progress.md': hash(progressMd) };
+  for (const [name, digest] of Object.entries(hashes)) if (manifest.hashes?.[name] !== digest) invalid(`Hash mismatch: ${name}`);
+  const id = hash([manifest.version_id, manifest.agent_id, manifest.repo_commit, manifest.coverage_scope_hash, String(manifest.worktree_clean), manifest.generated_at, ...Object.values(hashes)].join('\0'));
+  if (manifest.batch_id && manifest.batch_id !== id) invalid('Batch ID mismatch');
+  const warning = targetWarning(db, manifest.version_id, manifest.repo_commit);
+  const warnings = warning ? [warning] : [];
+  if (db.prepare('SELECT 1 FROM batches WHERE id = ?').get(id)) return { batch_id: id, accepted: true, replayed: true, warnings };
+  db.prepare('INSERT INTO batches (id, agent_id, version_id, repo_commit, scope_hash, worktree_clean, generated_at, received_at, files_json, manifest_json, lcov, coverage_json, progress_md, missing_includes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+    id, manifest.agent_id, manifest.version_id, manifest.repo_commit,
+    manifest.coverage_scope_hash, Number(manifest.worktree_clean), manifest.generated_at,
+    now(), JSON.stringify(files), JSON.stringify(manifest), lcov, coverageJson, progressMd, missingIncludes,
+  );
+  return { batch_id: id, accepted: true, replayed: false, warnings };
+}
+
+function progressRows(markdown) {
+  const tasks = [];
+  for (const line of markdown.split(/\r?\n/)) {
+    if (!line.startsWith('|')) continue;
+    const cells = line.split('|').slice(1, -1).map(s => s.trim());
+    if (cells.length >= 2 && /^[A-Za-z0-9_-]+$/.test(cells[0]) && ['todo', 'in_progress', 'blocked', 'done'].includes(cells[1])) tasks.push({ id: cells[0], status: cells[1] });
+  }
+  return tasks;
+}
+
+function versionRows(db) {
+  return db.prepare(`SELECT version_id, repo_commit, MAX(received_at) AS updated_at FROM (
+    SELECT version_id, repo_commit, received_at FROM events
+    UNION ALL SELECT version_id, repo_commit, received_at FROM batches
+  ) GROUP BY version_id, repo_commit ORDER BY updated_at DESC`).all();
+}
+
+function trackRows(db) {
+  const active = new Map(db.prepare('SELECT track_id, version_id, repo_commit, activated_at FROM track_targets WHERE active = 1').all().map(row => [row.track_id, row]));
+  return [['rc', '최신 RC'], ['mainline', '최신 stable']].map(([track_id, label]) => ({ track_id, label, version_id: active.get(track_id)?.version_id || null, repo_commit: active.get(track_id)?.repo_commit || null, activated_at: active.get(track_id)?.activated_at || null }));
+}
+
+function trackFor(db, versionId, commit) {
+  return db.prepare('SELECT track_id FROM track_targets WHERE version_id = ? AND repo_commit = ?').get(versionId, commit)?.track_id || null;
+}
+
+function targetWarning(db, versionId, commit) {
+  const target = db.prepare('SELECT active FROM track_targets WHERE version_id = ? AND repo_commit = ?').get(versionId, commit);
+  if (target) return target.active ? null : 'inactive_track_target';
+  return db.prepare('SELECT 1 FROM track_targets WHERE active = 1 LIMIT 1').get() ? 'unregistered_track_target' : null;
+}
+
+export function setActiveTrack(db, trackId, input) {
+  if (!['rc', 'mainline'].includes(trackId)) invalid('Unknown track', 404);
+  const versionId = required(input?.version_id, 'version_id', 64);
+  const commit = required(input?.repo_commit, 'repo_commit', 64);
+  if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(versionId) || !/^[a-f0-9]{40,64}$/i.test(commit)) invalid('Invalid version or commit');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const other = trackFor(db, versionId, commit);
+    if (other && other !== trackId) invalid('Target already belongs to another track', 409);
+    db.prepare('UPDATE track_targets SET active = 0 WHERE track_id = ?').run(trackId);
+    db.prepare('INSERT INTO track_targets (track_id, version_id, repo_commit, active, activated_at) VALUES (?, ?, ?, 1, ?) ON CONFLICT(track_id, version_id, repo_commit) DO UPDATE SET active = 1, activated_at = excluded.activated_at').run(trackId, versionId, commit, now());
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  return trackRows(db).find(row => row.track_id === trackId);
+}
+
+function coverageState(db, versionId, commit) {
+  const candidates = db.prepare(`
+    WITH ranked AS (
+      SELECT id, agent_id,
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY generated_at DESC, received_at DESC) AS latest_rank,
+             ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY worktree_clean DESC, generated_at DESC, received_at DESC) AS clean_rank
+      FROM batches WHERE version_id = ? AND repo_commit = ?
+    )
+    SELECT b.id, b.agent_id, b.version_id, b.repo_commit, b.scope_hash,
+           b.worktree_clean, b.generated_at, b.received_at, b.files_json,
+           b.progress_md, b.missing_includes, ranked.latest_rank, ranked.clean_rank
+    FROM ranked JOIN batches b ON b.id = ranked.id
+    WHERE ranked.latest_rank = 1 OR ranked.clean_rank = 1
+    ORDER BY b.agent_id, ranked.latest_rank
+  `).all(versionId, commit);
+  const observedLatest = candidates.filter(row => row.latest_rank === 1);
+  const cleanByAgent = new Map(candidates.filter(row => row.clean_rank === 1 && row.worktree_clean).map(row => [row.agent_id, row]));
+  const latest = observedLatest.map(row => row.worktree_clean ? row : cleanByAgent.get(row.agent_id) || row);
+  const fallbackAgents = new Set(observedLatest.filter(row => !row.worktree_clean && cleanByAgent.has(row.agent_id) && cleanByAgent.get(row.agent_id).id !== row.id).map(row => row.agent_id));
+  const canonical = latest.find(row => row.worktree_clean)?.scope_hash;
+  const accepted = [];
+  const excluded = [];
+  const coverageAgents = [];
+  const fileShape = new Map();
+  for (const row of latest) {
+    const files = JSON.parse(row.files_json);
+    const entries = Object.values(files);
+    const totalLines = entries.reduce((sum, file) => sum + file.eligible.length, 0);
+    const readLines = entries.reduce((sum, file) => sum + file.read.length, 0);
+    let exclusionReason = null;
+    if (!row.worktree_clean) exclusionReason = 'worktree_dirty';
+    else if (row.scope_hash !== canonical) exclusionReason = 'scope_mismatch';
+    else if (fileShape.size && (Object.keys(files).length !== fileShape.size || Object.entries(files).some(([name, file]) => fileShape.get(name) !== JSON.stringify(file.eligible)))) exclusionReason = 'file_shape_mismatch';
+    const included = exclusionReason === null;
+    coverageAgents.push({ agent_id: row.agent_id, read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, included_in_team: included, exclusion_reason: exclusionReason, using_clean_fallback: fallbackAgents.has(row.agent_id), latest_batch_exclusion_reason: fallbackAgents.has(row.agent_id) ? 'worktree_dirty' : null });
+    if (!included) {
+      excluded.push(row.agent_id);
+      continue;
+    }
+    if (!fileShape.size) for (const [name, file] of Object.entries(files)) fileShape.set(name, JSON.stringify(file.eligible));
+    accepted.push({ row, files });
+  }
+  // shortcut: merge the latest accepted snapshot from each agent on read; materialize if dashboard refresh becomes slow.
+  const combined = new Map();
+  const frequency = new Map();
+  for (const [name, eligible] of fileShape) combined.set(name, { path: name, eligible: JSON.parse(eligible), read: new Set(), agent_reads: {} });
+  const agents = [];
+  for (const { row, files } of accepted) {
+    let read = 0;
+    for (const [name, file] of Object.entries(files)) {
+      const target = combined.get(name);
+      target.agent_reads[row.agent_id] = file.read.length;
+      for (const line of file.read) {
+        target.read.add(line);
+        const key = `${name}\0${line}`;
+        frequency.set(key, (frequency.get(key) || 0) + 1);
+        read++;
+      }
+    }
+    agents.push({ agent_id: row.agent_id, read_lines: read, generated_at: row.generated_at, unique_lines: 0 });
+  }
+  for (const agent of agents) {
+    const files = accepted.find(entry => entry.row.agent_id === agent.agent_id).files;
+    for (const [name, file] of Object.entries(files)) for (const line of file.read) if (frequency.get(`${name}\0${line}`) === 1) agent.unique_lines++;
+  }
+  const files = [...combined.values()].map(file => ({ path: file.path, total: file.eligible.length, read: file.read.size, agents: Object.values(file.agent_reads).filter(count => count > 0).length, agent_reads: file.agent_reads, overlap_lines: file.eligible.filter(line => (frequency.get(`${file.path}\0${line}`) || 0) > 1).length, percent: file.eligible.length ? Math.round(file.read.size / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
+  const missingIncludes = accepted[0]?.row.missing_includes ?? 0;
+  return { latest, observedLatest, accepted, excluded, coverageAgents, combined, frequency, agents, files, missingIncludes };
+}
+
+function hypothesisState(db, event, commit, checks) {
+  const current = checks.filter(item => item.repo_commit === commit);
+  const refutationCount = new Set(current.filter(item => item.verdict === 'refutes').map(item => item.agent_id)).size;
+  const findingCount = db.prepare("SELECT COUNT(*) AS count FROM events f WHERE f.kind = 'finding' AND f.related_hypothesis_id = ? AND f.repo_commit = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.corrects_event_id = f.id)").get(event.hypothesis_id, commit).count;
+  let status = 'unverified';
+  if (refutationCount >= 2) status = 'retired';
+  else if (refutationCount && findingCount) status = 'contested';
+  else if (refutationCount) status = 'refuted';
+  else if (findingCount) status = 'reported';
+  else if (current.length) status = 'inconclusive';
+  else if (event.repo_commit !== commit) status = 'stale';
+  return { status, current, refutation_count: refutationCount, finding_count: findingCount };
+}
+
+function activeChecks(db, hypothesisId) {
+  return db.prepare("SELECT v.* FROM events v WHERE v.kind = 'verification' AND v.verification_of = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = v.id) ORDER BY v.received_at DESC").all(hypothesisId);
+}
+
+function findingImpacts(data) {
+  const verified = new Set(Array.isArray(data.verified_impacts) ? data.verified_impacts : []);
+  if (/\bRead of size\b/i.test(data.kasan_log || '')) verified.add('kasan_read');
+  if (/\bWrite of size\b/i.test(data.kasan_log || '')) verified.add('kasan_write');
+  return verifiedImpactTypes.filter(type => verified.has(type));
+}
+
+function findingAccessRequirements(data, title) {
+  const requirements = new Set(Array.isArray(data.access_requirements) ? data.access_requirements : []);
+  const text = `${title || ''} ${data.impact || ''}`;
+  if (/\b(?:RPC_)?AUTH_NULL\b/i.test(text)) requirements.add('auth_null');
+  if (/\b(?:RPC_)?AUTH_(?:UNIX|SYS)\b/i.test(text)) requirements.add('auth_unix');
+  if (/\bRPCSEC_GSS\b/i.test(text)) requirements.add('rpcsec_gss');
+  if (/(?:악성|침해된)[^\n]{0,160}서버/u.test(text) || /\bmalicious\b[^\n]{0,120}\bserver\b/i.test(text)) requirements.add('malicious_server');
+  return accessRequirementTypes.filter(type => requirements.has(type));
+}
+
+function findingAccessWithHistory(allEvents, event, data) {
+  const direct = findingAccessRequirements(data, event.title);
+  if (direct.length) return direct;
+  for (const prior of allEvents) {
+    if (!event.related_hypothesis_id && prior.id !== event.corrects_event_id) continue;
+    if (prior.kind !== 'finding' || prior.id === event.id || prior.repo_commit !== event.repo_commit || prior.related_hypothesis_id !== event.related_hypothesis_id || prior.received_at >= event.received_at) continue;
+    const inherited = findingAccessRequirements(readFrontMatter(prior.markdown).data, prior.title);
+    if (inherited.length) return inherited;
+  }
+  return [];
+}
+
+const claimStatus = status => ['retired', 'stale'].includes(status) ? status : 'active';
+
+function dashboard(db, requested = {}) {
+  const versions = versionRows(db);
+  const tracks = trackRows(db);
+  const active = tracks.find(row => row.track_id === requested.track_id) || tracks.find(row => row.version_id);
+  const direct = versions.find(row => row.version_id === requested.version_id && row.repo_commit === requested.repo_commit);
+  const selected = requested.track_id
+    ? active?.version_id && active.track_id === requested.track_id ? active : null
+    : direct ? { ...direct, track_id: trackFor(db, direct.version_id, direct.repo_commit) } : active?.version_id ? active : versions[0];
+  const agentProfiles = db.prepare('SELECT agent_id, client_name, model_id FROM agents ORDER BY agent_id').all();
+  if (!selected) return { tracks, versions, selected: null, metrics: null, agents: [], agent_profiles: agentProfiles, coverage_agents: [], files: [], hypotheses: [], verifications: [], findings: [], recent: [], progress: {} };
+  const { version_id: versionId, repo_commit: commit } = selected;
+  const trackId = selected.track_id || null;
+  const { latest, observedLatest, excluded, coverageAgents, frequency, agents, files, missingIncludes } = coverageState(db, versionId, commit);
+  const lastSeen = new Map(db.prepare('SELECT agent_id, last_seen_at FROM agents').all().map(row => [row.agent_id, row.last_seen_at]));
+  const totalLines = files.reduce((sum, file) => sum + file.total, 0);
+  const readLines = files.reduce((sum, file) => sum + file.read, 0);
+  const allEvents = trackId
+    ? db.prepare('SELECT e.* FROM events e JOIN track_targets t ON t.version_id = e.version_id AND t.repo_commit = e.repo_commit WHERE t.track_id = ? ORDER BY e.received_at DESC').all(trackId)
+    : db.prepare('SELECT * FROM events WHERE version_id = ? ORDER BY received_at DESC').all(versionId);
+  const corrected = new Set(allEvents.filter(e => e.corrects_event_id).map(e => e.corrects_event_id));
+  const attempts = allEvents.filter(e => e.kind === 'verification' && !corrected.has(e.id));
+  const hypotheses = allEvents.filter(e => e.kind === 'hypothesis' && !corrected.has(e.id)).map(event => {
+    const checks = attempts.filter(item => item.verification_of === event.hypothesis_id);
+    const { status, current, refutation_count, finding_count } = hypothesisState(db, event, commit, checks);
+    return { id: event.hypothesis_id, event_id: event.id, title: event.title, agent_id: event.agent_id, status, refutation_count, finding_count, scope: JSON.parse(event.scope_json), code_refs: readFrontMatter(event.markdown).data.code_refs || [], claim_key: event.claim_key, created_at: event.created_at, checks: current.map(item => ({ event_id: item.id, agent_id: item.agent_id, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, exposure_conflict: exposedModes(db, item.agent_id, event.hypothesis_id, item.received_at).some(mode => ['full', 'summary'].includes(mode)) && ['none', 'claim_only'].includes(item.prior_exposure) })) };
+  });
+  const titles = new Map(hypotheses.map(item => [item.id, item.title]));
+  const verifications = attempts.filter(item => item.repo_commit === commit).map(item => ({ event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.verification_of, hypothesis_title: titles.get(item.verification_of) || item.verification_of, verdict: item.verdict, method: item.method, code_refs: readFrontMatter(item.markdown).data.code_refs || [], created_at: item.created_at }));
+  const byHypothesis = new Map(hypotheses.map(item => [item.id, item]));
+  const activeVerification = new Map(verifications.map(item => [item.event_id, item]));
+  const findings = allEvents.filter(item => item.kind === 'finding' && item.repo_commit === commit && !corrected.has(item.id) && readFrontMatter(item.markdown).data.poc_sha256 && readFrontMatter(item.markdown).data.kasan_sha256).map(item => {
+    const data = readFrontMatter(item.markdown).data;
+    const hypothesis = byHypothesis.get(item.related_hypothesis_id);
+    const evidenceIds = JSON.parse(item.based_on_json);
+    const staticReview = db.prepare('SELECT provider, status, verdict, summary, completed_at FROM finding_reviews WHERE finding_id = ?').get(item.id) || null;
+    const latestPatch = db.prepare('SELECT id, filename, status, result, uploaded_at, completed_at FROM patches WHERE finding_id = ? ORDER BY uploaded_at DESC LIMIT 1').get(item.id) || null;
+    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || null, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || null, file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), static_review: staticReview, patch: latestPatch, created_at: item.created_at };
+  });
+  const taskMap = new Map();
+  for (const row of [...observedLatest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
+  const progress = Object.fromEntries(['todo', 'in_progress', 'blocked', 'done'].map(status => [status, [...taskMap.values()].filter(value => value === status).length]));
+  const recent = allEvents.filter(event => event.repo_commit === commit && event.kind !== 'analysis').slice(0, 12).map(e => ({ id: e.id, kind: e.kind, title: e.title, agent_id: e.agent_id, received_at: e.received_at }));
+  return {
+    tracks, versions, selected: { track_id: trackId, version_id: versionId, repo_commit: commit },
+    metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, unread_lines: totalLines - readLines, overlap_lines: [...frequency.values()].filter(n => n > 1).length, agent_count: agents.length, excluded_agents: excluded, missing_includes: missingIncludes, finding_count: findings.length, hypothesis_count: hypotheses.length, contested_count: hypotheses.filter(h => h.status === 'contested').length, retired_count: hypotheses.filter(h => h.status === 'retired').length, updated_at: observedLatest.reduce((value, row) => row.received_at > value ? row.received_at : value, '') || selected.activated_at || selected.updated_at },
+    agents: agents.map(agent => ({ ...agent, last_seen_at: lastSeen.get(agent.agent_id) || null })), agent_profiles: agentProfiles, coverage_agents: coverageAgents, files, hypotheses, verifications, findings, recent, progress,
+  };
+}
+
+function selectedVersion(db, args) {
+  if (args.track_id && !args.version_id && !args.repo_commit) {
+    const active = trackRows(db).find(row => row.track_id === args.track_id);
+    if (!active?.version_id) invalid('Track has no current target', 404);
+    return { versionId: active.version_id, commit: active.repo_commit };
+  }
+  const versionId = required(args.version_id, 'version_id', 64);
+  const commit = required(args.repo_commit, 'repo_commit', 64);
+  if (!versionRows(db).some(row => row.version_id === versionId && row.repo_commit === commit) && !trackFor(db, versionId, commit)) invalid('Unknown version or commit', 404);
+  return { versionId, commit };
+}
+
+function coverageDetails(db, args) {
+  const { versionId, commit } = selectedVersion(db, args);
+  const state = coverageState(db, versionId, commit);
+  const agentId = args.agent_id || null;
+  let files = state.files;
+  let missingIncludes = state.missingIncludes;
+  let includedInTeam = true;
+  let exclusionReason = null;
+  let usingCleanFallback = false;
+  let latestBatchExclusionReason = null;
+  if (agentId) {
+    const snapshot = state.latest.find(row => row.agent_id === agentId);
+    if (!snapshot) invalid('Unknown agent for this version and commit', 404);
+    files = Object.entries(JSON.parse(snapshot.files_json)).map(([name, file]) => ({ path: name, total: file.eligible.length, read: file.read.length, percent: file.eligible.length ? Math.round(file.read.length / file.eligible.length * 1000) / 10 : 0 })).sort((a, b) => (b.total - b.read) - (a.total - a.read));
+    missingIncludes = snapshot.missing_includes ?? 0;
+    includedInTeam = !state.excluded.includes(agentId);
+    const coverageAgent = state.coverageAgents.find(agent => agent.agent_id === agentId);
+    exclusionReason = coverageAgent?.exclusion_reason || null;
+    usingCleanFallback = coverageAgent?.using_clean_fallback || false;
+    latestBatchExclusionReason = coverageAgent?.latest_batch_exclusion_reason || null;
+  }
+  const totalLines = files.reduce((sum, file) => sum + file.total, 0);
+  const readLines = files.reduce((sum, file) => sum + file.read, 0);
+  return { version_id: versionId, repo_commit: commit, agent_id: agentId, included_in_team: includedInTeam, exclusion_reason: exclusionReason, using_clean_fallback: usingCleanFallback, latest_batch_exclusion_reason: latestBatchExclusionReason, files, metrics: { read_lines: readLines, total_lines: totalLines, read_percent: totalLines ? Math.round(readLines / totalLines * 1000) / 10 : null, read_files: files.filter(file => file.read > 0).length, missing_includes: missingIncludes } };
+}
+
+function lineRanges(lines) {
+  const ranges = [];
+  for (const line of lines) {
+    const last = ranges.at(-1);
+    if (last && line === last.end + 1) last.end = line;
+    else ranges.push({ start: line, end: line });
+  }
+  return ranges;
+}
+
+function coverageGaps(db, args) {
+  const { versionId, commit } = selectedVersion(db, args);
+  const prefix = typeof args.path_prefix === 'string' ? args.path_prefix : '';
+  const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
+  const state = coverageState(db, versionId, commit);
+  const gaps = [...state.combined.values()]
+    .filter(file => file.path.startsWith(prefix))
+    .map(file => {
+      const unread = file.eligible.filter(line => !file.read.has(line));
+      const ranges = lineRanges(unread);
+      return { path: file.path, unread_lines: unread.length, total_lines: file.eligible.length, ranges: ranges.slice(0, 30), more_ranges: Math.max(0, ranges.length - 30) };
+    })
+    .filter(file => file.unread_lines)
+    .sort((a, b) => b.unread_lines - a.unread_lines || a.path.localeCompare(b.path));
+  return { version_id: versionId, repo_commit: commit, files: gaps.slice(0, limit), total_gap_files: gaps.length, excluded_agents: state.excluded, note: 'agentcov가 관측하지 못한 열람 범위이며, 실제 미검토의 증거는 아닙니다.' };
+}
+
+function reviewGaps(db, args) {
+  const { versionId, commit } = selectedVersion(db, args);
+  const report = dashboard(db, { version_id: versionId, repo_commit: commit });
+  return {
+    version_id: versionId, repo_commit: commit,
+    hypotheses: report.hypotheses.filter(item => ['unverified', 'refuted', 'contested', 'inconclusive'].includes(item.status)).slice(0, 20).map(({ id, title, status, scope, code_refs, refutation_count }) => ({ id, title, status, scope, code_refs, refutation_count })),
+    note: '추가 검증 후보만 보여줍니다. 코드 열람 여부로 가설의 진실을 판단하지 않습니다.',
+  };
+}
+
+function teamStatusMarkdown(report) {
+  if (!report.selected) return '# knfsd 팀 현황\n\n아직 수집된 자료가 없습니다.\n';
+  const safe = value => String(value).replaceAll('|', '\\|').replace(/\r?\n/g, ' ');
+  const { metrics, selected, agents, findings, progress } = report;
+  const profiles = new Map((report.agent_profiles || []).map(profile => [profile.agent_id, profile]));
+  const agentLabel = agentId => {
+    const profile = profiles.get(agentId);
+    return [agentId, profile?.client_name, profile?.model_id].filter(Boolean).join(' · ');
+  };
+  return [
+    '# knfsd 팀 현황', '', `- 버전: ${selected.version_id}`, `- 코드 기준점: ${selected.repo_commit}`,
+    `- 관측 열람: ${metrics.read_lines}/${metrics.total_lines}줄 (${metrics.read_percent == null ? '계산 불가' : `${metrics.read_percent}%`})`,
+    `- 중복 열람: ${metrics.overlap_lines}줄`, `- 병합 제외 에이전트: ${metrics.excluded_agents.join(', ') || '없음'}`,
+    `- 작업: 완료 ${progress.done}, 진행 ${progress.in_progress}, 차단 ${progress.blocked}, 대기 ${progress.todo}`,
+    '', '## 에이전트', '', '| 에이전트 | 열람 줄 | 고유 기여 줄 |', '| --- | ---: | ---: |',
+    ...agents.map(item => `| ${safe(agentLabel(item.agent_id))} | ${item.read_lines} | ${item.unique_lines} |`),
+    '', '## 취약점 보고', '', '| 보고 | 보고 에이전트 | 코드 위치 | 확인된 영향 |', '| --- | --- | --- | --- |',
+    ...findings.map(item => `| ${safe(item.title)} | ${safe(agentLabel(item.agent_id))} | ${safe(item.file_path)} | ${safe((item.verified_impacts || []).join(', '))} |`),
+    '', 'agentcov 열람률은 관측된 코드 노출 범위이며 코드 이해도나 취약점 검증을 뜻하지 않습니다.', '',
+  ].join('\n');
+}
+
+function logExposure(db, agentId, hypothesisId, mode) {
+  if (hypothesisId) db.prepare('INSERT INTO exposures VALUES (?, ?, ?, ?)').run(agentId, hypothesisId, mode, now());
+}
+
+function claimSection(markdown) {
+  const lines = readFrontMatter(markdown).body.split(/\r?\n/);
+  const start = lines.findIndex(line => /^##\s+주장\s*$/.test(line));
+  if (start < 0) return '';
+  const end = lines.findIndex((line, index) => index > start && /^##\s+/.test(line));
+  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n').trim();
+}
+
+function searchHypotheses(db, agentId, args) {
+  const versionId = args.version_id == null ? null : required(args.version_id, 'version_id', 64);
+  if (args.query != null && typeof args.query !== 'string') invalid('Invalid query');
+  if (args.code_ref != null && typeof args.code_ref !== 'string') invalid('Invalid code_ref');
+  const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+  const sourceRef = typeof args.code_ref === 'string' ? args.code_ref.trim().toLowerCase() : '';
+  if ((!query && !sourceRef) || query.length > 200 || sourceRef.length > 300) invalid('query or code_ref required');
+  const commit = args.repo_commit == null ? null : required(args.repo_commit, 'repo_commit', 64);
+  if (commit && !/^[a-f0-9]{40,64}$/i.test(commit)) invalid('Invalid repo_commit');
+  const trackId = args.track_id || (versionId && commit ? trackFor(db, versionId, commit) : null);
+  if (trackId && !['rc', 'mainline'].includes(trackId) || !trackId && !versionId) invalid('track_id or version_id required');
+  const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 20);
+  const words = query.split(/[\s._/+-]+/).filter(Boolean);
+  const rows = trackId
+    ? db.prepare("SELECT h.* FROM events h JOIN track_targets t ON t.version_id = h.version_id AND t.repo_commit = h.repo_commit WHERE h.kind = 'hypothesis' AND t.track_id = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id) ORDER BY h.received_at DESC LIMIT 1000").all(trackId)
+    : db.prepare("SELECT h.* FROM events h WHERE h.kind = 'hypothesis' AND h.version_id = ? AND NOT EXISTS (SELECT 1 FROM events c WHERE c.kind = 'correction' AND c.corrects_event_id = h.id) ORDER BY h.received_at DESC LIMIT 1000").all(versionId);
+  const found = rows.map(row => {
+    const scope = JSON.parse(row.scope_json);
+    const codeRefs = readFrontMatter(row.markdown).data.code_refs || [];
+    const haystack = `${row.title} ${row.claim_key} ${scope.join(' ')} ${codeRefs.join(' ')}`.toLowerCase();
+    const locationScore = sourceRef && codeRefs.some(ref => ref.toLowerCase() === sourceRef) ? 8 : sourceRef && haystack.includes(sourceRef) ? 3 : 0;
+    const score = (query && row.claim_key?.toLowerCase() === query ? 8 : 0) + (query && row.title.toLowerCase() === query ? 5 : 0) + words.filter(word => haystack.includes(word)).length + locationScore;
+    return { id: row.hypothesis_id, title: row.title, claim_key: row.claim_key, scope, code_refs: codeRefs, verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', repo_commit: row.repo_commit, score, row };
+  }).filter(item => item.score).sort((a, b) => b.score - a.score).slice(0, limit).map(({ row, ...item }) => {
+    const checks = activeChecks(db, row.hypothesis_id);
+    const state = hypothesisState(db, row, commit || row.repo_commit, checks);
+    return { ...item, status: claimStatus(state.status), verification_count: state.current.length, refutation_count: state.refutation_count, finding_count: state.finding_count };
+  });
+  for (const item of found) logExposure(db, agentId, item.id, 'claim_only');
+  return { matches: found, note: '문자열 기반 후보입니다. 일치 여부와 참거짓은 직접 검증해야 합니다.' };
+}
+
+function getHypothesis(db, agentId, args) {
+  const hypothesisId = required(args.hypothesis_id, 'hypothesis_id', 64);
+  const mode = args.mode ?? 'claim_only';
+  if (!['claim_only', 'full'].includes(mode)) invalid('Invalid mode');
+  const row = db.prepare("SELECT * FROM events WHERE kind = 'hypothesis' AND hypothesis_id = ?").get(hypothesisId);
+  if (!row) invalid('Unknown hypothesis', 404);
+  logExposure(db, agentId, hypothesisId, mode);
+  const commit = args.repo_commit == null ? row.repo_commit : required(args.repo_commit, 'repo_commit', 64);
+  if (!/^[a-f0-9]{40,64}$/i.test(commit)) invalid('Invalid repo_commit');
+  const checks = activeChecks(db, hypothesisId);
+  const state = hypothesisState(db, row, commit, checks);
+  const basic = { id: row.hypothesis_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, claim: claimSection(row.markdown) || row.title, scope: JSON.parse(row.scope_json), code_refs: readFrontMatter(row.markdown).data.code_refs || [], verification_plan: readFrontMatter(row.markdown).data.verification_plan || '', status: claimStatus(state.status), verification_count: state.current.length, refutation_count: state.refutation_count, finding_count: state.finding_count };
+  if (mode === 'claim_only') return basic;
+  const details = checks.map(item => ({ event_id: item.id, agent_id: item.agent_id, repo_commit: item.repo_commit, verdict: item.verdict, method: item.method, prior_exposure: item.prior_exposure, code_refs: readFrontMatter(item.markdown).data.code_refs || [] }));
+  return { ...basic, status: state.status, markdown: row.markdown, checks: details, note: '현재 커밋에서 서로 다른 두 에이전트의 반박이 있으면 재시도 보류 상태가 됩니다. 해당 가설의 재검증은 중단하고, 반박 기록이 잘못됐다면 정정하세요.' };
+}
+
+function getEvent(db, agentId, args) {
+  const id = required(args.event_id, 'event_id', 64);
+  const row = db.prepare('SELECT id, kind, agent_id, version_id, repo_commit, title, markdown, hypothesis_id, verification_of, related_hypothesis_id FROM events WHERE id = ?').get(id);
+  if (!row) invalid('Unknown event', 404);
+  logExposure(db, agentId, row.hypothesis_id || row.verification_of || row.related_hypothesis_id, 'full');
+  return { id: row.id, kind: row.kind, agent_id: row.agent_id, version_id: row.version_id, repo_commit: row.repo_commit, title: row.title, markdown: row.markdown };
+}
+
+function callTool(db, agentId, name, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) invalid('Tool arguments must be an object');
+  switch (name) {
+    case 'list_versions': return { tracks: trackRows(db), versions: versionRows(db).map(({ version_id, repo_commit }) => ({ version_id, repo_commit })) };
+    case 'search_hypotheses': return searchHypotheses(db, agentId, args);
+    case 'get_hypothesis': return getHypothesis(db, agentId, args);
+    case 'get_event': return getEvent(db, agentId, args);
+    case 'get_team_status': {
+      const { versionId, commit } = selectedVersion(db, args);
+      const report = dashboard(db, { version_id: versionId, repo_commit: commit });
+      for (const item of report.hypotheses) logExposure(db, agentId, item.id, 'summary');
+      return { selected: report.selected, metrics: report.metrics, agents: report.agents, progress: report.progress, finding_count: report.findings.length };
+    }
+    case 'get_coverage_gaps': return coverageGaps(db, args);
+    case 'get_review_gaps': {
+      const result = reviewGaps(db, args);
+      for (const item of result.hypotheses) logExposure(db, agentId, item.id, 'summary');
+      return result;
+    }
+    case 'list_findings': {
+      const { versionId, commit } = selectedVersion(db, args);
+      const findings = dashboard(db, { version_id: versionId, repo_commit: commit }).findings;
+      for (const item of findings) logExposure(db, agentId, item.hypothesis_id, 'summary');
+      return { findings, note: '제출자가 2VM 재현 자료와 함께 보고한 항목입니다. 영향 표시는 제출자의 검증 기록입니다.' };
+    }
+    default: invalid('Unknown tool', 404);
+  }
+}
+
+function mcpResponse(db, agentId, message) {
+  if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string') return { jsonrpc: '2.0', id: message?.id ?? null, error: { code: -32600, message: 'Invalid Request' } };
+  if (!Object.hasOwn(message, 'id')) return null;
+  const answer = result => ({ jsonrpc: '2.0', id: message.id, result });
+  if (message.method === 'initialize') return answer({ protocolVersion: ['2025-03-26', '2025-11-25'].includes(message.params?.protocolVersion) ? message.params.protocolVersion : '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'knfsd-hivemind', version: '1.0.0' } });
+  if (message.method === 'ping') return answer({});
+  if (message.method === 'tools/list') return answer({ tools: mcpTools });
+  if (message.method !== 'tools/call') return { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } };
+  if (!mcpTools.some(tool => tool.name === message.params?.name) && !['search_hypotheses', 'get_hypothesis', 'get_review_gaps'].includes(message.params?.name)) return { jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Unknown tool' } };
+  try {
+    const data = callTool(db, agentId, message.params.name, message.params.arguments || {});
+    return answer({ content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError: false });
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    return answer({ content: [{ type: 'text', text: error.message }], isError: true });
+  }
+}
+
+function send(res, status, value, contentType = 'application/json; charset=utf-8') {
+  res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  res.end(typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+async function readJson(req) {
+  if (!req.headers['content-type']?.startsWith('application/json')) invalid('Content-Type must be application/json', 415);
+  const encoding = String(req.headers['content-encoding'] || 'identity').trim().toLowerCase();
+  if (!['identity', 'gzip'].includes(encoding)) invalid('Unsupported Content-Encoding', 415);
+  const wireLimit = encoding === 'gzip' ? telemetryLimits.compressed_request : 24_000_000;
+  let length = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > wireLimit) invalid('Request too large', 413);
+    chunks.push(chunk);
+  }
+  let payload = Buffer.concat(chunks);
+  if (encoding === 'gzip') {
+    try { payload = await gunzipAsync(payload, { maxOutputLength: telemetryLimits.decompressed_request }); }
+    catch { invalid('Invalid or oversized gzip request', 413); }
+  }
+  if (payload.length > telemetryLimits.decompressed_request) invalid('Request too large after decompression', 413);
+  try { return JSON.parse(payload.toString('utf8')); }
+  catch { invalid('Invalid JSON'); }
+}
+
+function submitPatch(db, findingId, input) {
+  const finding = db.prepare("SELECT id FROM events WHERE id = ? AND kind = 'finding'").get(findingId);
+  if (!finding) invalid('Finding not found', 404);
+  const filename = required(input?.filename, 'filename', 120);
+  if (!/^[a-z0-9][a-z0-9._-]*\.(?:patch|diff)$/i.test(filename)) invalid('Patch filename must end in .patch or .diff');
+  const encoded = required(input?.content_base64, 'content_base64', 1_400_000);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) invalid('Invalid base64 patch');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (!bytes.length || bytes.length > 1_000_000 || bytes.includes(0)) invalid('Patch size or encoding is invalid', 413);
+  const patch = bytes.toString('utf8');
+  if (!Buffer.from(patch, 'utf8').equals(bytes)) invalid('Patch must be UTF-8');
+  if (/^(?:GIT binary patch|Binary files |rename (?:from|to) |copy (?:from|to) |new file mode |deleted file mode )/m.test(patch)) invalid('Binary, rename, copy, and file creation/deletion patches are not supported');
+  const paths = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
+  if (!paths.length) invalid('Patch needs a Git diff header');
+  const headers = [...patch.matchAll(/^(?:---|\+\+\+) (\S+)$/gm)].map(match => match[1]);
+  if (headers.length !== paths.length * 2) invalid('Patch file headers are incomplete');
+  for (const match of paths) {
+    const file = match[1];
+    if (file !== match[2] || file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Patch must use safe repository-relative file paths');
+  }
+  for (let index = 0; index < paths.length; index += 1) {
+    if (headers[index * 2] !== `a/${paths[index][1]}` || headers[index * 2 + 1] !== `b/${paths[index][1]}`) invalid('Patch file headers do not match the Git diff');
+  }
+  const id = hash(`${findingId}\0${hash(bytes)}`);
+  const existing = db.prepare('SELECT id, finding_id, filename, status, uploaded_at FROM patches WHERE id = ?').get(id);
+  if (existing) return existing;
+  const status = sashikoConfigured() ? 'pending' : 'unconfigured';
+  const uploadedAt = now();
+  db.prepare('INSERT INTO patches (id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, findingId, filename, hash(bytes), patch, status, uploadedAt);
+  return { id, finding_id: findingId, filename, status, uploaded_at: uploadedAt };
+}
+
+async function processKimiReview(db) {
+  const job = db.prepare("SELECT r.finding_id, e.title, e.markdown FROM finding_reviews r JOIN events e ON e.id = r.finding_id WHERE r.status = 'pending' ORDER BY r.requested_at LIMIT 1").get();
+  if (!job) return;
+  db.prepare("UPDATE finding_reviews SET status = 'processing' WHERE finding_id = ?").run(job.finding_id);
+  try {
+    const { data, body } = readFrontMatter(job.markdown);
+    const review = await reviewFindingWithKimi({ title: job.title, filePath: data.file_path, codeRefs: data.code_refs || [], impact: data.impact, report: body });
+    completeFindingReview(db, job.finding_id, review);
+  } catch (error) {
+    db.prepare("UPDATE finding_reviews SET status = 'error', summary = ?, completed_at = ? WHERE finding_id = ?").run(String(error.message || 'Kimi review failed').slice(0, 1000), now(), job.finding_id);
+  }
+}
+
+async function processSashikoPatch(db, dataDir) {
+  const job = db.prepare("SELECT p.id, p.patch, e.repo_commit FROM patches p JOIN events e ON e.id = p.finding_id WHERE p.status = 'pending' ORDER BY p.uploaded_at LIMIT 1").get();
+  if (!job) return;
+  db.prepare("UPDATE patches SET status = 'processing' WHERE id = ?").run(job.id);
+  try {
+    const review = await reviewPatchWithSashiko({ patch: job.patch, baseCommit: job.repo_commit, repoPath: process.env.SASHIKO_REPO, cliPath: process.env.SASHIKO_CLI, dataDir });
+    db.prepare('UPDATE patches SET status = ?, result = ?, completed_at = ? WHERE id = ?').run(review.status, JSON.stringify({ exit_code: review.exit_code, result: review.result }), now(), job.id);
+  } catch (error) {
+    db.prepare("UPDATE patches SET status = 'error', result = ?, completed_at = ? WHERE id = ?").run(JSON.stringify({ error: String(error.message || 'Sashiko review failed').slice(0, 1000) }), now(), job.id);
+  }
+}
+
+export async function startServer(options = {}) {
+  process.umask(0o077);
+  const host = options.host ?? process.env.HIVEMIND_HOST ?? '127.0.0.1';
+  const port = options.port ?? Number(process.env.HIVEMIND_PORT ?? 8765);
+  const dataDir = options.dataDir ?? process.env.HIVEMIND_DATA_DIR ?? path.join(root, 'runtime', 'server');
+  const dashboardPassword = options.dashboardPassword ?? process.env.HIVEMIND_DASHBOARD_PASSWORD ?? '';
+  const dashboardPasswordHash = options.dashboardPasswordHash ?? process.env.HIVEMIND_DASHBOARD_PASSWORD_HASH ?? '';
+  const dashboardPasswordSalt = options.dashboardPasswordSalt ?? process.env.HIVEMIND_DASHBOARD_PASSWORD_SALT ?? '';
+  const dashboardUser = options.dashboardUser ?? process.env.HIVEMIND_DASHBOARD_USER ?? 'viewer';
+  if (Boolean(dashboardPasswordHash) !== Boolean(dashboardPasswordSalt)) throw new Error('Dashboard hash and salt must be configured together');
+  if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !dashboardPassword && !dashboardPasswordHash) throw new Error('Configure dashboard authentication before binding beyond localhost');
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dataDir, 0o700);
+  const tokenPath = path.join(dataDir, 'api-token.txt');
+  const adminToken = options.apiToken ?? process.env.HIVEMIND_API_TOKEN ?? (fs.existsSync(tokenPath) ? fs.readFileSync(tokenPath, 'utf8').trim() : randomBytes(24).toString('hex'));
+  if (!adminToken) throw new Error('Admin API token is empty');
+  const db = openDatabase(path.join(dataDir, 'hivemind.sqlite3'));
+  if (process.env.KIMI_API_KEY) db.prepare("UPDATE finding_reviews SET status = 'pending' WHERE status IN ('unconfigured', 'processing')").run();
+  else db.prepare("UPDATE finding_reviews SET status = 'unconfigured' WHERE status IN ('pending', 'processing')").run();
+  if (sashikoConfigured()) db.prepare("UPDATE patches SET status = 'pending' WHERE status IN ('unconfigured', 'processing')").run();
+  else db.prepare("UPDATE patches SET status = 'unconfigured' WHERE status = 'processing'").run();
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
+      const admin = url.pathname.startsWith('/v1/admin/');
+      const agentRoute = ['/v1/exchange/events', '/v1/telemetry/batches', '/v1/sync/health', '/mcp'].includes(url.pathname);
+      if (url.pathname === '/mcp' && req.headers.origin) {
+        const port = server.address().port;
+        const allowed = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`, ...(process.env.HIVEMIND_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)]);
+        if (!allowed.has(req.headers.origin)) return send(res, 403, { error: 'Origin not allowed' });
+      }
+      let agentId;
+      if (admin) {
+        if (!safeEqual(bearer(req), adminToken)) return send(res, 401, { error: 'Admin token required' });
+      } else if (agentRoute) {
+        agentId = authenticatedAgent(db, req);
+      } else if (dashboardPassword || dashboardPasswordHash) {
+        let user = '', password = '';
+        try {
+          const credentials = Buffer.from((req.headers.authorization || '').replace(/^Basic\s+/i, ''), 'base64').toString('utf8');
+          const separator = credentials.indexOf(':');
+          if (separator >= 0) { user = credentials.slice(0, separator); password = credentials.slice(separator + 1); }
+        } catch { /* invalid auth */ }
+        const passwordValid = dashboardPasswordHash ? safeEqual(scryptSync(password, dashboardPasswordSalt, 32).toString('hex'), dashboardPasswordHash) : safeEqual(password, dashboardPassword);
+        if (!safeEqual(user, dashboardUser) || !passwordValid) {
+          res.setHeader('WWW-Authenticate', 'Basic realm="Hivemind"');
+          return send(res, 401, { error: 'Dashboard login required' });
+        }
+      }
+      if (url.pathname === '/v1/admin/agents' && req.method === 'GET') return send(res, 200, { agents: db.prepare('SELECT agent_id, client_name, model_id, created_at, last_seen_at FROM agents ORDER BY agent_id').all() });
+      const registryAdminMatch = /^\/v1\/admin\/registry\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (registryAdminMatch && req.method === 'PATCH') return send(res, 200, updateRegistry(db, registryAdminMatch[1], await readJson(req)));
+      const registryRetryMatch = /^\/v1\/admin\/registry\/([a-f0-9]{64})\/retry-review$/.exec(url.pathname);
+      if (registryRetryMatch && req.method === 'POST') return send(res, 200, retryFindingReview(db, registryRetryMatch[1], Boolean(process.env.KIMI_API_KEY)));
+      if (url.pathname === '/v1/admin/tracks' && req.method === 'GET') return send(res, 200, { tracks: trackRows(db) });
+      const trackMatch = /^\/v1\/admin\/tracks\/(rc|mainline)$/.exec(url.pathname);
+      if (trackMatch && req.method === 'PUT') return send(res, 200, setActiveTrack(db, trackMatch[1], await readJson(req)));
+      if (url.pathname === '/v1/admin/agents' && req.method === 'POST') {
+        const input = await readJson(req);
+        return send(res, 201, issueAgentToken(db, required(input?.agent_id, 'agent_id', 64), false, input));
+      }
+      const agentMatch = /^\/v1\/admin\/agents\/([a-z0-9][a-z0-9_-]*)$/i.exec(url.pathname);
+      if (agentMatch && req.method === 'PUT') return send(res, 200, issueAgentToken(db, agentMatch[1], true));
+      if (agentMatch && req.method === 'PATCH') return send(res, 200, setAgentProfile(db, agentMatch[1], await readJson(req)));
+      if (agentMatch && req.method === 'DELETE') {
+        if (!db.prepare('DELETE FROM agents WHERE agent_id = ?').run(agentMatch[1]).changes) invalid('Unknown agent', 404);
+        return send(res, 200, { agent_id: agentMatch[1], revoked: true });
+      }
+      if (url.pathname === '/v1/admin/batches' && req.method === 'GET') return send(res, 200, { batches: db.prepare('SELECT id, agent_id, version_id, repo_commit, generated_at, received_at FROM batches ORDER BY received_at DESC LIMIT 100').all() });
+      const batchMatch = /^\/v1\/admin\/batches\/([a-f0-9]{64})$/i.exec(url.pathname);
+      if (batchMatch && req.method === 'GET') {
+        const row = db.prepare('SELECT agent_id, version_id, repo_commit, manifest_json, lcov, coverage_json, progress_md FROM batches WHERE id = ?').get(batchMatch[1]);
+        return row ? send(res, 200, { agent_id: row.agent_id, version_id: row.version_id, repo_commit: row.repo_commit, manifest: JSON.parse(row.manifest_json), lcov: row.lcov, coverage_json: row.coverage_json, progress_md: row.progress_md }) : send(res, 404, { error: 'Batch not found' });
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/exchange/events') return send(res, 200, addEvent(db, await readJson(req), agentId));
+      if (req.method === 'POST' && url.pathname === '/v1/telemetry/batches') return send(res, 200, addBatch(db, await readJson(req), agentId));
+      if (req.method === 'GET' && url.pathname === '/v1/sync/health') return send(res, 200, {
+        ok: true,
+        agent_id: agentId,
+        agent_profile: db.prepare('SELECT client_name, model_id FROM agents WHERE agent_id = ?').get(agentId),
+        server_time: now(),
+        exchange: { finding_revisions: true },
+        telemetry: { content_encodings: ['identity', 'gzip'], limits: telemetryLimits },
+      });
+      if (url.pathname === '/mcp' && req.method === 'GET') return send(res, 405, { error: 'SSE stream not supported' });
+      if (url.pathname === '/mcp' && req.method === 'POST') {
+        if (req.headers['mcp-protocol-version'] && !['2025-03-26', '2025-11-25'].includes(req.headers['mcp-protocol-version'])) invalid('Unsupported MCP protocol version');
+        const response = mcpResponse(db, agentId, await readJson(req));
+        if (!response) { res.writeHead(202, { 'Cache-Control': 'no-store' }); return res.end(); }
+        return send(res, 200, response);
+      }
+      if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
+      if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
+      const registryRowMatch = /^\/api\/registry\/rows\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'PATCH' && registryRowMatch) {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to edit registry rows' });
+        if (req.headers.origin) {
+          let sameOrigin = false;
+          try { sameOrigin = new URL(req.headers.origin).origin === new URL(`http://${req.headers.host}`).origin; }
+          catch { /* invalid origin */ }
+          if (!sameOrigin) return send(res, 403, { error: 'Origin not allowed' });
+        }
+        let id;
+        try { id = decodeURIComponent(registryRowMatch[1]); }
+        catch { invalid('Invalid registry row ID'); }
+        return send(res, 200, updateRegistryRow(db, id, await readJson(req), dashboardUser));
+      }
+      const historicalArtifactsMatch = /^\/api\/registry\/history\/([ABC]-\d{3})\/artifacts$/.exec(url.pathname);
+      if (req.method === 'GET' && historicalArtifactsMatch) {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for historical artifacts' });
+        return send(res, 200, { artifacts: listHistoryArtifacts(db, historicalArtifactsMatch[1]) });
+      }
+      const historicalArtifactMatch = /^\/api\/registry\/history\/([ABC]-\d{3})\/artifacts\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (req.method === 'GET' && historicalArtifactMatch) {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for historical artifacts' });
+        const artifact = openHistoryArtifact(db, dataDir, historicalArtifactMatch[1], historicalArtifactMatch[2]);
+        const headers = {
+          'Content-Type': artifact.previewable ? 'text/plain; charset=utf-8' : 'application/octet-stream',
+          'Content-Length': artifact.size,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Cross-Origin-Resource-Policy': 'same-origin',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'Content-Disposition': `${artifact.previewable ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(artifact.download_name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+        };
+        res.writeHead(200, headers);
+        fs.createReadStream('', { fd: artifact.fd, autoClose: true }).on('error', error => {
+          console.error('Historical artifact read failed:', error.message);
+          res.destroy();
+        }).pipe(res);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/coverage') return send(res, 200, coverageDetails(db, Object.fromEntries(url.searchParams)));
+      if (req.method === 'GET' && url.pathname === '/api/team-status.md') return send(res, 200, teamStatusMarkdown(dashboard(db, Object.fromEntries(url.searchParams))), 'text/markdown; charset=utf-8');
+      const findingPatchMatch = /^\/api\/findings\/([a-f0-9]{64})\/patches$/.exec(url.pathname);
+      if (reviewExtensionsEnabled() && findingPatchMatch && req.method === 'GET') {
+        if (!db.prepare("SELECT 1 FROM events WHERE id = ? AND kind = 'finding'").get(findingPatchMatch[1])) invalid('Finding not found', 404);
+        return send(res, 200, { patches: db.prepare('SELECT id, finding_id, filename, sha256, status, result, uploaded_at, completed_at FROM patches WHERE finding_id = ? ORDER BY uploaded_at DESC').all(findingPatchMatch[1]) });
+      }
+      if (reviewExtensionsEnabled() && findingPatchMatch && req.method === 'POST') return send(res, 201, submitPatch(db, findingPatchMatch[1], await readJson(req)));
+      const patchContentMatch = /^\/api\/patches\/([a-f0-9]{64})\/content$/.exec(url.pathname);
+      if (reviewExtensionsEnabled() && patchContentMatch && req.method === 'GET') {
+        const patch = db.prepare('SELECT patch FROM patches WHERE id = ?').get(patchContentMatch[1]);
+        return patch ? send(res, 200, patch.patch, 'text/plain; charset=utf-8') : send(res, 404, { error: 'Patch not found' });
+      }
+      const evidenceMatch = /^\/api\/events\/([a-f0-9]{64})\/(poc|kasan)$/.exec(url.pathname);
+      if (req.method === 'GET' && evidenceMatch) {
+        const row = db.prepare("SELECT markdown FROM events WHERE id = ? AND kind = 'finding'").get(evidenceMatch[1]);
+        if (!row) return send(res, 404, { error: 'Finding not found' });
+        const data = readFrontMatter(row.markdown).data;
+        const content = evidenceMatch[2] === 'poc' ? data.poc_source : data.kasan_log;
+        return content ? send(res, 200, content, 'text/plain; charset=utf-8') : send(res, 404, { error: 'Evidence not found' });
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/api/events/')) {
+        const row = db.prepare('SELECT id, kind, agent_id, title, markdown FROM events WHERE id = ?').get(url.pathname.slice('/api/events/'.length));
+        return row ? send(res, 200, { ...row, markdown: row.kind === 'finding' ? readFrontMatter(row.markdown).body : row.markdown }) : send(res, 404, { error: 'Event not found' });
+      }
+      const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
+      if (req.method === 'GET' && staticFiles[url.pathname]) {
+        const [file, type] = staticFiles[url.pathname];
+        return send(res, 200, fs.readFileSync(path.join(publicDir, file), 'utf8'), type);
+      }
+      return send(res, 404, { error: 'Not found' });
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 500;
+      if (status === 500) console.error(error);
+      return send(res, status, { error: status === 500 ? 'Internal server error' : error.message });
+    }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+  let kimiBusy = false;
+  let sashikoBusy = false;
+  const timer = setInterval(() => {
+    if (process.env.KIMI_API_KEY && !kimiBusy) {
+      kimiBusy = true;
+      processKimiReview(db).catch(error => console.error('Kimi worker:', error.message)).finally(() => { kimiBusy = false; });
+    }
+    if (sashikoConfigured() && !sashikoBusy) {
+      sashikoBusy = true;
+      processSashikoPatch(db, dataDir).catch(error => console.error('Sashiko worker:', error.message)).finally(() => { sashikoBusy = false; });
+    }
+  }, 2_000);
+  timer.unref();
+  server.on('close', () => clearInterval(timer));
+  return { server, db, url: `http://${host}:${server.address().port}`, tokenPath };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  startServer().then(({ url }) => {
+    console.log(`Hivemind dashboard: ${url}`);
+  }).catch(error => { console.error(error); process.exitCode = 1; });
+}

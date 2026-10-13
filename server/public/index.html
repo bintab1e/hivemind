@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="NFS 코드 열람 범위와 취약점 관리">
+  <title>NFS 취약점 관리</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <div class="workspace-head">
+      <h1 id="workspace-title">신규 취약점</h1>
+      <div class="workspace-actions">
+        <label id="track-control" class="track-select">분석 트랙 <select id="version" aria-label="분석 트랙"></select></label>
+        <div class="top-actions"><span id="connection" class="connection">연결 중</span><button id="refresh" class="icon-button" type="button" aria-label="새로고침" title="새로고침">↻</button></div>
+      </div>
+    </div>
+    <div id="error" class="error" role="alert" hidden></div>
+    <div id="empty" class="empty-state" hidden><h2>분석 대상이 없습니다</h2><p>서버에서 분석 버전과 커밋을 설정해 주세요.</p></div>
+
+    <main id="dashboard" hidden>
+      <nav class="tabs" aria-label="분석 메뉴"><button type="button" data-view="findings">신규 취약점</button><button type="button" data-view="coverage">코드 커버리지</button><button type="button" data-view="registry">취약점 관리</button></nav>
+
+      <section id="findings-view" class="viewer" aria-labelledby="findings-title">
+        <div class="viewer-head"><h2 id="findings-title">신규 취약점</h2><div class="viewer-head-actions"><span id="finding-count" class="count"></span><button id="finding-edit-mode" class="edit-mode-button" type="button" aria-pressed="false">수정 모드</button></div></div>
+        <div class="stat-strip" id="finding-stats"></div>
+        <div class="stat-strip" id="finding-status-stats" hidden></div>
+        <div class="toolbar">
+          <label class="search-field"><span class="visually-hidden">취약점 검색</span><span aria-hidden="true">⌕</span><input id="finding-search" type="search" placeholder="관리번호, 취약점명, 담당자 검색" autocomplete="off"></label>
+          <label class="select-field">대상 <select id="finding-target"><option value="">전체</option></select></label>
+          <label class="select-field">제보 여부 <select id="finding-report-status"><option value="">전체</option></select></label>
+          <label class="select-field">권한 구분 <select id="finding-privilege"><option value="">전체</option></select></label>
+          <label class="select-field">담당자 <select id="finding-owner"><option value="">전체</option></select></label>
+          <label class="select-field">NFS 버전 <select id="finding-nfs-version"><option value="">전체</option></select></label>
+          <label class="select-field">취약점 유형 <select id="finding-vulnerability-type"><option value="">전체</option></select></label>
+        </div>
+        <div id="findings" class="table-scroll" role="region" aria-label="취약점 관리 표" tabindex="0"></div>
+        <nav id="finding-pagination" class="pagination" aria-label="취약점 페이지" hidden></nav>
+      </section>
+
+      <section id="coverage-view" class="viewer" aria-labelledby="coverage-title" hidden>
+        <div class="viewer-head"><h2 id="coverage-title">코드 커버리지</h2><span id="coverage-updated" class="count"></span></div>
+        <div class="coverage-section-heading"><strong>총 커버리지</strong><span>팀 합집합</span></div>
+        <div id="coverage-stats" class="stat-strip"></div>
+        <div class="coverage-section-heading"><strong>에이전트별 커버리지</strong><span id="coverage-agent-count"></span></div>
+        <div id="coverage-agent-summary" class="coverage-agent-summary" aria-label="에이전트별 코드 열람 범위"></div>
+        <div class="toolbar"><label class="search-field"><span class="visually-hidden">파일 검색</span><span aria-hidden="true">⌕</span><input id="coverage-search" type="search" placeholder="파일 경로 검색" autocomplete="off"></label><label class="select-field">에이전트 <select id="coverage-agent"><option value="">팀 합집합</option></select></label><label class="select-field">경로 <select id="coverage-component"><option value="">전체</option></select></label><span id="file-count" class="count"></span></div>
+        <p id="coverage-note" class="note" hidden></p>
+        <div id="files" class="table-scroll" role="region" aria-label="코드 커버리지 표" tabindex="0"></div>
+        <nav id="coverage-pagination" class="pagination" aria-label="코드 커버리지 페이지" hidden></nav>
+      </section>
+
+      <footer id="coverage-footer"><span>마지막 수집 <time id="updated">—</time> · 30초마다 갱신</span><a id="report-link" href="/api/team-status.md">Markdown 현황 내려받기 ↗</a></footer>
+    </main>
+  </div>
+
+  <dialog id="detail" class="detail-dialog" aria-labelledby="detail-title">
+    <div class="dialog-top"><div><p class="eyebrow" id="detail-kind">FINDING DETAIL</p><h2 id="detail-title"></h2><p id="detail-subtitle" class="muted"></p></div><button id="close-detail" class="icon-button" type="button" aria-label="닫기">×</button></div>
+    <div id="detail-summary" class="detail-summary"></div>
+    <nav class="detail-tabs" aria-label="취약점 자료"><button type="button" data-detail-tab="report">분석 보고서</button><button type="button" data-detail-tab="poc">PoC · 첨부자료</button><button type="button" data-detail-tab="verification">KASAN · 검증 로그</button></nav>
+    <div id="detail-content" class="detail-content" role="region" aria-label="선택한 취약점 자료"></div>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

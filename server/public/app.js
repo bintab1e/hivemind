@@ -1,0 +1,880 @@
+const $ = id => document.getElementById(id);
+const element = (tag, className = '', text) => {
+  const item = document.createElement(tag);
+  if (className) item.className = className;
+  if (text !== undefined) item.textContent = String(text);
+  return item;
+};
+const clear = item => item.replaceChildren();
+const number = value => Number(value || 0).toLocaleString('ko-KR');
+const when = value => {
+  const date = value && new Date(value);
+  return date && !Number.isNaN(date.valueOf()) ? new Intl.DateTimeFormat('ko-KR', { dateStyle: 'short', timeStyle: 'short' }).format(date) : '—';
+};
+const impacts = [
+  ['kasan_read', 'KASAN Read'], ['kasan_write', 'KASAN Write'],
+  ['controlled_read', 'Controlled Read'], ['controlled_write', 'Controlled Write'],
+  ['lpe', 'LPE'], ['rce', 'RCE'], ['info_leak', 'Info Leak'],
+];
+const accessLabels = {
+  auth_null: 'AUTH_NULL', auth_unix: 'AUTH_UNIX', rpcsec_gss: 'RPCSEC_GSS',
+  authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
+  local_user: '로컬 사용자', local_privileged: '로컬 관리자',
+};
+const state = { data: null, registry: null, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const agentName = id => {
+  const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
+  return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
+};
+const coverageAgentLabel = id => agentName(id) === id ? id : `${agentName(id)} · ${id}`;
+const activeView = () => {
+  const view = new URLSearchParams(location.search).get('view');
+  return view === 'coverage' || view === 'registry' ? view : 'findings';
+};
+const setQuery = values => {
+  const query = new URLSearchParams(location.search);
+  for (const [key, value] of Object.entries(values)) value ? query.set(key, value) : query.delete(key);
+  history.replaceState(null, '', `${location.pathname}${query.size ? `?${query}` : ''}`);
+};
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let reason = `요청 실패 (${response.status})`;
+    try { reason = (await response.json()).error || reason; } catch { /* text or empty response */ }
+    const error = new Error(reason);
+    error.status = response.status;
+    throw error;
+  }
+  return response;
+}
+
+function showError(error) {
+  $('error').textContent = error.message || String(error);
+  $('error').hidden = false;
+  $('connection').textContent = '연결 오류';
+  $('connection').classList.add('offline');
+}
+
+function showView() {
+  const view = activeView();
+  const title = view === 'coverage' ? '코드 커버리지' : view === 'registry' ? '취약점 관리' : '신규 취약점';
+  $('workspace-title').textContent = title;
+  $('findings-title').textContent = title;
+  $('track-control').hidden = view !== 'coverage';
+  $('coverage-footer').hidden = view !== 'coverage';
+  $('findings-view').hidden = view === 'coverage';
+  $('finding-status-stats').hidden = view !== 'registry';
+  $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
+  for (const name of ['findings', 'coverage', 'registry']) {
+    const button = document.querySelector(`.tabs button[data-view="${name}"]`);
+    if (view === name) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+}
+
+function renderHeader(data) {
+  const select = $('version');
+  const previous = select.value;
+  clear(select);
+  for (const track of data.tracks || []) {
+    const option = element('option', '', `${track.label || track.track_id} · ${track.version_id || '미설정'}`);
+    option.value = track.track_id;
+    select.append(option);
+  }
+  select.value = data.selected?.track_id || new URLSearchParams(location.search).get('track_id') || previous;
+  select.disabled = !select.options.length;
+  const coverageView = activeView() === 'coverage';
+  $('empty').hidden = !coverageView || !!data.selected;
+  $('dashboard').hidden = false;
+  $('updated').textContent = when(data.metrics?.updated_at);
+  if (data.selected) $('report-link').href = `/api/team-status.md?${new URLSearchParams({ version_id: data.selected.version_id, repo_commit: data.selected.repo_commit })}`;
+}
+
+const findingFilters = [
+  ['finding-target', 'target'], ['finding-report-status', 'report_status'],
+  ['finding-privilege', 'privilege'], ['finding-owner', 'owner'],
+  ['finding-nfs-version', 'nfs_version'], ['finding-vulnerability-type', 'vulnerability_type'],
+];
+const filterValues = (finding, key) => {
+  const value = String(finding[key] ?? '').trim();
+  if (!['nfs_version', 'vulnerability_type'].includes(key) || !value) return [value];
+  return value.split(',').map(part => {
+    const token = part.trim();
+    // "3 / NFSACL" names a feature alongside the NFS version.
+    return key === 'nfs_version' ? token.replace(/^(\d+(?:\.\d+)?\+?)\s+\/\s+.+$/, '$1') : token;
+  }).filter(Boolean);
+};
+const filterOptionValue = value => value ? `value:${value}` : 'missing';
+const matchesFindingFilters = (finding, selected) => selected.every(([key, value]) =>
+  filterValues(finding, key).some(part => filterOptionValue(part) === value));
+
+function populateFindingFilters(findings) {
+  for (const [id, key] of findingFilters) {
+    const select = $(id);
+    const chosen = select.value;
+    clear(select);
+    const all = element('option', '', '전체');
+    all.value = '';
+    select.append(all);
+    const values = [...new Set(findings.flatMap(finding => filterValues(finding, key)))];
+    values.sort((a, b) => a.localeCompare(b, 'ko', { numeric: true }));
+    for (const value of values) {
+      const option = element('option', '', value || '미입력');
+      option.value = filterOptionValue(value);
+      select.append(option);
+    }
+    select.value = [...select.options].some(option => option.value === chosen) ? chosen : '';
+  }
+}
+
+const isRegistered = finding => !!finding.management_id && finding.registration_status === 'verified';
+const needsVerification = finding => finding.origin !== 'history' && !isRegistered(finding) && finding.report_status !== '철회' && finding.review_verdict !== 'unlikely';
+const newFindingStarts = { A: 43, B: 22, C: 2 };
+const historicalNoOffset = { knfsd: 0, 'NFS-Ganesha': 42, libnfs: 63 };
+function isNewFinding(finding) {
+  if (finding.origin === 'history') return false;
+  if (!finding.management_id) return true;
+  const match = /^([ABC])-(\d+)$/.exec(finding.management_id);
+  return !!match && Number(match[2]) >= newFindingStarts[match[1]];
+}
+const visibleFindings = () => activeView() === 'registry'
+  ? state.registry?.findings || []
+  : (state.registry?.findings || []).filter(isNewFinding);
+function findingGroups(findings) {
+  const byId = new Map(findings.map(finding => [finding.event_id, finding]));
+  const groups = new Map();
+  for (const finding of findings) {
+    let current = finding;
+    const seen = new Set([finding.event_id]);
+    while (current.replaces_event_id && !seen.has(current.replaces_event_id)) {
+      const previousId = current.replaces_event_id;
+      seen.add(previousId);
+      const previous = byId.get(previousId);
+      if (!previous) { current = { event_id: previousId }; break; }
+      current = previous;
+    }
+    if (!groups.has(current.event_id)) groups.set(current.event_id, []);
+    groups.get(current.event_id).push(finding);
+  }
+  return [...groups.values()];
+}
+const previousFinding = finding => finding.replaces_event_id
+  ? (state.registry?.findings || []).find(item => item.event_id === finding.replaces_event_id)
+  : null;
+const reviewLabel = finding => {
+  const revision = !!finding.replaces_event_id;
+  if (isRegistered(finding)) return revision ? '수정본 · 정적 검증 통과' : '정적 검증 통과';
+  if (finding.review_status === 'unconfigured' || !finding.review_status) return `${revision ? '수정본 검증 대기' : '검증 대기'} · Kimi 미설정`;
+  if (finding.review_status === 'error') return revision ? '수정본 검증 오류' : '검증 오류';
+  if (finding.review_verdict === 'unlikely') return revision ? '수정본 검증 보류' : '정적 검증 보류';
+  if (finding.review_verdict === 'uncertain') return revision ? '수정본 추가 검토' : '추가 검토';
+  return revision ? '수정본 검증 대기' : '검증 대기';
+};
+
+function renderFindingStats(findings) {
+  const groups = findingGroups(findings);
+  const targetOf = group => (group.find(isRegistered) || group[0]).target;
+  const rows = [
+    ['finding-stats', [
+      ['총 취약점 수', groups.length, 'accent'],
+      ['knfsd', groups.filter(group => targetOf(group) === 'knfsd').length, ''],
+      ['NFS-Ganesha', groups.filter(group => targetOf(group) === 'NFS-Ganesha').length, ''],
+      ['libnfs', groups.filter(group => targetOf(group) === 'libnfs').length, ''],
+    ]],
+    ['finding-status-stats', [
+      ['검증 대기', groups.filter(group => group.some(needsVerification)).length, ''],
+      ['패치 대기', groups.filter(group => group.some(item => isRegistered(item) && !item.has_patch && !['제보 완료', '중복', '철회'].includes(item.report_status))).length, ''],
+      ['제보 완료', groups.filter(group => group.some(item => (isRegistered(item) || item.origin === 'history') && item.report_status === '제보 완료')).length, 'good'],
+    ]],
+  ];
+  for (const [id, stats] of rows) {
+    clear($(id));
+    for (const [label, count, tone] of stats) {
+      const item = element('div', `strip-stat ${tone}`);
+      item.append(element('span', '', label), element('strong', '', number(count)));
+      $(id).append(item);
+    }
+  }
+}
+
+function renderPagination(id, page, pages, onPage) {
+  const nav = $(id);
+  clear(nav);
+  nav.hidden = pages <= 1;
+  if (pages <= 1) return;
+  const nearby = [...new Set([1, page - 1, page, page + 1, pages])].filter(value => value >= 1 && value <= pages).sort((a, b) => a - b);
+  const pagesToShow = [];
+  for (const value of nearby) {
+    if (pagesToShow.length && value - pagesToShow.at(-1) > 1) pagesToShow.push('…');
+    pagesToShow.push(value);
+  }
+  for (const [label, target, disabled] of [['이전', page - 1, page === 1], ...pagesToShow.map(value => [String(value), value, value === '…']), ['다음', page + 1, page === pages]]) {
+    if (label === '…') { nav.append(element('span', 'muted', '…')); continue; }
+    const button = element('button', '', label);
+    button.type = 'button';
+    button.disabled = disabled || (id === 'finding-pagination' && !!state.editingFindingId);
+    if (target === page && label === String(page)) button.setAttribute('aria-current', 'page');
+    button.addEventListener('click', () => onPage(target));
+    nav.append(button);
+  }
+}
+
+const findingColumns = [
+  ['management_id', '관리 번호'], ['title', '취약점 명'], ['target', '대상'],
+  ['option', '옵션'], ['privilege', '권한'], ['report_project', '제보 프로젝트'],
+  ['report_status', '제보 여부'], ['owner', '담당자'], ['nfs_version', 'NFS 버전'],
+  ['vulnerability_type', '취약점 유형'], ['methodology', '방법론'],
+  ['found_date', '찾은 날짜'], ['exploit', '익스플로잇'], ['cve', 'CVE'],
+];
+const editableFindingColumns = findingColumns.filter(([key]) => !['management_id', 'target'].includes(key));
+const editLimits = { title: 300, option: 200, privilege: 200, report_project: 200, owner: 100, nfs_version: 100, vulnerability_type: 200, methodology: 100, found_date: 10, exploit: 100, cve: 32 };
+const reportStatuses = ['미제보', '제보 중', '제보 완료', '중복', '철회'];
+
+function syncFindingEditControls() {
+  const editing = !!state.editingFindingId;
+  const toggle = $('finding-edit-mode');
+  toggle.textContent = state.editMode ? '수정 종료' : '수정 모드';
+  toggle.setAttribute('aria-pressed', String(state.editMode));
+  toggle.disabled = editing;
+  $('refresh').disabled = editing;
+  for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).disabled = editing;
+  for (const button of document.querySelectorAll('.tabs button')) button.disabled = editing;
+}
+
+function beginFindingEdit(finding) {
+  if (state.editingFindingId) return;
+  state.editingFindingId = finding.event_id;
+  state.editingDraft = Object.fromEntries(editableFindingColumns.map(([key]) => [key, String(finding[key] ?? '')]));
+  state.editError = null;
+  renderFindings();
+  $('findings').querySelector('[data-edit-field="title"]')?.focus();
+}
+
+function cancelFindingEdit() {
+  if (state.editSaving) return;
+  state.editingFindingId = null;
+  state.editingDraft = null;
+  state.editError = null;
+  renderFindings();
+}
+
+async function saveFindingEdit() {
+  if (state.editSaving || !state.editingFindingId) return;
+  const finding = (state.registry?.findings || []).find(item => item.event_id === state.editingFindingId);
+  if (!finding) { state.editError = { message: '수정할 행을 찾지 못했습니다. 새로고침해 주세요.' }; renderFindings(); return; }
+  const changes = {};
+  for (const [key] of editableFindingColumns) {
+    const next = state.editingDraft[key].trim() || null;
+    if (key === 'title' && !next) { state.editError = { message: '취약점 명을 입력해 주세요.' }; renderFindings(); return; }
+    const previous = finding[key] == null ? null : String(finding[key]).trim();
+    if (next !== previous) changes[key] = next;
+  }
+  if (!Object.keys(changes).length) { cancelFindingEdit(); return; }
+  if (!Number.isInteger(finding.revision)) { state.editError = { message: '수정 버전을 확인할 수 없습니다. 새로고침해 주세요.' }; renderFindings(); return; }
+  state.editSaving = true;
+  state.editError = null;
+  renderFindings();
+  try {
+    await api(`/api/registry/rows/${encodeURIComponent(finding.event_id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: finding.revision, ...changes }),
+    });
+    state.editingFindingId = null;
+    state.editingDraft = null;
+    state.editSaving = false;
+    await refresh();
+  } catch (error) {
+    state.editSaving = false;
+    state.editError = { conflict: error.status === 409, message: error.status === 409 ? '다른 사용자가 이 행을 수정했습니다. 입력값은 보존했습니다.' : error.message };
+    renderFindings();
+  }
+}
+
+function findingEditInput(finding, key, label) {
+  const cell = element('td', key === 'title' ? 'registry-title-cell' : ['option', 'vulnerability_type'].includes(key) ? 'registry-wrap' : '');
+  let control;
+  if (key === 'report_status') {
+    control = element('select', 'finding-edit-input');
+    if (finding.origin === 'history') {
+      const blank = element('option', '', '—');
+      blank.value = '';
+      control.append(blank);
+    }
+    for (const status of reportStatuses) {
+      const option = element('option', '', status);
+      option.value = status;
+      control.append(option);
+    }
+    control.addEventListener('change', () => { state.editingDraft[key] = control.value; });
+  } else {
+    control = element('input', 'finding-edit-input');
+    control.type = 'text';
+    control.maxLength = editLimits[key];
+    control.addEventListener('input', () => { state.editingDraft[key] = control.value; });
+  }
+  control.setAttribute('aria-label', `${finding.management_id || finding.title} ${label}`);
+  control.dataset.editField = key;
+  control.value = state.editingDraft[key];
+  cell.append(control);
+  return cell;
+}
+
+function findingEditActions(cell, finding) {
+  if (!state.editMode) return;
+  const actions = element('div', 'row-edit-actions');
+  if (state.editingFindingId === finding.event_id) {
+    const save = element('button', 'row-edit-button primary', state.editSaving ? '저장 중…' : '저장');
+    save.type = 'button';
+    save.disabled = state.editSaving;
+    save.setAttribute('aria-label', `${finding.management_id || finding.title} 저장`);
+    save.addEventListener('click', saveFindingEdit);
+    const cancel = element('button', 'row-edit-button', '취소');
+    cancel.type = 'button';
+    cancel.disabled = state.editSaving;
+    cancel.setAttribute('aria-label', `${finding.management_id || finding.title} 편집 취소`);
+    cancel.addEventListener('click', cancelFindingEdit);
+    actions.append(save, cancel);
+    if (state.editSaving) {
+      const status = element('span', 'row-edit-message', '변경 사항을 저장하고 있습니다.');
+      status.setAttribute('role', 'status');
+      actions.append(status);
+    }
+    if (state.editError) {
+      const message = element('span', 'row-edit-message error-text', state.editError.message);
+      message.setAttribute('role', 'alert');
+      actions.append(message);
+      if (state.editError.conflict) {
+        const reload = element('button', 'row-edit-button', '서버 값 불러오기');
+        reload.type = 'button';
+        reload.addEventListener('click', () => {
+          if (!window.confirm('현재 입력한 내용을 버리고 서버의 최신 값을 불러올까요?')) return;
+          cancelFindingEdit();
+          refresh();
+        });
+        actions.append(reload);
+      }
+    }
+  } else {
+    const edit = element('button', 'row-edit-button', '편집');
+    edit.type = 'button';
+    edit.disabled = !!state.editingFindingId;
+    edit.setAttribute('aria-label', `${finding.management_id || finding.title} 편집`);
+    edit.addEventListener('click', () => beginFindingEdit(finding));
+    actions.append(edit);
+  }
+  cell.append(actions);
+}
+
+function sortFinding(key) {
+  if (state.editingFindingId) return;
+  state.findingSortDir = state.findingSortKey === key && state.findingSortDir === 'asc' ? 'desc' : 'asc';
+  state.findingSortKey = key;
+  state.findingPage = 1;
+  renderFindings();
+}
+
+function findingHeading(label, key) {
+  const head = element('th');
+  const suffix = state.findingSortKey === key ? (state.findingSortDir === 'asc' ? ' ▴' : ' ▾') : ' ↕';
+  const button = element('button', 'sort-heading', label + suffix);
+  button.type = 'button';
+  button.disabled = !!state.editingFindingId;
+  button.addEventListener('click', () => sortFinding(key));
+  head.append(button);
+  if (state.findingSortKey === key) head.setAttribute('aria-sort', state.findingSortDir === 'asc' ? 'ascending' : 'descending');
+  return head;
+}
+
+function findingCell(finding, key) {
+  if (key === 'management_id') {
+    const cell = element('td', 'registry-id-cell');
+    cell.append(element('strong', finding.management_id ? 'registry-id' : 'registry-unassigned', finding.management_id || '미부여'));
+    if (finding.origin !== 'history') cell.append(element('span', 'finding-id', reviewLabel(finding)));
+    findingEditActions(cell, finding);
+    return cell;
+  }
+  if (state.editingFindingId === finding.event_id && editableFindingColumns.some(([field]) => field === key)) {
+    return findingEditInput(finding, key, findingColumns.find(([field]) => field === key)[1]);
+  }
+  if (key === 'title') {
+    const cell = element('td', 'registry-title-cell');
+    const button = element('button', 'finding-title', finding.title);
+    button.type = 'button';
+    button.addEventListener('click', () => openFinding(finding));
+    cell.append(button);
+    if (finding.origin !== 'history') {
+      const prior = previousFinding(finding);
+      const revision = finding.replaces_event_id ? `이전 ${prior?.management_id || finding.replaces_event_id.slice(0, 12)} 수정본 · ` : '';
+      cell.append(element('span', 'finding-id', revision + agentName(finding.agent_id)));
+    }
+    return cell;
+  }
+  if (key === 'report_status') {
+    const status = finding.report_status || '—';
+    const tone = status === '제보 완료' ? 'done' : status === '철회' ? 'withdrawn' : status === '중복' ? 'duplicate' : '';
+    const cell = element('td');
+    cell.append(element('span', `report-status ${tone}`, status));
+    return cell;
+  }
+  return element('td', ['option', 'vulnerability_type'].includes(key) ? 'registry-wrap' : '', finding[key] || '—');
+}
+
+function renderFindings() {
+  syncFindingEditControls();
+  const findings = visibleFindings();
+  populateFindingFilters(findings);
+  renderFindingStats(findings);
+  const search = $('finding-search').value.trim().toLowerCase();
+  const selectedFilters = findingFilters.map(([id, key]) => [key, $(id).value]).filter(([, value]) => value);
+  const filtered = findings.filter(item =>
+    matchesFindingFilters(item, selectedFilters) &&
+    (!search || `${findingColumns.map(([key]) => item[key] || '').join(' ')} ${previousFinding(item)?.management_id || ''} ${item.file_path || ''} ${item.agent_id} ${agentName(item.agent_id)} ${(item.code_refs || []).join(' ')}`.toLowerCase().includes(search))
+  );
+  filtered.sort((a, b) => {
+    if (state.findingSortKey === 'management_id' && !a.management_id !== !b.management_id) return a.management_id ? -1 : 1;
+    const left = String(a[state.findingSortKey] ?? '');
+    const right = String(b[state.findingSortKey] ?? '');
+    return left.localeCompare(right, 'ko', { numeric: true }) * (state.findingSortDir === 'asc' ? 1 : -1)
+      || String(a.event_id).localeCompare(String(b.event_id));
+  });
+  const pages = Math.max(1, Math.ceil(filtered.length / 20));
+  state.findingPage = Math.min(state.findingPage, pages);
+  $('finding-count').textContent = `${number(filtered.length)} / ${number(findings.length)}행`;
+  const scrollLeft = $('findings').scrollLeft;
+  const scrollTop = $('findings').scrollTop;
+  clear($('findings'));
+  if (!filtered.length) {
+    $('findings').append(element('div', 'table-empty', findings.length ? '조건에 맞는 취약점이 없습니다.' : activeView() === 'registry' ? '아직 등록된 취약점 보고가 없습니다.' : '아직 신규 취약점 보고가 없습니다.'));
+    renderPagination('finding-pagination', 1, 1, () => {});
+    return;
+  }
+  const table = element('table', 'finding-table');
+  const head = element('thead');
+  const heading = element('tr');
+  heading.append(element('th', '', 'No.'));
+  for (const [key, label] of findingColumns) heading.append(findingHeading(label, key));
+  for (const [, label] of impacts) heading.append(element('th', 'impact-th', label));
+  head.append(heading);
+  table.append(head);
+  const body = element('tbody');
+  const offset = (state.findingPage - 1) * 20;
+  for (const [index, finding] of filtered.slice(offset, offset + 20).entries()) {
+    const row = element('tr');
+    if (state.editingFindingId === finding.event_id) row.classList.add('editing-row');
+    const serial = finding.origin === 'history' && Number.isInteger(finding.number)
+      ? historicalNoOffset[finding.target] + finding.number
+      : offset + index + 1;
+    row.append(element('td', 'registry-row-number', number(serial)));
+    for (const [key] of findingColumns) row.append(findingCell(finding, key));
+    const verified = new Set(finding.verified_impacts || []);
+    for (const [key, label] of impacts) {
+      const present = verified.has(key);
+      const cell = element('td', `impact-td ${present && isRegistered(finding) ? 'verified' : present ? 'claimed' : ''}`, present ? (isRegistered(finding) ? '✓' : '◇') : '—');
+      const evidence = present ? (isRegistered(finding) ? '제출 증빙 포함, Kimi likely 정적 판정. 서버 독립 재현 아님' : '제출 주장, 정적 검증 대기') : '기록 없음';
+      cell.setAttribute('aria-label', `${label}: ${evidence}`);
+      cell.title = `${label}: ${evidence}`;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(body);
+  $('findings').append(table);
+  $('findings').scrollLeft = scrollLeft;
+  $('findings').scrollTop = scrollTop;
+  renderPagination('finding-pagination', state.findingPage, pages, page => {
+    state.findingPage = page;
+    renderFindings();
+    $('findings').scrollTop = 0;
+  });
+}
+
+const fileGroup = path => (path || '').split('/').slice(0, 2).join('/');
+
+function populateCoverageAgentFilter() {
+  const select = $('coverage-agent');
+  clear(select);
+  const all = element('option', '', '팀 합집합');
+  all.value = '';
+  select.append(all);
+  for (const agent of state.data.coverage_agents || []) {
+    const option = element('option', '', `${coverageAgentLabel(agent.agent_id)}${agent.included_in_team === false ? ' · 병합 제외' : ''}`);
+    option.value = agent.agent_id;
+    select.append(option);
+  }
+  select.value = state.coverageAgent;
+}
+
+function populateCoverageGroups(files) {
+  const select = $('coverage-component');
+  const selected = select.value;
+  clear(select);
+  const all = element('option', '', '전체');
+  all.value = '';
+  select.append(all);
+  for (const group of [...new Set(files.map(file => fileGroup(file.path)))].sort()) {
+    const option = element('option', '', group);
+    option.value = group;
+    select.append(option);
+  }
+  select.value = [...select.options].some(option => option.value === selected) ? selected : '';
+}
+
+function coverageStat(label, value, tone = '') {
+  const item = element('div', `strip-stat ${tone}`);
+  item.append(element('span', '', label), element('strong', '', value));
+  return item;
+}
+
+const coverageExclusionLabels = {
+  worktree_dirty: '작업 트리 변경',
+  scope_mismatch: '분석 범위 불일치',
+  file_shape_mismatch: '파일 구성 불일치',
+};
+
+function renderCoverageAgentSummary() {
+  const summary = $('coverage-agent-summary');
+  clear(summary);
+  const samples = new Map((state.data?.coverage_agents || []).map(agent => [agent.agent_id, agent]));
+  const ids = [...new Set([
+    ...(state.data?.agent_profiles || []).map(agent => agent.agent_id),
+    ...samples.keys(),
+  ])];
+  $('coverage-agent-count').textContent = `${number(ids.length)}명`;
+  if (!ids.length) {
+    summary.append(element('p', 'coverage-agent-empty', '등록된 에이전트가 없습니다.'));
+    return;
+  }
+  const uniqueLines = new Map((state.data?.agents || []).map(agent => [agent.agent_id, agent.unique_lines]));
+  for (const id of ids) {
+    const sample = samples.get(id);
+    const selected = state.coverageAgent === id;
+    const card = element(sample ? 'button' : 'div', `coverage-agent-card${selected ? ' selected' : ''}`);
+    if (sample) {
+      card.type = 'button';
+      card.setAttribute('aria-pressed', String(selected));
+      card.addEventListener('click', () => selectCoverageAgent(selected ? '' : id));
+    }
+    const status = !sample ? '수집 대기'
+      : sample.included_in_team === false ? `팀 제외 · ${coverageExclusionLabels[sample.exclusion_reason] || '계측 조건 불일치'}`
+      : sample.using_clean_fallback ? '직전 정상 배치' : '';
+    const heading = element('span', 'coverage-agent-heading');
+    heading.append(element('span', 'coverage-agent-name', agentName(id)));
+    if (agentName(id) !== id) heading.append(element('span', 'coverage-agent-id', id));
+    if (status) heading.append(element('span', `coverage-agent-status${sample?.included_in_team === false ? ' excluded' : ''}`, status));
+    const rate = sample?.read_percent == null ? '—' : `${number(sample.read_percent)}%`;
+    const bar = element('span', 'bar');
+    const fill = element('span');
+    fill.style.width = `${Math.max(0, Math.min(100, Number(sample?.read_percent) || 0))}%`;
+    bar.append(fill);
+    const detail = sample
+      ? `${number(sample.read_lines)} / ${number(sample.total_lines)}줄${uniqueLines.has(id) ? ` · 고유 ${number(uniqueLines.get(id))}줄` : ''}`
+      : '아직 수집된 자료가 없습니다.';
+    card.append(heading, element('strong', 'coverage-agent-rate', rate), bar, element('span', 'coverage-agent-detail', detail));
+    summary.append(card);
+  }
+}
+
+function sortCoverage(key) {
+  state.coverageSortDir = state.coverageSortKey === key
+    ? (state.coverageSortDir === 'desc' ? 'asc' : 'desc')
+    : (key === 'path' ? 'asc' : 'desc');
+  state.coverageSortKey = key;
+  state.coveragePage = 1;
+  renderCoverage();
+}
+
+function sortableHeading(label, key) {
+  const head = element('th', '', '');
+  const button = element('button', 'sort-heading', `${label} ${state.coverageSortKey === key ? (state.coverageSortDir === 'desc' ? '▾' : '▴') : '↕'}`);
+  button.type = 'button';
+  button.addEventListener('click', () => sortCoverage(key));
+  head.append(button);
+  if (state.coverageSortKey === key) head.setAttribute('aria-sort', state.coverageSortDir === 'desc' ? 'descending' : 'ascending');
+  return head;
+}
+
+function renderCoverage() {
+  const report = state.coverage;
+  if (!report) return;
+  const files = report.files || [];
+  populateCoverageGroups(files);
+  const total = Number(state.data?.metrics?.total_lines || 0);
+  const read = Number(state.data?.metrics?.read_lines || 0);
+  clear($('coverage-stats'));
+  $('coverage-stats').append(
+    coverageStat('열람률', total ? `${Math.round(read / total * 1000) / 10}%` : '—', 'accent'),
+    coverageStat('읽은 줄', `${number(read)} / ${number(total)}`),
+    coverageStat('미열람 줄', number(total - read)),
+    coverageStat('중복 열람 줄', number(state.data?.metrics?.overlap_lines), 'good'),
+  );
+  renderCoverageAgentSummary();
+  const note = $('coverage-note');
+  const messages = [];
+  if (report.included_in_team === false) messages.push(`팀 병합 제외 · ${report.exclusion_reason || '계측 조건 불일치'}`);
+  if (report.using_clean_fallback) messages.push('직전 정상 배치를 표시합니다.');
+  note.textContent = messages.join(' / ');
+  note.hidden = !messages.length;
+
+  const query = $('coverage-search').value.trim().toLowerCase();
+  const group = $('coverage-component').value;
+  const visible = files.filter(file => (!group || fileGroup(file.path) === group) && (!query || file.path.toLowerCase().includes(query)));
+  const key = state.coverageSortKey;
+  const direction = state.coverageSortDir === 'asc' ? 1 : -1;
+  visible.sort((a, b) => {
+    const value = file => key === 'path' ? file.path : key === 'read' ? file.read : key === 'unread' ? file.total - file.read : key === 'percent' ? file.percent : key === 'overlap' ? file.overlap_lines || 0 : key === 'agents' ? file.agents || 0 : file.agent_reads?.[key.slice(6)] || 0;
+    const left = value(a);
+    const right = value(b);
+    return (typeof left === 'string' ? left.localeCompare(right) : left - right) * direction || a.path.localeCompare(b.path);
+  });
+  $('file-count').textContent = `${number(visible.length)} / ${number(files.length)}개 파일`;
+  const pages = Math.max(1, Math.ceil(visible.length / 20));
+  state.coveragePage = Math.min(state.coveragePage, pages);
+  clear($('files'));
+  if (!visible.length) {
+    $('files').append(element('div', 'table-empty', files.length ? '조건에 맞는 파일이 없습니다.' : '아직 코드 열람 자료가 없습니다.'));
+    renderPagination('coverage-pagination', 1, 1, () => {});
+    return;
+  }
+
+  const agentIds = state.coverageAgent ? [] : (state.data.agents || []).map(agent => agent.agent_id);
+  const table = element('table', 'coverage-table');
+  const head = element('thead');
+  const heading = element('tr');
+  heading.append(element('th', '', '경로'), sortableHeading('파일', 'path'), sortableHeading('읽은 줄', 'read'), sortableHeading('미열람', 'unread'), sortableHeading('열람률', 'percent'));
+  if (!state.coverageAgent) heading.append(sortableHeading('중복 열람', 'overlap'), sortableHeading('에이전트', 'agents'));
+  for (const id of agentIds) {
+    const column = sortableHeading(coverageAgentLabel(id), `agent:${id}`);
+    column.classList.add('agent-column');
+    column.title = coverageAgentLabel(id);
+    heading.append(column);
+  }
+  head.append(heading);
+  table.append(head);
+  const body = element('tbody');
+  for (const file of visible.slice((state.coveragePage - 1) * 20, state.coveragePage * 20)) {
+    const row = element('tr');
+    row.append(element('td', 'group-cell path', fileGroup(file.path)), element('td', 'file-path path', file.path));
+    row.append(element('td', 'numeric', `${number(file.read)} / ${number(file.total)}`), element('td', 'numeric', number(file.total - file.read)));
+    const rate = element('td', 'rate-cell');
+    const bar = element('span', 'bar');
+    const fill = element('span');
+    fill.style.width = `${Math.max(0, Math.min(100, Number(file.percent) || 0))}%`;
+    bar.append(fill);
+    rate.append(element('span', '', `${file.percent || 0}%`), bar);
+    row.append(rate);
+    if (!state.coverageAgent) row.append(element('td', 'numeric overlap-cell', number(file.overlap_lines)), element('td', 'numeric', number(file.agents)));
+    for (const id of agentIds) {
+      const readByAgent = Number(file.agent_reads?.[id] || 0);
+      const cell = element('td', 'agent-cell', file.total ? `${Math.round(readByAgent / file.total * 100)}%` : '—');
+      cell.title = `${coverageAgentLabel(id)}: ${number(readByAgent)} / ${number(file.total)}줄`;
+      cell.style.setProperty('--fill', `${Math.max(0, Math.min(100, file.total ? readByAgent / file.total * 100 : 0))}%`);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(body);
+  $('files').append(table);
+  renderPagination('coverage-pagination', state.coveragePage, pages, page => {
+    state.coveragePage = page;
+    renderCoverage();
+    $('files').scrollTop = 0;
+  });
+}
+
+async function loadCoverage() {
+  const data = state.data;
+  if (!data?.selected) return;
+  const requested = state.coverageAgent;
+  const track = data.selected;
+  const coverage = requested
+    ? await (await api(`/api/coverage?${new URLSearchParams({ version_id: track.version_id, repo_commit: track.repo_commit, agent_id: requested })}`)).json()
+    : { files: data.files || [], metrics: data.metrics || {}, included_in_team: true };
+  if (requested !== state.coverageAgent || track !== state.data?.selected) return;
+  state.coverage = coverage;
+  renderCoverage();
+}
+
+function detailFact(label, value) {
+  const fact = element('div', 'detail-fact');
+  fact.append(element('span', '', label), element('strong', '', value || '—'));
+  return fact;
+}
+
+function openFinding(finding, tab = 'report') {
+  state.finding = finding;
+  state.detailTab = tab;
+  $('detail-title').textContent = finding.title;
+  const displayDate = finding.origin === 'history' ? finding.found_date || '—' : when(finding.created_at || finding.found_date);
+  $('detail-subtitle').textContent = `${finding.management_id || '관리번호 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
+  clear($('detail-summary'));
+  $('detail').querySelector('.detail-tabs').hidden = false;
+  if (finding.origin === 'history') {
+    $('detail-summary').append(
+      detailFact('관리번호 / 대상', `${finding.management_id} · ${finding.target}`),
+      detailFact('담당자 / 제보 여부', `${finding.owner || '—'} · ${finding.report_status || '—'}`),
+      detailFact('옵션 / 권한', `${finding.option || '—'} · ${finding.privilege || '—'}`),
+      detailFact('제보 프로젝트 / NFS 버전', `${finding.report_project || '—'} · ${finding.nfs_version || '—'}`),
+      detailFact('취약점 유형 / 방법론', `${finding.vulnerability_type || '—'} · ${finding.methodology || '—'}`),
+      detailFact('찾은 날짜 / 익스플로잇 / CVE', `${finding.found_date || '—'} · ${finding.exploit || '—'} · ${finding.cve || '—'}`),
+    );
+    if (!$('detail').open) $('detail').showModal();
+    showDetailTab();
+    return;
+  }
+  $('detail-summary').append(
+    detailFact('관리번호 / 정적 검증', `${isRegistered(finding) ? finding.management_id : '미부여'} · ${reviewLabel(finding)}`),
+    detailFact('담당자 / 제보 여부', `${finding.owner || '—'} · ${finding.report_status || '—'}`),
+    detailFact('보고 에이전트', agentName(finding.agent_id)),
+    detailFact('코드 위치', finding.file_path || (finding.code_refs || [])[0]),
+    detailFact('권한 / 옵션', `${finding.privilege || (finding.access_requirements || []).map(value => accessLabels[value] || value).join(' · ') || '—'} · ${finding.option || '—'}`),
+    detailFact('2VM 환경', finding.vm_environment),
+  );
+  if (finding.replaces_event_id) {
+    const prior = previousFinding(finding);
+    const fact = detailFact('이전 보고', prior?.management_id || finding.replaces_event_id.slice(0, 12));
+    if (prior) {
+      const button = element('button', 'detail-link', prior.management_id || prior.title);
+      button.type = 'button';
+      button.addEventListener('click', () => openFinding(prior));
+      fact.querySelector('strong').replaceChildren(button);
+    }
+    $('detail-summary').append(fact);
+  }
+  if (finding.review_summary) $('detail-summary').append(detailFact('정적 검토 의견', finding.review_summary));
+  if (!$('detail').open) $('detail').showModal();
+  showDetailTab();
+}
+
+async function showDetailTab() {
+  const finding = state.finding;
+  const tab = state.detailTab;
+  const id = ++state.detailId;
+  for (const button of document.querySelectorAll('[data-detail-tab]')) {
+    if (button.dataset.detailTab === tab) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  const content = $('detail-content');
+  clear(content);
+  content.append(element('p', '', '자료를 불러오는 중…'));
+  try {
+    if (finding.origin === 'history') {
+      const base = `/api/registry/history/${encodeURIComponent(finding.management_id)}/artifacts`;
+      const { artifacts } = await (await api(base)).json();
+      if (id !== state.detailId) return;
+      clear(content);
+      const files = (artifacts || []).filter(item => item.kind === tab);
+      if (!files.length) {
+        content.append(element('p', '', { report: '분석 보고서가 없습니다.', poc: 'PoC · 첨부자료가 없습니다.', verification: '검증 로그가 없습니다.' }[tab]));
+        return;
+      }
+      const nameCounts = new Map();
+      for (const file of files) nameCounts.set(file.name.toLowerCase(), (nameCounts.get(file.name.toLowerCase()) || 0) + 1);
+      for (const file of files) {
+        const duplicateName = nameCounts.get(file.name.toLowerCase()) > 1;
+        const section = element('section', 'detail-section artifact-section');
+        const header = element('div', 'artifact-head');
+        const title = element('h3', '', file.name);
+        if (file.original_name && file.original_name !== file.name) title.title = file.original_name;
+        const size = element('span', 'muted', `${number(file.size)} B${duplicateName ? ` · 파일 ID ${file.id.slice(0, 8)}` : ''}`);
+        const url = `${base}/${encodeURIComponent(file.id)}`;
+        const download = element('a', 'detail-link', '다운로드');
+        download.href = url;
+        download.download = file.download_name || file.name;
+        header.append(title, size, download);
+        section.append(header);
+        if (file.previewable) {
+          const preview = element('details', 'artifact-preview');
+          preview.append(element('summary', '', '내용 보기'));
+          const body = element('pre', '', '자료를 불러오는 중…');
+          preview.append(body);
+          let loaded = false;
+          preview.addEventListener('toggle', async () => {
+            if (!preview.open || loaded) return;
+            loaded = true;
+            try { body.textContent = await (await api(url)).text(); }
+            catch (error) { body.textContent = `자료를 열지 못했습니다: ${error.message}`; loaded = false; }
+          });
+          section.append(preview);
+        }
+        content.append(section);
+      }
+      return;
+    }
+    const endpoint = tab === 'report' ? `/api/events/${encodeURIComponent(finding.event_id)}` : `/api/events/${encodeURIComponent(finding.event_id)}/${tab === 'verification' ? 'kasan' : tab}`;
+    const response = await api(endpoint);
+    const text = tab === 'report' ? (await response.json()).markdown : await response.text();
+    if (id !== state.detailId) return;
+    clear(content);
+    if (tab === 'report') {
+      if (finding.reproduction_command) {
+        const command = element('div', 'detail-section');
+        command.append(element('h3', '', '재현 명령'), element('pre', '', finding.reproduction_command));
+        content.append(command);
+      }
+    }
+    content.append(element('pre', '', text || '제출된 내용이 없습니다.'));
+  } catch (error) {
+    if (id === state.detailId) { clear(content); content.append(element('p', '', `자료를 열지 못했습니다: ${error.message}`)); }
+  }
+}
+
+async function refresh() {
+  if (state.editingFindingId) return;
+  const id = ++state.refreshId;
+  try {
+    const query = new URLSearchParams(location.search);
+    const [data, registry] = await Promise.all([
+      api(`/api/dashboard?${query}`).then(response => response.json()),
+      api('/api/registry').then(response => response.json()),
+    ]);
+    if (id !== state.refreshId || state.editingFindingId) return;
+    state.data = data;
+    state.registry = registry;
+    renderHeader(data);
+    showView();
+    renderFindings();
+    if (data.selected) {
+      state.coverageAgent = data.coverage_agents?.some(item => item.agent_id === query.get('agent_id')) ? query.get('agent_id') : '';
+      populateCoverageAgentFilter();
+      $('coverage-updated').textContent = `마지막 수집 ${when(data.metrics?.updated_at)}`;
+      if (activeView() === 'coverage') await loadCoverage();
+    }
+    $('error').hidden = true;
+    $('connection').textContent = '서버 연결됨';
+    $('connection').classList.remove('offline');
+  } catch (error) { if (id === state.refreshId) showError(error); }
+}
+
+$('refresh').addEventListener('click', refresh);
+$('finding-edit-mode').addEventListener('click', () => {
+  if (state.editingFindingId) return;
+  state.editMode = !state.editMode;
+  renderFindings();
+});
+$('version').addEventListener('change', () => { setQuery({ track_id: $('version').value, version_id: '', repo_commit: '', agent_id: '' }); state.coveragePage = 1; state.coverageSortKey = 'unread'; state.coverageSortDir = 'desc'; refresh(); });
+for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); });
+for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).addEventListener(id === 'finding-search' ? 'input' : 'change', () => { if (state.editingFindingId) return; state.findingPage = 1; renderFindings(); });
+$('coverage-search').addEventListener('input', () => { state.coveragePage = 1; renderCoverage(); });
+$('coverage-component').addEventListener('change', () => { state.coveragePage = 1; renderCoverage(); });
+$('coverage-agent').addEventListener('change', () => {
+  selectCoverageAgent($('coverage-agent').value);
+});
+function selectCoverageAgent(id) {
+  state.coverageAgent = id;
+  state.coveragePage = 1;
+  state.coverageSortKey = 'unread';
+  state.coverageSortDir = 'desc';
+  setQuery({ agent_id: state.coverageAgent });
+  populateCoverageAgentFilter();
+  renderCoverageAgentSummary();
+  clear($('files'));
+  $('files').append(element('div', 'table-empty', '자료를 불러오는 중입니다.'));
+  $('file-count').textContent = '';
+  loadCoverage().catch(showError);
+}
+for (const button of document.querySelectorAll('[data-detail-tab]')) button.addEventListener('click', () => { state.detailTab = button.dataset.detailTab; showDetailTab(); });
+$('close-detail').addEventListener('click', () => $('detail').close());
+window.addEventListener('popstate', refresh);
+refresh();
+setInterval(refresh, 30_000);

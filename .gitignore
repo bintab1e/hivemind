@@ -1,0 +1,39 @@
+# Local runtime and dependency state
+**/runtime/
+**/data/
+**/tmp/
+**/cache/
+**/.venv/
+**/node_modules/
+**/__pycache__/
+*.pyc
+
+# Credentials and service state
+.env
+.env.*
+**/auth.json
+**/.credentials.json
+**/dashboard-auth.env
+**/api-token.txt
+*.token
+*.token.*
+*.sqlite*
+*.db
+*.db-*
+
+# Reports, logs, archives, and editor backups
+*.log
+*.log.*
+*.jsonl
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.cpio
+*.pem
+*.key
+*.prev-*
+*.bak
+*.orig
+*.swp
+.DS_Store
