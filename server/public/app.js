@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
@@ -29,7 +29,7 @@ const agentName = id => {
 const coverageAgentLabel = id => agentName(id) === id ? id : `${agentName(id)} · ${id}`;
 const activeView = () => {
   const view = new URLSearchParams(location.search).get('view');
-  return view === 'coverage' || view === 'registry' ? view : 'findings';
+  return ['queue', 'coverage', 'registry'].includes(view) ? view : 'findings';
 };
 const setQuery = values => {
   const query = new URLSearchParams(location.search);
@@ -58,15 +58,17 @@ function showError(error) {
 
 function showView() {
   const view = activeView();
-  const title = view === 'coverage' ? '코드 커버리지' : view === 'registry' ? '취약점 관리' : '신규 취약점';
+  const title = { findings: '신규 취약점', queue: '검증 큐', coverage: '코드 커버리지', registry: '취약점 관리' }[view];
   $('workspace-title').textContent = title;
   $('findings-title').textContent = title;
   $('track-control').hidden = view !== 'coverage';
   $('coverage-footer').hidden = view !== 'coverage';
-  $('findings-view').hidden = view === 'coverage';
+  $('findings-view').hidden = view !== 'findings' && view !== 'registry';
   $('finding-status-stats').hidden = view !== 'registry';
+  $('queue-view').hidden = view !== 'queue';
   $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
-  for (const name of ['findings', 'coverage', 'registry']) {
+  if (view === 'queue' && !state.queue && !state.queueError) $('queue-active').replaceChildren(element('div', 'table-empty', '검증 큐를 불러오는 중입니다.'));
+  for (const name of ['findings', 'queue', 'coverage', 'registry']) {
     const button = document.querySelector(`.tabs button[data-view="${name}"]`);
     if (view === name) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
@@ -839,6 +841,112 @@ async function showDetailTab() {
   }
 }
 
+const queuePhaseLabels = {
+  queued: '대기', preparing: '환경 준비', static_review: 'Codex 정적 검토',
+  qemu_reproduction: '2VM PoC 재현', trace_review: 'KASAN 로그 검토', finalizing: '결과 정리',
+};
+const queueStatusLabels = {
+  pending: '검증 대기', processing: '검증 중', needs_evidence: '증거 보완 필요',
+  needs_review: '추가 검토 필요', error: '오류',
+};
+const queueWorkerLabels = { busy: '작업 중', idle: '유휴', offline: '오프라인' };
+const queuePhaseLabel = row => row.phase ? queuePhaseLabels[row.phase] || row.phase : '검증 중';
+
+function renderQueueTable(id, rows, columns, emptyMessage) {
+  const container = $(id);
+  clear(container);
+  if (!rows.length) { container.append(element('div', 'table-empty', emptyMessage)); return; }
+  const table = element('table', 'queue-table');
+  const head = element('thead');
+  const heading = element('tr');
+  for (const [label] of columns) heading.append(element('th', '', label));
+  head.append(heading);
+  const body = element('tbody');
+  for (const row of rows) {
+    const tr = element('tr');
+    for (const [, value, className] of columns) tr.append(element('td', className || '', value(row) || '—'));
+    body.append(tr);
+  }
+  table.append(head, body);
+  container.append(table);
+}
+
+function renderVerificationQueue() {
+  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked']) clear($(id));
+  if (state.queueError) {
+    $('queue-updated').textContent = '조회 실패';
+    $('queue-worker-count').textContent = '';
+    for (const id of ['queue-active-count', 'queue-pending-count', 'queue-blocked-count']) $(id).textContent = '';
+    const message = element('div', 'table-empty queue-error', `검증 큐를 불러오지 못했습니다: ${state.queueError.message}`);
+    message.setAttribute('role', 'alert');
+    $('queue-active').append(message);
+    return;
+  }
+  const queue = state.queue;
+  if (!queue) return;
+  $('queue-updated').textContent = `마지막 확인 ${when(queue.fetched_at)}`;
+  for (const [label, count, tone] of [
+    ['검증 중', queue.counts.processing, 'accent'],
+    ['검증 대기', queue.counts.pending, ''],
+    ['보완 필요 · 오류', queue.counts.blocked, ''],
+  ]) {
+    const item = element('div', `strip-stat ${tone}`);
+    item.append(element('span', '', label), element('strong', '', number(count)));
+    $('queue-stats').append(item);
+  }
+  $('queue-worker-count').textContent = `${number(queue.workers.length)}개`;
+  for (const [id, count] of [['queue-active-count', queue.active.length], ['queue-pending-count', queue.pending.length], ['queue-blocked-count', queue.blocked.length]]) $(id).textContent = `${number(count)}건`;
+  if (queue.blocked_has_more) $('queue-blocked-count').textContent = `최근 ${number(queue.blocked.length)}건 · 전체 ${number(queue.counts.blocked)}건`;
+  if (!queue.workers.length) $('queue-workers').append(element('p', 'coverage-agent-empty', '연결된 검증 에이전트가 없습니다.'));
+  for (const worker of queue.workers) {
+    const card = element('div', 'queue-worker-card');
+    const head = element('div', 'queue-worker-heading');
+    const track = (state.data?.tracks || []).find(item => item.repo_commit === worker.target_commit);
+    head.append(element('strong', 'queue-worker-target', track ? `${track.label || track.track_id} · ${track.version_id}` : worker.target_commit ? `커밋 ${worker.target_commit.slice(0, 12)}` : '대상 커밋 없음'));
+    head.append(element('span', `queue-badge ${worker.status || ''}`, queueWorkerLabels[worker.status] || worker.status || '상태 알 수 없음'));
+    card.append(head);
+    const current = queue.active.find(row => row.submission_id === worker.current_submission_id);
+    if (worker.current_submission_id) card.append(element('div', 'queue-worker-current', `${worker.status === 'offline' ? '마지막 담당' : '담당'} · ${current?.title || worker.current_submission_id}`));
+    card.append(element('div', 'queue-worker-meta', `워커 ${worker.worker_id ? worker.worker_id.slice(0, 12) : '—'}`));
+    card.append(element('div', 'queue-worker-meta', `커널 ${worker.target_commit || '—'}`));
+    card.append(element('div', 'queue-worker-meta', `마지막 응답 ${when(worker.last_seen_at)}`));
+    $('queue-workers').append(card);
+  }
+  const title = row => `${row.project || '대상 미입력'} · ${row.title || '제목 없음'} (${row.submission_id})`;
+  renderQueueTable('queue-active', queue.active, [
+    ['취약점', title, 'queue-title-cell'], ['분석 에이전트', row => row.agent_id],
+    ['검증 단계', row => `${queuePhaseLabel(row)}${row.stale ? ' · 응답 지연' : ''}`],
+    ['상태', row => queueStatusLabels[row.status] || row.status],
+    ['단계 갱신', row => when(row.phase_updated_at)], ['대상 커밋', row => row.target_commit, 'queue-commit'],
+  ], '현재 검증 중인 신규 제출이 없습니다.');
+  renderQueueTable('queue-pending', queue.pending, [
+    ['순서', row => row.position, 'queue-position'], ['취약점', title, 'queue-title-cell'],
+    ['분석 에이전트', row => row.agent_id], ['대상 커밋', row => row.target_commit, 'queue-commit'],
+    ['제출 시각', row => when(row.submitted_at)],
+  ], '검증을 기다리는 신규 제출이 없습니다.');
+  renderQueueTable('queue-blocked', queue.blocked, [
+    ['취약점', title, 'queue-title-cell'], ['상태', row => queueStatusLabels[row.status] || row.status],
+    ['사유', row => row.reason, 'queue-reason'], ['분석 에이전트', row => row.agent_id],
+    ['대상 커밋', row => row.target_commit, 'queue-commit'],
+  ], '보완이나 재시도가 필요한 신규 제출이 없습니다.');
+}
+
+async function loadVerificationQueue() {
+  const id = ++state.queueRequestId;
+  try {
+    const queue = await api('/api/verification-queue').then(response => response.json());
+    if (![queue.active, queue.pending, queue.blocked, queue.workers].every(Array.isArray) || !queue.counts) throw new Error('검증 큐 응답 형식이 올바르지 않습니다.');
+    if (id !== state.queueRequestId) return;
+    state.queue = { ...queue, fetched_at: new Date().toISOString() };
+    state.queueError = null;
+  } catch (error) {
+    if (id !== state.queueRequestId) return;
+    state.queue = null;
+    state.queueError = error;
+  }
+  renderVerificationQueue();
+}
+
 async function refresh() {
   if (state.editingFindingId) return;
   const id = ++state.refreshId;
@@ -860,6 +968,7 @@ async function refresh() {
       $('coverage-updated').textContent = `마지막 수집 ${when(data.metrics?.updated_at)}`;
       if (activeView() === 'coverage') await loadCoverage();
     }
+    if (activeView() === 'queue') await loadVerificationQueue();
     $('error').hidden = true;
     $('connection').textContent = '서버 연결됨';
     $('connection').classList.remove('offline');
@@ -873,7 +982,7 @@ $('finding-edit-mode').addEventListener('click', () => {
   renderFindings();
 });
 $('version').addEventListener('change', () => { setQuery({ track_id: $('version').value, version_id: '', repo_commit: '', agent_id: '' }); state.coveragePage = 1; state.coverageSortKey = 'unread'; state.coverageSortDir = 'desc'; refresh(); });
-for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); });
+for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); });
 for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).addEventListener(id === 'finding-search' ? 'input' : 'change', () => { if (state.editingFindingId) return; state.findingPage = 1; renderFindings(); });
 $('coverage-search').addEventListener('input', () => { state.coveragePage = 1; renderCoverage(); });
 $('coverage-component').addEventListener('change', () => { state.coveragePage = 1; renderCoverage(); });

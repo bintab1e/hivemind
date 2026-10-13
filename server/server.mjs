@@ -12,7 +12,7 @@ import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mj
 import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
 import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
-import { getSubmission, initializeSubmissions, listSubmissions, retrySubmission, submitSubmission } from './submissions.mjs';
+import { getSubmission, initializeSubmissions, listSubmissions, listVerificationQueue, retrySubmission, submitSubmission } from './submissions.mjs';
 import { startVerifierIpc } from './verifier-ipc.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -869,6 +869,7 @@ export async function startServer(options = {}) {
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
+      if (req.method === 'GET' && url.pathname === '/api/verification-queue') return send(res, 200, listVerificationQueue(db));
       const registryRowMatch = /^\/api\/registry\/rows\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'PATCH' && registryRowMatch) {
         if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to edit registry rows' });

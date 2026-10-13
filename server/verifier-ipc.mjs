@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { HttpError, invalid } from './contract.mjs';
-import { claimSubmission, completeSubmission, failSubmission } from './submissions.mjs';
+import { claimSubmission, completeSubmission, failSubmission, heartbeatWorker, progressSubmission } from './submissions.mjs';
 
 function reply(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -70,6 +70,13 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null) {
             (Object.hasOwn(body, 'target_commit') &&
               (typeof body.target_commit !== 'string' || !/^[a-f0-9]{40}$/.test(body.target_commit)))) invalid('Invalid claim request');
         return reply(res, 200, { job: claimSubmission(db, body.target_commit) });
+      }
+      if (req.method === 'POST' && req.url === '/progress') {
+        const body = await inputJson(req);
+        return reply(res, 200, progressSubmission(db, body?.submission_id, body?.phase, body?.lease_token));
+      }
+      if (req.method === 'POST' && req.url === '/heartbeat') {
+        return reply(res, 200, heartbeatWorker(db, await inputJson(req)));
       }
       if (req.method === 'POST' && req.url === '/complete') {
         const body = await inputJson(req);

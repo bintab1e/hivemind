@@ -83,10 +83,15 @@ test('uses exact original C PoC and fixed guest manifest, sends only post-PoC se
     assert.equal(symbolizedFrames[0].locations[0].line, 17);
     return { verdict: 'supports', reason: 'Matching KASAN frame', trace_line: 'nfsd4_proc_compound+0x4/0x20', source_path: 'fs/nfsd/nfs4proc.c', source_line: 1, poc_line: 1 };
   };
-  assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner }), true);
-  assert.deepEqual(calls.map(call => call.endpoint), ['/claim', '/complete']);
+  assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner,
+    workerId: 'd'.repeat(32) }), true);
+  assert.deepEqual(calls.map(call => call.endpoint), ['/claim', '/heartbeat', '/progress', '/progress', '/progress', '/progress', '/complete', '/heartbeat']);
   assert.deepEqual(calls[0].body, { target_commit: commit });
-  const completed = calls[1].body;
+  assert.deepEqual(calls.filter(call => call.endpoint === '/progress').map(call => call.body.phase),
+    ['static_review', 'qemu_reproduction', 'trace_review', 'finalizing']);
+  assert.equal(calls[1].body.submission_id, id);
+  assert.equal(calls.at(-1).body.submission_id, null);
+  const completed = calls.find(call => call.endpoint === '/complete').body;
   assert.equal(completed.submission_id, id);
   assert.equal(completed.lease_token, leaseToken);
   assert.match(completed.result.server_serial, /^BUG: KASAN: slab-out-of-bounds/);

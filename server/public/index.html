@@ -21,7 +21,7 @@
     <div id="empty" class="empty-state" hidden><h2>분석 대상이 없습니다</h2><p>서버에서 분석 버전과 커밋을 설정해 주세요.</p></div>
 
     <main id="dashboard" hidden>
-      <nav class="tabs" aria-label="분석 메뉴"><button type="button" data-view="findings">신규 취약점</button><button type="button" data-view="coverage">코드 커버리지</button><button type="button" data-view="registry">취약점 관리</button></nav>
+      <nav class="tabs" aria-label="분석 메뉴"><button type="button" data-view="findings">신규 취약점</button><button type="button" data-view="queue">검증 큐</button><button type="button" data-view="coverage">코드 커버리지</button><button type="button" data-view="registry">취약점 관리</button></nav>
 
       <section id="findings-view" class="viewer" aria-labelledby="findings-title">
         <div class="viewer-head"><h2 id="findings-title">신규 취약점</h2><div class="viewer-head-actions"><span id="finding-count" class="count"></span><button id="finding-edit-mode" class="edit-mode-button" type="button" aria-pressed="false">수정 모드</button></div></div>
@@ -38,6 +38,19 @@
         </div>
         <div id="findings" class="table-scroll" role="region" aria-label="취약점 관리 표" tabindex="0"></div>
         <nav id="finding-pagination" class="pagination" aria-label="취약점 페이지" hidden></nav>
+      </section>
+
+      <section id="queue-view" class="viewer" aria-labelledby="queue-title" hidden>
+        <div class="viewer-head"><h2 id="queue-title">검증 큐</h2><span id="queue-updated" class="count"></span></div>
+        <div id="queue-stats" class="stat-strip" aria-label="신규 제출 검증 현황"></div>
+        <div class="coverage-section-heading"><strong>검증 에이전트</strong><span id="queue-worker-count"></span></div>
+        <div id="queue-workers" class="queue-workers" aria-label="검증 에이전트 상태"></div>
+        <div class="coverage-section-heading"><strong>검증 중</strong><span id="queue-active-count"></span></div>
+        <div id="queue-active" class="table-scroll" role="region" aria-label="진행 중인 신규 취약점 검증" tabindex="0"></div>
+        <div class="coverage-section-heading"><strong>검증 대기</strong><span id="queue-pending-count"></span></div>
+        <div id="queue-pending" class="table-scroll" role="region" aria-label="검증 대기 중인 신규 취약점" tabindex="0"></div>
+        <div class="coverage-section-heading"><strong>보완 필요 · 오류</strong><span id="queue-blocked-count"></span></div>
+        <div id="queue-blocked" class="table-scroll" role="region" aria-label="보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
       </section>
 
       <section id="coverage-view" class="viewer" aria-labelledby="coverage-title" hidden>

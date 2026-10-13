@@ -10,6 +10,9 @@ const MAX_SERIAL_BYTES = 600_000;
 const MAX_PENDING_PER_AGENT = 30;
 const MAX_PENDING_TOTAL = 300;
 const MAX_STORED_BYTES = 4_000_000_000;
+const LEASE_MS = 60 * 60_000;
+const WORKER_ONLINE_MS = 60_000;
+const verificationPhases = new Set(['preparing', 'static_review', 'qemu_reproduction', 'trace_review', 'finalizing']);
 const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
 const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+$/;
@@ -54,11 +57,49 @@ export function initializeSubmissions(db) {
       PRIMARY KEY(submission_id, ordinal)
     );
     CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, submitted_at);
+    CREATE TABLE IF NOT EXISTS verifier_workers (
+      worker_id TEXT PRIMARY KEY, target_commit TEXT NOT NULL,
+      current_submission_id TEXT, started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
   `);
   const columns = new Set(db.prepare('PRAGMA table_info(submissions)').all().map(column => column.name));
   if (!columns.has('lease_token')) db.exec('ALTER TABLE submissions ADD COLUMN lease_token TEXT');
   if (!columns.has('fingerprint')) db.exec('ALTER TABLE submissions ADD COLUMN fingerprint TEXT');
+  if (!columns.has('phase')) db.exec('ALTER TABLE submissions ADD COLUMN phase TEXT');
+  if (!columns.has('phase_updated_at')) db.exec('ALTER TABLE submissions ADD COLUMN phase_updated_at TEXT');
+  if (!columns.has('last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN last_activity_at TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
+}
+
+export function listVerificationQueue(db) {
+  const fields = `id AS submission_id, agent_id, project, title, status, reason, submitted_at,
+    claimed_at, completed_at, attempts, management_id, phase, phase_updated_at, last_activity_at,
+    json_extract(metadata_json, '$.repo_commit') AS target_commit`;
+  const rows = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('pending', 'processing') ORDER BY submitted_at, id`).all();
+  const activityCutoff = Date.now() - WORKER_ONLINE_MS;
+  const active = [], pending = [];
+  for (const row of rows) {
+    const lastActivity = Date.parse(row.last_activity_at || row.claimed_at || '');
+    const stale = row.status === 'processing' && (!Number.isFinite(lastActivity) || lastActivity < activityCutoff);
+    const item = { ...row, phase: row.status === 'pending' ? 'queued' : row.phase,
+      stale, position: null };
+    if (row.status === 'processing') active.push(item);
+    else if (row.status === 'pending') { item.position = pending.length + 1; pending.push(item); }
+  }
+  const blocked = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error')
+    ORDER BY completed_at DESC, id DESC LIMIT 50`).all().map(row => ({ ...row, stale: false, position: null }));
+  const blockedCount = db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error')").get().count;
+  const onlineCutoff = Date.now() - WORKER_ONLINE_MS;
+  const processingIds = new Set(active.map(row => row.submission_id));
+  const recent = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+  const workers = db.prepare('SELECT worker_id, target_commit, current_submission_id, started_at, last_seen_at FROM verifier_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 30').all(recent)
+    .map(row => {
+      const online = Date.parse(row.last_seen_at) >= onlineCutoff;
+      const current = online && processingIds.has(row.current_submission_id) ? row.current_submission_id : null;
+      return { ...row, current_submission_id: current, status: online ? current ? 'busy' : 'idle' : 'offline' };
+    });
+  return { counts: { processing: active.length, pending: pending.length, blocked: blockedCount },
+    active, pending, blocked, blocked_has_more: blockedCount > blocked.length, workers };
 }
 
 export function submitSubmission(db, input, agentId) {
@@ -129,7 +170,7 @@ export function retrySubmission(db, id) {
   const row = db.prepare('SELECT status FROM submissions WHERE id = ?').get(id);
   if (!row) invalid('Submission not found', 404);
   if (!['error', 'needs_evidence', 'needs_review'].includes(row.status)) invalid('Submission cannot be retried', 409);
-  db.prepare("UPDATE submissions SET status = 'pending', reason = NULL, claimed_at = NULL, completed_at = NULL, lease_token = NULL WHERE id = ?").run(id);
+  db.prepare("UPDATE submissions SET status = 'pending', reason = NULL, claimed_at = NULL, completed_at = NULL, lease_token = NULL, phase = NULL, phase_updated_at = NULL, last_activity_at = NULL WHERE id = ?").run(id);
   return getSubmission(db, id);
 }
 
@@ -137,15 +178,16 @@ export function claimSubmission(db, targetCommit = null) {
   if (targetCommit !== null && (typeof targetCommit !== 'string' || !/^[a-f0-9]{40}$/.test(targetCommit))) invalid('Invalid target_commit');
   db.exec('BEGIN IMMEDIATE');
   try {
-    const stale = new Date(Date.now() - 60 * 60_000).toISOString();
-    db.prepare("UPDATE submissions SET status = 'pending', reason = 'worker lease expired', claimed_at = NULL, lease_token = NULL WHERE status = 'processing' AND claimed_at < ? AND attempts < 3").run(stale);
-    db.prepare("UPDATE submissions SET status = 'error', reason = 'worker lease expired after retries', completed_at = ?, lease_token = NULL WHERE status = 'processing' AND claimed_at < ? AND attempts >= 3").run(now(), stale);
+    const stale = new Date(Date.now() - LEASE_MS).toISOString();
+    db.prepare("UPDATE submissions SET status = 'pending', reason = 'worker lease expired', claimed_at = NULL, lease_token = NULL, phase = NULL, phase_updated_at = NULL, last_activity_at = NULL WHERE status = 'processing' AND COALESCE(last_activity_at, claimed_at) < ? AND attempts < 3").run(stale);
+    db.prepare("UPDATE submissions SET status = 'error', reason = 'worker lease expired after retries', completed_at = ?, lease_token = NULL, phase = NULL WHERE status = 'processing' AND COALESCE(last_activity_at, claimed_at) < ? AND attempts >= 3").run(now(), stale);
     const row = targetCommit === null
       ? db.prepare("SELECT * FROM submissions WHERE status = 'pending' ORDER BY submitted_at, id LIMIT 1").get()
       : db.prepare("SELECT * FROM submissions WHERE status = 'pending' AND json_extract(metadata_json, '$.repo_commit') = ? ORDER BY submitted_at, id LIMIT 1").get(targetCommit);
     if (!row) { db.exec('COMMIT'); return null; }
     const leaseToken = randomBytes(32).toString('hex');
-    db.prepare("UPDATE submissions SET status = 'processing', claimed_at = ?, lease_token = ?, attempts = attempts + 1 WHERE id = ?").run(now(), leaseToken, row.id);
+    const claimedAt = now();
+    db.prepare("UPDATE submissions SET status = 'processing', claimed_at = ?, lease_token = ?, attempts = attempts + 1, phase = 'preparing', phase_updated_at = ?, last_activity_at = ? WHERE id = ?").run(claimedAt, leaseToken, claimedAt, claimedAt, row.id);
     const files = db.prepare('SELECT name, kind, content FROM submission_artifacts WHERE submission_id = ? ORDER BY ordinal').all(row.id)
       .map(file => ({ name: file.name, kind: file.kind, content_base64: Buffer.from(file.content).toString('base64') }));
     db.exec('COMMIT');
@@ -233,6 +275,44 @@ function mark(db, id, status, reason, summary) {
 function checkLease(row, token) {
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token) ||
       !row?.lease_token || !timingSafeEqual(Buffer.from(row.lease_token, 'hex'), Buffer.from(token, 'hex'))) invalid('Invalid or expired verifier lease', 409);
+}
+
+export function progressSubmission(db, id, phase, leaseToken) {
+  if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id) || !verificationPhases.has(phase)) invalid('Invalid verifier progress');
+  const row = db.prepare('SELECT status, lease_token FROM submissions WHERE id = ?').get(id);
+  if (row?.status !== 'processing') invalid('Submission is not processing', 409);
+  checkLease(row, leaseToken);
+  const at = now();
+  db.prepare('UPDATE submissions SET phase = ?, phase_updated_at = CASE WHEN phase = ? THEN phase_updated_at ELSE ? END, last_activity_at = ? WHERE id = ?')
+    .run(phase, phase, at, at, id);
+  return { submission_id: id, phase, phase_updated_at: db.prepare('SELECT phase_updated_at FROM submissions WHERE id = ?').get(id).phase_updated_at };
+}
+
+export function heartbeatWorker(db, input) {
+  const workerId = input?.worker_id;
+  const targetCommit = input?.target_commit;
+  const submissionId = input?.submission_id ?? null;
+  if (typeof workerId !== 'string' || !/^[a-f0-9]{32}$/.test(workerId) ||
+      typeof targetCommit !== 'string' || !/^[a-f0-9]{40}$/.test(targetCommit) ||
+      submissionId !== null && (typeof submissionId !== 'string' || !/^[a-f0-9]{64}$/.test(submissionId))) invalid('Invalid worker heartbeat');
+  if (submissionId !== null) {
+    const row = db.prepare("SELECT status, lease_token, json_extract(metadata_json, '$.repo_commit') AS target_commit FROM submissions WHERE id = ?").get(submissionId);
+    if (row?.status !== 'processing' || row.target_commit !== targetCommit) invalid('Submission is not processing on this kernel', 409);
+    checkLease(row, input.lease_token);
+  } else if (input.lease_token != null) invalid('Idle heartbeat cannot include a lease token');
+  const at = now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (submissionId !== null) db.prepare('UPDATE submissions SET last_activity_at = ? WHERE id = ?').run(at, submissionId);
+    db.prepare(`INSERT INTO verifier_workers (worker_id, target_commit, current_submission_id, started_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(worker_id) DO UPDATE SET target_commit = excluded.target_commit,
+      current_submission_id = excluded.current_submission_id, last_seen_at = excluded.last_seen_at`)
+      .run(workerId, targetCommit, submissionId, at, at);
+    db.prepare('DELETE FROM verifier_workers WHERE last_seen_at < ?').run(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  return { worker_id: workerId, last_seen_at: at };
 }
 
 export function failSubmission(db, id, reason, leaseToken) {

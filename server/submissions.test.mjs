@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openDatabase, setActiveTrack, startServer } from './server.mjs';
-import { claimSubmission, completeSubmission, getSubmission, submitSubmission } from './submissions.mjs';
+import { claimSubmission, completeSubmission, getSubmission, heartbeatWorker, listVerificationQueue, progressSubmission, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
 import { postJson } from './verifier/worker.mjs';
 
@@ -104,6 +104,54 @@ test('a pinned verifier claims only submissions for its full kernel commit', t =
   assert.equal(claimSubmission(db, commit).submission_id, first);
 });
 
+test('queue reports persisted stages, compatible workers, lease activity and interrupted work truthfully', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-queue-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  const first = submitSubmission(db, raw('queue-first'), 'pc01').submission_id;
+  const second = submitSubmission(db, raw('queue-second'), 'pc02').submission_id;
+  const unmatched = submitSubmission(db, { ...raw('queue-unmatched'), metadata: { version_id: 'unknown' } }, 'pc03').submission_id;
+  for (const [index, id] of [first, second, unmatched].entries()) {
+    db.prepare('UPDATE submissions SET submitted_at = ? WHERE id = ?').run(`2026-10-13T00:00:0${index}.000Z`, id);
+  }
+  const workerId = 'd'.repeat(32);
+  let queue = listVerificationQueue(db);
+  assert.deepEqual(queue.counts, { processing: 0, pending: 3, blocked: 0 });
+  assert.deepEqual(queue.pending.map(row => row.position), [1, 2, 3]);
+  assert.equal(queue.pending.find(row => row.submission_id === unmatched).target_commit, null);
+  const claimed = claimSubmission(db, commit);
+  assert.equal(claimed.submission_id, first);
+  assert.throws(() => progressSubmission(db, first, 'static_review', '0'.repeat(64)), /lease/);
+  assert.throws(() => progressSubmission(db, first, 'invented_phase', claimed.lease_token), /progress/);
+  progressSubmission(db, first, 'static_review', claimed.lease_token);
+  assert.throws(() => heartbeatWorker(db, { worker_id: workerId, target_commit: commit, submission_id: first, lease_token: '0'.repeat(64) }), /lease/);
+  heartbeatWorker(db, { worker_id: workerId, target_commit: commit, submission_id: first, lease_token: claimed.lease_token });
+  queue = listVerificationQueue(db);
+  assert.equal(queue.active[0].phase, 'static_review');
+  assert.equal(queue.active[0].stale, false);
+  assert.equal(queue.workers[0].status, 'busy');
+  assert.equal(queue.workers[0].current_submission_id, first);
+  assert.equal(queue.active[0].lease_token, undefined);
+  assert.equal(queue.active[0].report, undefined);
+  db.prepare('UPDATE submissions SET last_activity_at = ? WHERE id = ?').run(new Date(Date.now() - 120_000).toISOString(), first);
+  assert.equal(listVerificationQueue(db).active[0].stale, true);
+  assert.equal(claimSubmission(db, commit).submission_id, second);
+  assert.equal(getSubmission(db, first).status, 'processing');
+  heartbeatWorker(db, { worker_id: workerId, target_commit: commit, submission_id: first, lease_token: claimed.lease_token });
+  assert.equal(listVerificationQueue(db).active.find(row => row.submission_id === first).stale, false);
+  heartbeatWorker(db, { worker_id: workerId, target_commit: commit });
+  assert.equal(listVerificationQueue(db).workers[0].status, 'idle');
+  db.prepare('UPDATE verifier_workers SET last_seen_at = ? WHERE worker_id = ?').run('2000-01-01T00:00:00.000Z', workerId);
+  assert.equal(listVerificationQueue(db).workers.length, 0);
+  db.prepare('UPDATE submissions SET last_activity_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', first);
+  assert.equal(listVerificationQueue(db).active.find(row => row.submission_id === first).stale, true);
+  const reclaimed = claimSubmission(db, commit);
+  assert.equal(reclaimed.submission_id, first);
+  assert.notEqual(reclaimed.lease_token, claimed.lease_token);
+  assert.throws(() => progressSubmission(db, first, 'static_review', claimed.lease_token), /lease/);
+  assert.equal(listVerificationQueue(db).active.find(row => row.submission_id === first).phase, 'preparing');
+});
+
 test('expired leases, unregistered targets, and unrelated traces cannot approve a submission', t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-gates-'));
   const db = openDatabase(path.join(directory, 'db.sqlite3'));
@@ -149,13 +197,15 @@ test('same kernel crash location is held for duplicate review before allocating 
 test('agent HTTP intake and status require its token; verifier socket is local', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-http-submission-'));
   const socketPath = path.join(directory, 'verifier.sock');
-  const { server, verifierServer, db, url } = await startServer({ port: 0, dataDir: directory, verifierSocketPath: socketPath });
+  const { server, verifierServer, db, url } = await startServer({ port: 0, dataDir: directory, verifierSocketPath: socketPath,
+    dashboardPassword: 'queue-test-password' });
   t.after(async () => {
     await new Promise(resolve => server.close(resolve));
     if (verifierServer?.listening) await new Promise(resolve => verifierServer.close(resolve));
     db.close(); rmSync(directory, { recursive: true, force: true });
   });
   const body = JSON.stringify(raw('http-1'));
+  assert.equal((await fetch(`${url}/api/verification-queue`)).status, 401);
   assert.equal((await fetch(`${url}/v1/submissions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })).status, 401);
   const { issueAgentToken } = await import('./server.mjs');
   const { token } = issueAgentToken(db, 'pc01');
@@ -169,5 +219,15 @@ test('agent HTTP intake and status require its token; verifier socket is local',
   await assert.rejects(postJson(socketPath, '/claim', { target_commit: [commit] }), error => error.status === 400);
   assert.equal(getSubmission(db, id).status, 'pending');
   assert.equal((await postJson(socketPath, '/claim', { target_commit: 'b'.repeat(40) })).job, null);
-  assert.equal((await postJson(socketPath, '/claim', { target_commit: commit })).job.submission_id, id);
+  const claimed = (await postJson(socketPath, '/claim', { target_commit: commit })).job;
+  assert.equal(claimed.submission_id, id);
+  await assert.rejects(postJson(socketPath, '/progress', { submission_id: id, lease_token: '0'.repeat(64), phase: 'static_review' }), error => error.status === 409);
+  assert.equal((await postJson(socketPath, '/progress', { submission_id: id, lease_token: claimed.lease_token, phase: 'static_review' })).phase, 'static_review');
+  await postJson(socketPath, '/heartbeat', { worker_id: 'd'.repeat(32), target_commit: commit, submission_id: id, lease_token: claimed.lease_token });
+  const auth = { Authorization: `Basic ${Buffer.from('viewer:queue-test-password').toString('base64')}` };
+  const queue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
+  assert.equal(queue.active[0].phase, 'static_review');
+  assert.equal(queue.workers[0].status, 'busy');
+  assert.equal(JSON.stringify(queue).includes(claimed.lease_token), false);
+  assert.equal(JSON.stringify(queue).includes(source), false);
 });

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,7 +37,7 @@ function configuration(env) {
 }
 
 export function postJson(socketPath, endpoint, body) {
-  if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail'].includes(endpoint)) throw new WorkerError('invalid_request');
+  if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail', '/progress', '/heartbeat'].includes(endpoint)) throw new WorkerError('invalid_request');
   const encoded = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({ socketPath, path: endpoint, method: 'POST', timeout: 30_000,
@@ -110,7 +111,8 @@ function serialExcerpt(file, startOffset) {
 const inconclusive = reason => ({ status: 'inconclusive', reason });
 
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
-  relevanceReviewer = reviewReproductionWithCodex, symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction } = {}) {
+  relevanceReviewer = reviewReproductionWithCodex, symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction,
+  onPhase = async () => {} } = {}) {
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
   let reproduction = inconclusive('Reproduction was not run');
   let serverSerial = '';
@@ -125,6 +127,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     if (!/^[a-f0-9]{64}$/.test(kernelInfo.vmlinuxSha256 || '')) {
       return { review, reproduction: inconclusive('Built vmlinux is missing SHA-pinned debug information'), server_serial: '' };
     }
+    await onPhase('static_review');
     const trustedSource = await sourceLoader(config.kernelSource, targetCommit, submission);
     review = await reviewer(submission, { cliPath: config.cliPath, trustedSource });
     review.relevance = { verdict: 'uncertain', reason: 'Reproduction was not observed', trace_line: null,
@@ -149,6 +152,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       nfsVersion, mount: true, expected: { stream: 'server', contains: 'BUG: KASAN:' },
     }), { mode: 0o600 });
     const outputDir = path.join(privateDir, 'output');
+    await onPhase('qemu_reproduction');
     const result = await runner({ bundleDir, kernelImage: config.kernelImage, kernelInfoPath: config.kernelInfoPath,
       rootfsImage: config.rootfsImage, outputDir });
     serverSerial = serialExcerpt(result.evidence.serverSerialPath, result.observation?.serverEvidenceStartOffset);
@@ -161,6 +165,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     }
     if (reproduction.status === 'observed' && !serverSerial.includes('BUG: KASAN:')) reproduction = inconclusive('Server KASAN trace is missing');
     if (reproduction.status === 'observed' && serverSerial.includes('BUG: KASAN:')) {
+      await onPhase('trace_review');
       const symbolizedFrames = await symbolizer({ serverSerial, vmlinuxPath: config.vmlinuxImage, kernelInfo, sourceDir: config.kernelSource });
       review.relevance = await relevanceReviewer({ review, serverSerial, pocSource: poc.source, trustedSource, symbolizedFrames }, { cliPath: config.cliPath });
       if (review.relevance.verdict === 'supports') {
@@ -186,7 +191,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
   return { review, reproduction, server_serial: serverSerial };
 }
 
-export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner } = {}) {
+export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, workerId = null } = {}) {
   let targetCommit;
   try {
     targetCommit = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8')).sourceCommit;
@@ -194,35 +199,54 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
   if (!/^[a-f0-9]{40}$/.test(targetCommit || '')) throw new WorkerError('kernel_commit_unavailable');
   const claimed = await transport(config.socketPath, '/claim', { target_commit: targetCommit });
   if (!claimed || !Object.hasOwn(claimed, 'job')) throw new WorkerError('invalid_response');
-  if (!claimed.job) return false;
+  const heartbeat = (submissionId = null, leaseToken = null) => workerId
+    ? transport(config.socketPath, '/heartbeat', { worker_id: workerId, target_commit: targetCommit,
+      submission_id: submissionId, ...(leaseToken ? { lease_token: leaseToken } : {}) }).catch(() => {})
+    : Promise.resolve();
+  if (!claimed.job) { await heartbeat(); return false; }
   if (!/^[a-f0-9]{64}$/.test(claimed.job.lease_token || '')) throw new WorkerError('invalid_response');
-  const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner });
-  if (Array.isArray(result.review?.normalized?.logs)) {
-    result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);
-  }
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await transport(config.socketPath, '/complete', { submission_id: claimed.job.submission_id, lease_token: claimed.job.lease_token, result });
-      return true;
-    } catch (error) {
-      lastError = error;
-      if (error.status >= 400 && error.status < 500) break;
-      if (attempt < 2) await delay(1000 * (attempt + 1));
+  const submissionId = claimed.job.submission_id;
+  const leaseToken = claimed.job.lease_token;
+  await heartbeat(submissionId, leaseToken);
+  const timer = workerId ? setInterval(() => { void heartbeat(submissionId, leaseToken); }, 20_000) : null;
+  timer?.unref();
+  const onPhase = phase => workerId
+    ? transport(config.socketPath, '/progress', { submission_id: submissionId, lease_token: leaseToken, phase }).catch(() => {})
+    : Promise.resolve();
+  try {
+    const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, onPhase });
+    await onPhase('finalizing');
+    if (Array.isArray(result.review?.normalized?.logs)) {
+      result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);
     }
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await transport(config.socketPath, '/complete', { submission_id: submissionId, lease_token: leaseToken, result });
+        return true;
+      } catch (error) {
+        lastError = error;
+        if (error.status >= 400 && error.status < 500) break;
+        if (attempt < 2) await delay(1000 * (attempt + 1));
+      }
+    }
+    try { await transport(config.socketPath, '/fail', { submission_id: submissionId, lease_token: leaseToken, reason: 'Verification result delivery failed' }); }
+    catch { throw new WorkerError('completion_and_failure_delivery_failed'); }
+    if (lastError) throw new WorkerError('completion_delivery_failed');
+    return true;
+  } finally {
+    if (timer) clearInterval(timer);
+    await heartbeat();
   }
-  try { await transport(config.socketPath, '/fail', { submission_id: claimed.job.submission_id, lease_token: claimed.job.lease_token, reason: 'Verification result delivery failed' }); }
-  catch { throw new WorkerError('completion_and_failure_delivery_failed'); }
-  if (lastError) throw new WorkerError('completion_delivery_failed');
-  return true;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const config = configuration(process.env);
+    const workerId = randomBytes(16).toString('hex');
     while (true) {
       try {
-        const worked = await runWorkerOnce({ config });
+        const worked = await runWorkerOnce({ config, workerId });
         if (!worked) await delay(5000);
       } catch (error) {
         console.error(`Verifier worker: ${error instanceof WorkerError ? error.code : 'job_error'}`);
