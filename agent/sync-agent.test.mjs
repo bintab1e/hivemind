@@ -25,6 +25,8 @@ test('coverage scope follows NFS includes and reports unavailable headers', asyn
     writeFileSync(path.join(root, 'include/linux/types.h'), '/* types */\n');
     writeFileSync(path.join(root, 'include/linux/unrelated.h'), '/* unrelated */\n');
     writeFileSync(path.join(root, 'net/sunrpc/svc.c'), '/* RPC source */\n');
+    writeFileSync(path.join(root, 'fs/nfsd/Makefile'), 'obj-y += main.o\n');
+    writeFileSync(path.join(root, 'net/sunrpc/Kconfig'), 'config SUNRPC\n');
     const scope = await buildCoverageScope(root, ['fs/nfsd/', 'net/sunrpc/']);
     assert.deepEqual([...scope.files].sort(), ['fs/nfsd/main.c', 'include/linux/sunrpc/svc.h', 'include/linux/types.h', 'net/sunrpc/svc.c']);
     assert.deepEqual([...scope.missingIncludes], ['net/missing.h']);

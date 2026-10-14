@@ -9,9 +9,9 @@ export async function buildCoverageScope(repoRoot, prefixes) {
   const missingIncludes = new Set();
   const add = name => {
     const normalized = path.posix.normalize(name.replaceAll('\\', '/'));
-    if (normalized.startsWith('../') || files.has(normalized)) return;
+    if (!/\.[ch]$/.test(normalized) || normalized.startsWith('../') || files.has(normalized)) return;
     files.add(normalized);
-    if (/\.[ch]$/.test(normalized)) queued.push(normalized);
+    queued.push(normalized);
   };
   const walk = async directory => {
     for (const entry of await fs.readdir(path.join(repoRoot, directory), { withFileTypes: true })) {
