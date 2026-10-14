@@ -900,6 +900,12 @@ export async function startServer(options = {}) {
         res.end(file.patch);
         return;
       }
+      const patchReviewPageMatch = /^\/patch-reviews\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (patchReviewPageMatch && req.method === 'GET') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
+        if (!db.prepare('SELECT 1 FROM patch_reviews WHERE id = ?').get(patchReviewPageMatch[1])) return send(res, 404, { error: 'Patch review not found' });
+        return send(res, 200, fs.readFileSync(path.join(publicDir, 'patch-review.html'), 'utf8'), 'text/html; charset=utf-8');
+      }
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions/upload-targets') return send(res, 200, { targets: uploadedTargets(db) });
       if (req.method === 'POST' && url.pathname === '/api/submissions/upload') {
@@ -992,7 +998,7 @@ export async function startServer(options = {}) {
         const row = db.prepare('SELECT id, kind, agent_id, title, markdown FROM events WHERE id = ?').get(url.pathname.slice('/api/events/'.length));
         return row ? send(res, 200, { ...row, markdown: row.kind === 'finding' ? readFrontMatter(row.markdown).body : row.markdown }) : send(res, 404, { error: 'Event not found' });
       }
-      const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
+      const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/patch-review.js': ['patch-review.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
       if (req.method === 'GET' && staticFiles[url.pathname]) {
         const [file, type] = staticFiles[url.pathname];
         return send(res, 200, fs.readFileSync(path.join(publicDir, file), 'utf8'), type);

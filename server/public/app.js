@@ -1089,7 +1089,6 @@ const patchStatusLabels = {
 let patchFinding = null;
 let patchTargets = [];
 let patchSubmitting = false;
-let patchDetailId = 0;
 
 function renderPatchView() {
   const findings = (state.registry?.findings || []).filter(item => item.management_id && item.target === 'knfsd')
@@ -1135,10 +1134,9 @@ function renderPatchView() {
     upload.addEventListener('click', () => openPatchUpload(finding));
     actions.append(upload);
     if (review) {
-      const result = element('button', 'row-edit-button', '결과 보기');
-      result.type = 'button';
+      const result = element('a', 'row-edit-button', '결과 보기');
+      result.href = `/patch-reviews/${encodeURIComponent(review.id)}`;
       result.setAttribute('aria-label', `${finding.management_id} Sashiko 결과 보기`);
-      result.addEventListener('click', () => openPatchResult(review));
       actions.append(result);
     }
     row.append(actions);
@@ -1227,126 +1225,6 @@ async function submitPatch(event) {
     patchSubmitting = false;
     $('patch-submit-button').textContent = 'Sashiko 검토 요청';
     $('patch-submit-button').disabled = !patchTargets.length;
-  }
-}
-
-const sashikoStatusLabels = { clean: '지적 사항 없음', issues_found: '지적 사항 있음', error: '검토 오류' };
-const patchApplyLabels = { applied: '적용됨', present: '기준 트리에 있음', failed: '적용 실패', error: '적용 오류' };
-const patchText = (value, fallback = '—') => typeof value === 'string' && value.trim() ? value : fallback;
-
-function patchReviewLocations(item) {
-  if (!Array.isArray(item?.locations) || !item.locations.length) return null;
-  const list = element('div', 'patch-review-locations');
-  for (const location of item.locations) {
-    const point = element('div', 'patch-review-location');
-    const file = patchText(location?.file, '위치 미상');
-    const line = Number.isInteger(location?.line) && location.line > 0 ? `:${location.line}` : '';
-    const symbol = patchText(location?.function_or_symbol, '');
-    point.append(element('strong', '', `${file}${line}${symbol ? ` · ${symbol}` : ''}`));
-    if (patchText(location?.code_snippet, '')) point.append(element('pre', '', location.code_snippet));
-    if (patchText(location?.why_this_location_matters, '')) point.append(element('p', '', location.why_this_location_matters));
-    list.append(point);
-  }
-  return list;
-}
-
-function appendPatchReviewItems(content, heading, items, concern = false) {
-  if (!items.length) return;
-  const section = element('section', 'detail-section patch-review-section');
-  section.append(element('h3', '', `${heading} · ${number(items.length)}건`));
-  for (const [index, item] of items.entries()) {
-    const card = element('article', 'patch-review-card');
-    const head = element('div', 'patch-review-head');
-    head.append(element('strong', '', patchText(concern ? item?.description : item?.problem,
-      patchText(item?.title, `${concern ? '추가 우려' : '지적 사항'} ${index + 1}`))));
-    const type = patchText(concern ? item?.type : item?.severity, '');
-    if (type) head.append(element('span', 'patch-review-tag', type));
-    if (item?.preexisting === true) head.append(element('span', 'patch-review-tag', '패치 이전부터 존재'));
-    card.append(head);
-    const explanation = patchText(concern ? item?.reasoning : item?.severity_explanation,
-      patchText(item?.explanation, ''));
-    if (explanation) card.append(element('p', 'patch-review-explanation', explanation));
-    const locations = patchReviewLocations(item);
-    if (locations) card.append(locations);
-    section.append(card);
-  }
-  content.append(section);
-}
-
-async function openPatchResult(item) {
-  const id = ++patchDetailId;
-  $('patch-result-title').textContent = 'Sashiko 검토 결과';
-  $('patch-result-finding').textContent = `${item.management_id} · ${item.filename}`;
-  const content = $('patch-result-content');
-  clear(content);
-  content.append(element('p', '', '검토 결과를 불러오는 중…'));
-  $('patch-result-dialog').showModal();
-  try {
-    const { review } = await api(`/api/patch-reviews/${encodeURIComponent(item.id)}`).then(response => response.json());
-    if (id !== patchDetailId) return;
-    if (!review || !review.id) throw new Error('검토 결과 형식이 올바르지 않습니다.');
-    clear(content);
-    const summary = element('div', 'patch-result-summary');
-    summary.append(detailFact('검토 상태', patchStatusLabels[review.status] || review.status),
-      detailFact('대상 커널', `${review.track_id || '—'} · ${review.base_commit || '—'}`),
-      detailFact('제출 / 완료', `${when(review.submitted_at)} / ${when(review.completed_at)}`));
-    content.append(summary);
-    const download = element('a', 'detail-link', `${review.filename} 다운로드`);
-    download.href = `/api/patch-reviews/${encodeURIComponent(review.id)}/file`;
-    download.download = review.filename;
-    content.append(download);
-    if (review.reason) {
-      const reason = element('p', review.status === 'error' ? 'queue-error' : '', review.reason);
-      if (review.status === 'error') reason.setAttribute('role', 'alert');
-      content.append(reason);
-    }
-    if (review.result != null) {
-      const result = review.result;
-      const detail = result?.review && typeof result.review === 'object' ? result.review : result;
-      const findings = Array.isArray(result?.findings) ? result.findings : Array.isArray(detail?.findings) ? detail.findings : [];
-      const concerns = Array.isArray(result?.concerns) ? result.concerns : Array.isArray(detail?.concerns) ? detail.concerns : [];
-      const verdict = element('section', 'detail-section patch-review-section');
-      verdict.append(element('h3', '', 'Sashiko 검토 판정'));
-      verdict.append(element('p', 'patch-review-verdict', sashikoStatusLabels[result?.status] || patchStatusLabels[review.status] || patchText(result?.status, '검토 결과 확인')));
-      if (result?.partial) verdict.append(element('p', 'queue-error', '일부 단계만 검토되었습니다. 아래 오류를 확인해 주세요.'));
-      const baseline = patchText(result?.baseline, '');
-      if (baseline && baseline !== review.base_commit) verdict.append(element('p', '', `Sashiko 기준 커밋: ${baseline}`));
-      const reviewSummary = patchText(detail?.summary, '');
-      if (reviewSummary) verdict.append(element('p', 'patch-review-explanation', reviewSummary));
-      content.append(verdict);
-      if (result?.error) {
-        const error = element('p', 'queue-error', String(result.error));
-        error.setAttribute('role', 'alert');
-        content.append(error);
-      }
-      if (Array.isArray(result?.patches) && result.patches.length) {
-        const section = element('section', 'detail-section patch-review-section');
-        section.append(element('h3', '', `패치 적용 · ${number(result.patches.length)}건`));
-        for (const [index, patch] of result.patches.entries()) {
-          const card = element('div', 'patch-review-card');
-          card.append(element('strong', '', patchText(patch?.subject, `패치 ${patch?.index || index + 1}`)));
-          card.append(element('p', '', `${patchApplyLabels[patch?.status] || patchText(patch?.status, '상태 미상')}${patchText(patch?.method, '') ? ` · ${patch.method}` : ''}`));
-          if (patch?.error) card.append(element('p', 'queue-error', String(patch.error)));
-          section.append(card);
-        }
-        content.append(section);
-      }
-      appendPatchReviewItems(content, 'Sashiko 지적 사항', findings);
-      if (!findings.length && result?.status === 'clean') content.append(element('p', 'patch-review-empty', 'Sashiko 지적 사항이 없습니다.'));
-      appendPatchReviewItems(content, '추가 우려 사항', concerns, true);
-      if ([result?.tokens_in, result?.tokens_out, result?.tokens_cached].some(Number.isFinite)) {
-        const usage = element('section', 'detail-section patch-review-section');
-        usage.append(element('h3', '', '검토 사용량'));
-        const tokens = value => Number.isFinite(value) ? number(value) : '—';
-        usage.append(element('p', '', `입력 ${tokens(result.tokens_in)} · 출력 ${tokens(result.tokens_out)} · 캐시 ${tokens(result.tokens_cached)} 토큰`));
-        content.append(usage);
-      }
-      const raw = element('details', 'artifact-preview');
-      raw.append(element('summary', '', 'Sashiko 원본 결과 보기'), element('pre', '', JSON.stringify(review.result, null, 2)));
-      content.append(raw);
-    } else content.append(element('p', '', '아직 Sashiko 결과가 없습니다. 검토 상태는 자동 갱신됩니다.'));
-  } catch (error) {
-    if (id === patchDetailId) { clear(content); content.append(element('p', 'queue-error', `검토 결과를 열지 못했습니다: ${error.message}`)); }
   }
 }
 
@@ -1488,7 +1366,6 @@ $('patch-upload-dialog').addEventListener('click', event => {
   if (event.target === event.currentTarget && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) event.currentTarget.close();
 });
 $('patch-upload-form').addEventListener('submit', submitPatch);
-$('close-patch-result').addEventListener('click', () => $('patch-result-dialog').close());
 $('finding-edit-mode').addEventListener('click', () => {
   if (state.editingFindingId) return;
   state.editMode = !state.editMode;

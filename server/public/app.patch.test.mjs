@@ -6,7 +6,7 @@ import vm from 'node:vm';
 test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko review', async () => {
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-  for (const id of ['patch-view', 'patch-list', 'patch-upload-dialog', 'patch-upload-form', 'patch-result-dialog']) {
+  for (const id of ['patch-view', 'patch-list', 'patch-upload-dialog', 'patch-upload-form']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /data-view="patch"/);
@@ -23,10 +23,10 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
   });
   for (const id of ['patch-search', 'patch-count', 'patch-error', 'patch-list',
     'patch-upload-finding', 'patch-upload-form', 'patch-upload-result', 'patch-track', 'patch-file',
-    'patch-submit-button', 'patch-result-title', 'patch-result-finding', 'patch-result-content']) {
+    'patch-submit-button']) {
     nodes.set(id, makeElement(id === 'patch-track' ? 'select' : 'div'));
   }
-  for (const id of ['patch-upload-dialog', 'patch-result-dialog']) {
+  for (const id of ['patch-upload-dialog']) {
     nodes.set(id, { open: false, showModal() { this.open = true; }, close() { this.open = false; } });
   }
   nodes.get('patch-upload-form').reset = () => { nodes.get('patch-file').files = []; nodes.get('patch-track').value = ''; };
@@ -37,20 +37,6 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
     data: { selected: { track_id: 'rc' } } };
   const calls = [];
   let reviews = [];
-  let reviewResult = {
-    status: 'issues_found', baseline: 'a'.repeat(40),
-    patches: [{ index: 1, status: 'applied', method: 'checkout', subject: 'knfsd: fix lifetime' }],
-    findings: [{
-      problem: '<script>alert(1)</script>', severity: 'High',
-      severity_explanation: 'Missing reference count\ncan cause use-after-free.', preexisting: false,
-      locations: [{ file: 'fs/nfsd/nfs4state.c', function_or_symbol: 'nfsd4_put', line: 42,
-        code_snippet: 'put_client(client);', why_this_location_matters: 'The final reference is dropped here.' }],
-    }],
-    concerns: [{ type: 'Race', description: 'Callback lifetime needs review',
-      reasoning: 'The timer can run after cleanup.', preexisting: true,
-      locations: [{ file: 'fs/nfsd/nfs4state.c', line: 48, code_snippet: 'mod_timer(&client->timer);' }] }],
-    tokens_in: 1200, tokens_out: 300, tokens_cached: 400,
-  };
   let view = 'patch';
   const context = {
     document: { getElementById: id => nodes.get(id), createElement: makeElement },
@@ -69,10 +55,6 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
         reviews = [review];
         return { json: async () => review };
       }
-      if (path === `/api/patch-reviews/${'c'.repeat(64)}`) return { json: async () => ({ review: {
-        ...reviews[0], status: 'findings', base_commit: 'a'.repeat(40), completed_at: '2026-10-14T00:05:00Z',
-        result: reviewResult,
-      } }) };
       throw new Error(`Unexpected URL: ${path}`);
     },
   };
@@ -84,7 +66,7 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
     const when = value => value || '—';
     const detailFact = (label, value) => element('div', '', label + ': ' + value);
     ${source.slice(start, end)}
-    globalThis.patch = { renderPatchView, openPatchUpload, submitPatch, openPatchResult };
+    globalThis.patch = { renderPatchView, openPatchUpload, submitPatch };
   `, context);
   context.patch.renderPatchView();
   const resultText = node => [node.textContent, ...node.children.map(resultText)].join(' ');
@@ -112,31 +94,11 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
   });
   assert.equal(state.patchReviews.length, 1);
   assert.match(nodes.get('patch-upload-result').textContent, /패치 접수/);
-  await context.patch.openPatchResult(reviews[0]);
-  const resultContent = nodes.get('patch-result-content');
-  const visibleText = node => node.tagName === 'details' ? '' : [node.textContent, ...node.children.map(visibleText)].join(' ');
-  const visible = visibleText(resultContent);
-  for (const fragment of ['Sashiko 검토 판정', '패치 적용', 'knfsd: fix lifetime',
-    'Sashiko 지적 사항', '<script>alert(1)</script>', 'High', 'Missing reference count',
-    'fs/nfsd/nfs4state.c:42', 'nfsd4_put', 'put_client(client);',
-    'The final reference is dropped here.', '추가 우려 사항', 'Callback lifetime needs review',
-    'The timer can run after cleanup.', '패치 이전부터 존재', '입력 1,200', '출력 300',
-    '캐시 400', 'fix.patch 다운로드']) assert.ok(visible.includes(fragment), fragment);
-  assert.ok(resultContent.children.some(child => child.tagName === 'details' && resultText(child).includes('Sashiko 원본 결과 보기')));
-  const descendants = node => [node, ...node.children.flatMap(descendants)];
-  assert.equal(descendants(resultContent).filter(node => node.tagName === 'script').length, 0);
-
-  reviewResult = { review: { findings: [{ title: 'Old title', explanation: 'Old explanation' }] } };
-  await context.patch.openPatchResult(reviews[0]);
-  assert.match(visibleText(resultContent), /Old title[\s\S]*Old explanation/);
-  reviewResult = { status: 'error', partial: true, error: 'Sashiko timed out' };
-  await context.patch.openPatchResult(reviews[0]);
-  assert.match(visibleText(resultContent), /일부 단계만 검토되었습니다/);
-  assert.match(visibleText(resultContent), /Sashiko timed out/);
-  reviewResult = { status: 'clean', findings: [], concerns: [], tokens_in: 1 };
-  await context.patch.openPatchResult(reviews[0]);
-  assert.match(visibleText(resultContent), /Sashiko 지적 사항이 없습니다/);
-  assert.match(visibleText(resultContent), /입력 1 · 출력 — · 캐시 — 토큰/);
+  context.patch.renderPatchView();
+  const resultLink = nodes.get('patch-list').children[0].children[1].children[0].children[5].children[1];
+  assert.equal(resultLink.tagName, 'a');
+  assert.equal(resultLink.href, `/patch-reviews/${'c'.repeat(64)}`);
+  assert.equal(resultLink.listeners.click, undefined);
 
   const sent = calls.filter(call => call.path === '/api/patch-reviews' && call.options?.method === 'POST').length;
   nodes.get('patch-file').files = [{ name: 'too-large.patch', size: 1_000_001 }];
