@@ -65,6 +65,7 @@ function showView() {
   $('coverage-footer').hidden = view !== 'coverage';
   $('findings-view').hidden = view !== 'findings' && view !== 'registry';
   $('open-zip-submit').hidden = view !== 'findings';
+  $('finding-export-csv').hidden = view !== 'registry';
   if (view !== 'findings' && $('zip-submit-dialog').open) $('zip-submit-dialog').close();
   $('finding-status-stats').hidden = view !== 'registry';
   $('queue-view').hidden = view !== 'queue';
@@ -240,6 +241,26 @@ const findingColumns = [
   ['vulnerability_type', '취약점 유형'], ['methodology', '방법론'],
   ['found_date', '찾은 날짜'], ['exploit', '익스플로잇'], ['cve', 'CVE'],
 ];
+const findingRowNumber = (finding, index) => finding.origin === 'history' && Number.isInteger(finding.number)
+  ? historicalNoOffset[finding.target] + finding.number
+  : index + 1;
+const registryImpactMark = (finding, key) => (finding.verified_impacts || []).includes(key)
+  ? (isRegistered(finding) ? '✓' : '◇')
+  : '—';
+const registryCsvCell = value => {
+  const text = String(value ?? '');
+  const safe = /^[\s\uFEFF]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+};
+function registryCsv(findings) {
+  const header = ['No.', ...findingColumns.map(([, label]) => label), ...impacts.map(([, label]) => label)];
+  const rows = findings.map((finding, index) => [
+    findingRowNumber(finding, index),
+    ...findingColumns.map(([key]) => finding[key] ?? ''),
+    ...impacts.map(([key]) => registryImpactMark(finding, key)),
+  ]);
+  return `\uFEFF${[header, ...rows].map(row => row.map(registryCsvCell).join(',')).join('\r\n')}\r\n`;
+}
 const editableFindingColumns = findingColumns.filter(([key]) => !['management_id', 'target'].includes(key));
 const editLimits = { title: 300, option: 200, privilege: 200, report_project: 200, owner: 100, nfs_version: 100, vulnerability_type: 200, methodology: 100, found_date: 10, exploit: 100, cve: 32 };
 const reportStatuses = ['미제보', '제보 중', '제보 완료', '중복', '철회'];
@@ -250,6 +271,7 @@ function syncFindingEditControls() {
   toggle.textContent = state.editMode ? '수정 종료' : '수정 모드';
   toggle.setAttribute('aria-pressed', String(state.editMode));
   toggle.disabled = editing;
+  $('finding-export-csv').disabled = editing;
   $('refresh').disabled = editing;
   for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).disabled = editing;
   for (const button of document.querySelectorAll('.tabs button')) button.disabled = editing;
@@ -433,11 +455,7 @@ function findingCell(finding, key) {
   return element('td', ['option', 'vulnerability_type'].includes(key) ? 'registry-wrap' : '', finding[key] || '—');
 }
 
-function renderFindings() {
-  syncFindingEditControls();
-  const findings = visibleFindings();
-  populateFindingFilters(findings);
-  renderFindingStats(findings);
+function filteredFindings(findings) {
   const search = $('finding-search').value.trim().toLowerCase();
   const selectedFilters = findingFilters.map(([id, key]) => [key, $(id).value]).filter(([, value]) => value);
   const filtered = findings.filter(item =>
@@ -451,9 +469,33 @@ function renderFindings() {
     return left.localeCompare(right, 'ko', { numeric: true }) * (state.findingSortDir === 'asc' ? 1 : -1)
       || String(a.event_id).localeCompare(String(b.event_id));
   });
+  return filtered;
+}
+
+function exportRegistryCsv() {
+  if (activeView() !== 'registry' || state.editingFindingId) return;
+  const findings = filteredFindings(visibleFindings());
+  if (!findings.length) return;
+  const url = URL.createObjectURL(new Blob([registryCsv(findings)], { type: 'text/csv;charset=utf-8' }));
+  const link = element('a');
+  link.href = url;
+  link.download = `hivemind-vulnerabilities-${new Date().toLocaleDateString('sv-SE')}.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function renderFindings() {
+  syncFindingEditControls();
+  const findings = visibleFindings();
+  populateFindingFilters(findings);
+  renderFindingStats(findings);
+  const filtered = filteredFindings(findings);
   const pages = Math.max(1, Math.ceil(filtered.length / 20));
   state.findingPage = Math.min(state.findingPage, pages);
   $('finding-count').textContent = `${number(filtered.length)} / ${number(findings.length)}행`;
+  $('finding-export-csv').disabled = !!state.editingFindingId || !filtered.length;
   const scrollLeft = $('findings').scrollLeft;
   const scrollTop = $('findings').scrollTop;
   clear($('findings'));
@@ -475,15 +517,13 @@ function renderFindings() {
   for (const [index, finding] of filtered.slice(offset, offset + 20).entries()) {
     const row = element('tr');
     if (state.editingFindingId === finding.event_id) row.classList.add('editing-row');
-    const serial = finding.origin === 'history' && Number.isInteger(finding.number)
-      ? historicalNoOffset[finding.target] + finding.number
-      : offset + index + 1;
+    const serial = findingRowNumber(finding, offset + index);
     row.append(element('td', 'registry-row-number', number(serial)));
     for (const [key] of findingColumns) row.append(findingCell(finding, key));
     const verified = new Set(finding.verified_impacts || []);
     for (const [key, label] of impacts) {
       const present = verified.has(key);
-      const cell = element('td', `impact-td ${present && isRegistered(finding) ? 'verified' : present ? 'claimed' : ''}`, present ? (isRegistered(finding) ? '✓' : '◇') : '—');
+      const cell = element('td', `impact-td ${present && isRegistered(finding) ? 'verified' : present ? 'claimed' : ''}`, registryImpactMark(finding, key));
       const evidence = impactEvidence(finding, present);
       cell.setAttribute('aria-label', `${label}: ${evidence}`);
       cell.title = `${label}: ${evidence}`;
@@ -1163,6 +1203,7 @@ async function refresh() {
 
 $('refresh').addEventListener('click', refresh);
 $('open-zip-submit').addEventListener('click', openZipDialog);
+$('finding-export-csv').addEventListener('click', exportRegistryCsv);
 $('close-zip-submit').addEventListener('click', () => $('zip-submit-dialog').close());
 $('zip-submit-dialog').addEventListener('click', event => {
   const bounds = event.currentTarget.getBoundingClientRect();
