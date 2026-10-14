@@ -135,7 +135,7 @@ test('patch tab lists only knfsd findings and submits a kernel patch for Sashiko
   assert.match(visibleText(resultContent), /Sashiko timed out/);
   reviewResult = { status: 'clean', findings: [], concerns: [], tokens_in: 1 };
   await context.patch.openPatchResult(reviews[0]);
-  assert.match(visibleText(resultContent), /확정된 지적 사항이 없습니다/);
+  assert.match(visibleText(resultContent), /Sashiko 지적 사항이 없습니다/);
   assert.match(visibleText(resultContent), /입력 1 · 출력 — · 캐시 — 토큰/);
 
   const sent = calls.filter(call => call.path === '/api/patch-reviews' && call.options?.method === 'POST').length;

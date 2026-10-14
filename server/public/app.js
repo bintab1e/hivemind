@@ -1230,7 +1230,7 @@ async function submitPatch(event) {
   }
 }
 
-const sashikoStatusLabels = { clean: '확정 지적 사항 없음', issues_found: '지적 사항 있음', error: '검토 오류' };
+const sashikoStatusLabels = { clean: '지적 사항 없음', issues_found: '지적 사항 있음', error: '검토 오류' };
 const patchApplyLabels = { applied: '적용됨', present: '기준 트리에 있음', failed: '적용 실패', error: '적용 오류' };
 const patchText = (value, fallback = '—') => typeof value === 'string' && value.trim() ? value : fallback;
 
@@ -1332,7 +1332,7 @@ async function openPatchResult(item) {
         content.append(section);
       }
       appendPatchReviewItems(content, 'Sashiko 지적 사항', findings);
-      if (!findings.length && result?.status === 'clean') content.append(element('p', 'patch-review-empty', '확정된 지적 사항이 없습니다.'));
+      if (!findings.length && result?.status === 'clean') content.append(element('p', 'patch-review-empty', 'Sashiko 지적 사항이 없습니다.'));
       appendPatchReviewItems(content, '추가 우려 사항', concerns, true);
       if ([result?.tokens_in, result?.tokens_out, result?.tokens_cached].some(Number.isFinite)) {
         const usage = element('section', 'detail-section patch-review-section');
