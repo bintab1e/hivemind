@@ -160,6 +160,28 @@ test('missing or disputed static proof never receives a management number', t =>
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 
+test('first static uncertainty keeps its own reason when independent review was not reached', t => {
+  const db = setup(t);
+  const id = submit(db, 'first-review-uncertain');
+  const result = verdict();
+  result.review.verdict = 'uncertain';
+  result.review.reason = 'Original C PoC does not establish the required entry path';
+  delete result.review.proof_review;
+  const held = approve(db, id, result);
+  assert.equal(held.status, 'needs_review');
+  assert.equal(held.reason, result.review.reason);
+  const summary = JSON.parse(db.prepare('SELECT verification_json FROM submissions WHERE id = ?').get(id).verification_json);
+  assert.equal(summary.admin_action_required, null);
+  assert.equal(summary.proof_review, null);
+
+  const missingSecondId = submit(db, 'likely-without-second-review');
+  const likely = verdict();
+  delete likely.review.proof_review;
+  const missingSecond = approve(db, missingSecondId, likely);
+  assert.equal(missingSecond.status, 'needs_review');
+  assert.match(missingSecond.reason, /Administrator action requirement is unresolved/);
+});
+
 test('unanchored administrator claims and unknown prerequisites are held', t => {
   const db = setup(t);
   for (const [name, change, expected] of [

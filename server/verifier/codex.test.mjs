@@ -241,6 +241,30 @@ test('both static reviews distinguish a reserved client source port from target 
       [portPolicy, localPrivilegePolicy, 'state that client-side port requirement',
         'do not waive any separate privileged mount'])));
   assert.equal(first.integrity.admin_action_required, false);
+  const reservedUnknown = structuredClone(answer);
+  reservedUnknown.verdict = 'uncertain';
+  reservedUnknown.integrity = { verdict: 'clear', reason: 'The only stated root need is the client reserved-port bind.',
+    admin_action_required: null, admin_trigger: null };
+  reservedUnknown.proof = null;
+  const reservedResult = await reviewSubmissionWithCodex(reservedPortSubmission,
+    options(fakeCli(t, reservedUnknown)));
+  assert.equal(reservedResult.integrity.admin_action_required, false);
+  assert.equal(reservedResult.verdict, 'uncertain');
+  const ordinaryUnknown = structuredClone(reservedUnknown);
+  ordinaryUnknown.integrity.reason = 'The trigger privilege requirement is unresolved.';
+  const ordinaryResult = await reviewSubmissionWithCodex(submission,
+    options(fakeCli(t, ordinaryUnknown)));
+  assert.equal(ordinaryResult.integrity.admin_action_required, null);
+  for (const content of [
+    'int main(void) { const char *text = "connect_reserved()"; return 0; }\n',
+    'int main(void) { /* connect_reserved() */ return 0; }\n',
+  ]) {
+    const uncalledPort = { ...submission, files: submission.files.map((file, index) => index === 1
+      ? { ...file, content } : file) };
+    const result = await reviewSubmissionWithCodex(uncalledPort,
+      options(fakeCli(t, ordinaryUnknown)));
+    assert.equal(result.integrity.admin_action_required, null);
+  }
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
     log: 'supported', defenses: 'supported', admin_action: 'supported' };
   const second = await reviewStaticProofWithCodex(reservedPortSubmission, first,

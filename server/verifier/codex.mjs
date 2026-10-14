@@ -211,6 +211,29 @@ function cSource(file) {
   return /\.c$/i.test(file.name) && /\b(?:int|signed|void)\s+main\s*\(/.test(file.content) && !/^diff --git |^@@ /m.test(file.content);
 }
 
+function executableCSource(content) {
+  return content.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+    match => match.replace(/[^\r\n]/g, ' '))
+    .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, match => match.replace(/[^\r\n]/g, ' '))
+    .replace(/\/\/.*$/gm, '');
+}
+
+function normalizedAdminRequirement(integrity, submission) {
+  if (integrity.verdict !== 'clear' || integrity.admin_action_required !== null ||
+      integrity.admin_trigger !== null) return integrity.admin_action_required;
+  const cFiles = submission.files.filter(file => /\.c$/i.test(file.name));
+  if (!cFiles.some(file => cSource(file) &&
+      /\b(?:connect_reserved|bindresvport|rresvport|rresvport_af)\s*\(/.test(executableCSource(file.content)))) {
+    return null;
+  }
+  const privilegedCall = new RegExp(`\\b(?:${[...privilegedCTriggerOps].join('|')})\\s*\\(`);
+  if (cFiles.some(file => privilegedCall.test(executableCSource(file.content)))) return null;
+  const privilegedCommand = new RegExp(`(?:^|[;&|]\\s*)(?:(?:sudo|doas)\\s+)?(?:${[...privilegedShellTriggerOps].join('|')})\\b`, 'm');
+  if (submission.files.some(file => /\.sh$/i.test(file.name) &&
+      privilegedCommand.test(file.content.replace(/#.*$/gm, '')))) return null;
+  return false;
+}
+
 function validatedAdminTrigger(value, required, submission, stage) {
   if (required !== true) {
     if (value != null) throw invalidOutput(stage);
@@ -224,12 +247,7 @@ function validatedAdminTrigger(value, required, submission, stage) {
   }
   const file = submission.files[value.file_index];
   if (!file || !(cSource(file) || /\.sh$/i.test(file.name))) throw invalidOutput(stage);
-  const source = /\.c$/i.test(file.name)
-    ? file.content.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
-      match => match.replace(/[^\r\n]/g, ' '))
-      .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, match => match.replace(/[^\r\n]/g, ' '))
-      .replace(/\/\/.*$/gm, '')
-    : file.content;
+  const source = /\.c$/i.test(file.name) ? executableCSource(file.content) : file.content;
   const rawLine = source.split(/\r?\n/)[value.line - 1];
   const line = /\.c$/i.test(file.name) ? rawLine?.trim() : rawLine?.replace(/#.*$/, '').trim();
   const operation = value.operation;
@@ -278,11 +296,12 @@ function validateResult(parsed, submission, trustedSource) {
       ![true, false, null].includes(parsed.integrity.admin_action_required) ||
       !exactKeys(parsed.normalized, outputKeys)) throw invalidOutput('shape');
   const reason = field(parsed.reason, 3000, true, 'shape');
+  const adminActionRequired = normalizedAdminRequirement(parsed.integrity, submission);
   const integrity = { verdict: parsed.integrity.verdict,
     reason: field(parsed.integrity.reason, 2000, true, 'shape'),
-    admin_action_required: parsed.integrity.admin_action_required,
+    admin_action_required: adminActionRequired,
     admin_trigger: validatedAdminTrigger(parsed.integrity.admin_trigger,
-      parsed.integrity.admin_action_required, submission, 'admin_trigger') };
+      adminActionRequired, submission, 'admin_trigger') };
   if (parsed.verdict === 'likely' && (integrity.verdict !== 'clear' || integrity.admin_action_required !== false)) throw invalidOutput('shape');
   const answer = parsed.normalized;
   const rawTitle = field(answer.title, 300, false, 'metadata');

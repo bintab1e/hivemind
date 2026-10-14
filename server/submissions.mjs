@@ -794,6 +794,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     if (review.integrity?.verdict !== 'clear') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
+    if (review.verdict !== 'likely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (adminActionRequired !== false) {
       const out = mark(db, id, 'needs_review', 'Administrator action requirement is unresolved', summary);
       db.exec('COMMIT'); return out;
@@ -802,8 +803,6 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', 'Same-root comparison is unresolved', summary);
       db.exec('COMMIT'); return out;
     }
-    if (review.verdict === 'unlikely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
-    if (review.verdict !== 'likely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (existingManagementId && review.same_root_cause?.verdict !== 'same') {
       const out = mark(db, id, 'needs_review', 'Same root cause as the existing finding was not established', summary);
       db.exec('COMMIT'); return out;
