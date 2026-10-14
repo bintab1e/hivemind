@@ -67,12 +67,13 @@ function fakeCli(t, result, event = { type: 'turn.completed' }, delayMs = 0, mar
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-verifier-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const cli = path.join(dir, 'fake-codex.mjs');
+  const requiredMarkers = Array.isArray(marker) ? marker : [marker];
   const code = `#!/usr/bin/env node
 import fs from 'node:fs';
 const args = process.argv.slice(2);
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
-if (!args.includes('--ephemeral') || !args.includes('--ignore-user-config') || !args.includes('--ignore-rules') || !args.includes('shell_tool') || !args.includes('--sandbox') || !args.includes('read-only') || !args.includes('--output-schema') || !prompt.includes(${JSON.stringify(marker)}) || !prompt.includes('<trusted-source>') || prompt.includes('HIGHLY_SENSITIVE')) process.exit(41);
+if (!args.includes('--ephemeral') || !args.includes('--ignore-user-config') || !args.includes('--ignore-rules') || !args.includes('shell_tool') || !args.includes('--sandbox') || !args.includes('read-only') || !args.includes('--output-schema') || ${JSON.stringify(requiredMarkers)}.some(marker => !prompt.includes(marker)) || !prompt.includes('<trusted-source>') || prompt.includes('HIGHLY_SENSITIVE')) process.exit(41);
 await new Promise(resolve => setTimeout(resolve, ${delayMs}));
 fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(result))});
 process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
@@ -191,6 +192,27 @@ test('first static review requires an explicit administrator-action assessment',
   invalidApproval.integrity.admin_action_required = true;
   await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalidApproval))),
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'shape');
+});
+
+test('both static reviews distinguish a reserved client source port from target administrator action', async t => {
+  const reservedPortSubmission = { ...submission, metadata: { access_requirements: ['local_privileged'] },
+    files: submission.files.map((file, index) => index === 1
+      ? { ...file, content: 'int main(void) { return connect_reserved(); }\n' } : file) };
+  const portPolicy = 'client TCP/UDP source port below 1024 is a transport prerequisite';
+  const localPrivilegePolicy = 'access_requirements says local_privileged';
+  const first = await reviewSubmissionWithCodex(reservedPortSubmission,
+    options(fakeCli(t, answer, { type: 'turn.completed' }, 0,
+      [portPolicy, localPrivilegePolicy, 'state that client-side port requirement',
+        'do not waive any separate privileged mount'])));
+  assert.equal(first.integrity.admin_action_required, false);
+  const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
+    log: 'supported', defenses: 'supported', admin_action: 'supported' };
+  const second = await reviewStaticProofWithCodex(reservedPortSubmission, first,
+    options(fakeCli(t, { verdict: 'supports', reason: 'Reserved client port only.', admin_action_required: false, checks },
+      { type: 'turn.completed' }, 0,
+      [portPolicy, localPrivilegePolicy, 'normalized report discloses this client-side requirement',
+        'still reject a separate indispensable privileged mount'])));
+  assert.equal(second.checks.admin_action, 'supported');
 });
 
 test('independent proof review only supports when every static check includes an unprivileged trigger', async t => {
