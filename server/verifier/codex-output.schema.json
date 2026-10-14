@@ -7,10 +7,11 @@
     "verdict": { "type": "string", "enum": ["likely", "unlikely", "uncertain"] },
     "reason": { "type": "string" },
     "integrity": { "type": "object", "additionalProperties": false,
-      "required": ["verdict", "reason", "admin_action_required"], "properties": {
+      "required": ["verdict", "reason", "admin_action_required", "admin_trigger"], "properties": {
         "verdict": { "type": "string", "enum": ["clear", "suspect", "uncertain"] },
         "reason": { "type": "string" },
-        "admin_action_required": { "type": ["boolean", "null"] }
+        "admin_action_required": { "type": ["boolean", "null"] },
+        "admin_trigger": { "$ref": "#/$defs/adminTrigger" }
       }
     },
     "proof": {
@@ -60,6 +61,14 @@
     }
   },
   "$defs": {
+    "adminTrigger": { "type": ["object", "null"], "additionalProperties": false,
+      "required": ["file_index", "line", "operation"],
+      "properties": {
+        "file_index": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "operation": { "type": "string" }
+      }
+    },
     "sourceAnchor": { "type": "object", "additionalProperties": false,
       "required": ["path", "line", "explanation"],
       "properties": {

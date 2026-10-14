@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reason", "admin_action_required", "checks"],
+  "required": ["verdict", "reason", "admin_action_required", "admin_trigger", "checks"],
   "properties": {
     "verdict": { "type": "string", "enum": ["supports", "refutes", "uncertain"] },
     "reason": { "type": "string" },
     "admin_action_required": { "type": ["boolean", "null"] },
+    "admin_trigger": { "$ref": "#/$defs/adminTrigger" },
     "checks": {
       "type": "object", "additionalProperties": false,
       "required": ["reachability", "flaw", "poc", "log", "defenses", "admin_action"],
@@ -21,6 +22,14 @@
     }
   },
   "$defs": {
+    "adminTrigger": { "type": ["object", "null"], "additionalProperties": false,
+      "required": ["file_index", "line", "operation"],
+      "properties": {
+        "file_index": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "operation": { "type": "string" }
+      }
+    },
     "check": { "type": "string", "enum": ["supported", "uncertain", "contradicted"] }
   }
 }

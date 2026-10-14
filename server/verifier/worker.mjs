@@ -128,7 +128,7 @@ function safeCodexDiagnostic(value) {
   if (!value || typeof value !== 'object') return '';
   if (Object.hasOwn(value, 'validation_stage')) {
     const stages = ['json_parse', 'shape', 'report_format', 'source_refs', 'source_evidence',
-      'likely_grounding', 'pre_auth', 'metadata', 'poc', 'logs'];
+      'likely_grounding', 'pre_auth', 'metadata', 'poc', 'logs', 'admin_trigger', 'proof_review'];
     return stages.includes(value.validation_stage) ? ` ${JSON.stringify({ validation_stage: value.validation_stage })}` : '';
   }
   const pick = (key, choices) => choices.includes(value[key]) ? value[key] : 'unknown';

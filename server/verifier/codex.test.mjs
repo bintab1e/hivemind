@@ -33,7 +33,7 @@ const answer = {
   verdict: 'likely',
   reason: 'The code path is plausible but requires reproduction.',
   integrity: { verdict: 'clear', reason: 'Original C PoC, source and submitted log agree without test-only modifications.',
-    admin_action_required: false },
+    admin_action_required: false, admin_trigger: null },
   proof: {
     entry: { path: 'fs/nfsd/nfs4proc.c', line: 1, explanation: 'Entry point for the request.' },
     flaw: { path: 'fs/nfsd/nfs4proc.c', line: 2, explanation: 'Claimed faulty decode operation.' },
@@ -202,32 +202,38 @@ test('first static review requires an explicit administrator-action assessment',
     await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalid))),
       error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'shape');
   }
+  const adminSubmission = { ...submission, files: submission.files.map((file, index) => index === 1
+    ? { ...file, content: 'int main(void) { return mount("server:/export", "/mnt", "nfs", 0, 0); }\n' } : file) };
   const adminTrigger = structuredClone(answer);
   adminTrigger.verdict = 'unlikely';
-  adminTrigger.integrity = { verdict: 'suspect', reason: 'Original PoC requires root for its trigger.',
-    admin_action_required: true };
+  adminTrigger.integrity = { verdict: 'suspect', reason: 'Original C PoC invokes privileged mount() for its trigger.',
+    admin_action_required: true, admin_trigger: { file_index: 1, line: 1, operation: 'mount' } };
   adminTrigger.proof = null;
-  const rejected = await reviewSubmissionWithCodex(submission, options(fakeCli(t, adminTrigger)));
+  const rejected = await reviewSubmissionWithCodex(adminSubmission, options(fakeCli(t, adminTrigger)));
   assert.equal(rejected.integrity.admin_action_required, true);
+  assert.deepEqual(rejected.integrity.admin_trigger, { file_index: 1, line: 1, operation: 'mount' });
   assert.equal(rejected.verdict, 'unlikely');
 
   const unknown = structuredClone(answer);
   unknown.verdict = 'uncertain';
   unknown.integrity = { verdict: 'uncertain', reason: 'PoC privilege prerequisite is not shown.',
-    admin_action_required: null };
+    admin_action_required: null, admin_trigger: null };
   unknown.proof = null;
   assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, unknown)))).integrity.admin_action_required, null);
 
   const invalidApproval = structuredClone(answer);
   invalidApproval.integrity.admin_action_required = true;
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalidApproval))),
+  invalidApproval.integrity.admin_trigger = { file_index: 1, line: 1, operation: 'mount' };
+  await assert.rejects(reviewSubmissionWithCodex(adminSubmission, options(fakeCli(t, invalidApproval))),
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'shape');
 });
 
 test('both static reviews distinguish a reserved client source port from target administrator action', async t => {
-  const reservedPortSubmission = { ...submission, metadata: { access_requirements: ['local_privileged'] },
+  const reservedPortSubmission = { ...submission,
+    metadata: { access_requirements: ['local_privileged'], reproduction_command: 'sudo ./poc' },
     files: submission.files.map((file, index) => index === 1
-      ? { ...file, content: 'int main(void) { return connect_reserved(); }\n' } : file) };
+      ? { ...file, content: 'int main(void) { return connect_reserved(); }\n' } : file)
+      .concat({ name: 'run.sh', content: 'sudo ./poc\n' }) };
   const portPolicy = 'client TCP/UDP source port below 1024 is a transport prerequisite';
   const localPrivilegePolicy = 'access_requirements says local_privileged';
   const first = await reviewSubmissionWithCodex(reservedPortSubmission,
@@ -238,11 +244,115 @@ test('both static reviews distinguish a reserved client source port from target 
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
     log: 'supported', defenses: 'supported', admin_action: 'supported' };
   const second = await reviewStaticProofWithCodex(reservedPortSubmission, first,
-    options(fakeCli(t, { verdict: 'supports', reason: 'Reserved client port only.', admin_action_required: false, checks },
+    options(fakeCli(t, { verdict: 'supports', reason: 'Reserved client port only.', admin_action_required: false,
+      admin_trigger: null, checks },
       { type: 'turn.completed' }, 0,
       [portPolicy, localPrivilegePolicy, 'normalized report discloses this client-side requirement',
         'still reject a separate indispensable privileged mount'])));
   assert.equal(second.checks.admin_action, 'supported');
+
+  for (const adminTrigger of [
+    { file_index: 1, line: 1, operation: 'connect_reserved' },
+    { file_index: 3, line: 1, operation: 'sudo ./poc' },
+  ]) {
+    const mistakenFirst = structuredClone(answer);
+    mistakenFirst.verdict = 'unlikely';
+    mistakenFirst.integrity = { verdict: 'suspect',
+      reason: 'The client needs sudo only to bind a reserved source port before the NFS request.',
+      admin_action_required: true, admin_trigger: adminTrigger };
+    mistakenFirst.proof = null;
+    await assert.rejects(reviewSubmissionWithCodex(reservedPortSubmission,
+      options(fakeCli(t, mistakenFirst))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'admin_trigger');
+
+    const mistakenProof = { verdict: 'refutes',
+      reason: 'The client needs sudo only to bind a reserved source port before the NFS request.',
+      admin_action_required: true, admin_trigger: adminTrigger,
+      checks: { ...checks, admin_action: 'contradicted' } };
+    await assert.rejects(reviewStaticProofWithCodex(reservedPortSubmission, first,
+      options(fakeCli(t, mistakenProof))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  }
+
+  const systemSubmission = { ...reservedPortSubmission,
+    files: reservedPortSubmission.files.map((file, index) => index === 1
+      ? { ...file, content: 'int main(void) { connect_reserved(); return system("sudo ./poc"); }\n' } : file) };
+  const systemFirst = await reviewSubmissionWithCodex(systemSubmission,
+    options(fakeCli(t, answer)));
+  for (const operation of ['poc', 'system']) {
+    const mistakenFirst = structuredClone(answer);
+    mistakenFirst.verdict = 'unlikely';
+    mistakenFirst.integrity = { verdict: 'suspect',
+      reason: 'Only the client reserved source-port bind requires sudo.', admin_action_required: true,
+      admin_trigger: { file_index: 1, line: 1, operation } };
+    mistakenFirst.proof = null;
+    await assert.rejects(reviewSubmissionWithCodex(systemSubmission,
+      options(fakeCli(t, mistakenFirst))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'admin_trigger');
+
+    const mistakenProof = { verdict: 'refutes',
+      reason: 'Only the client reserved source-port bind requires sudo.', admin_action_required: true,
+      admin_trigger: { file_index: 1, line: 1, operation },
+      checks: { ...checks, admin_action: 'contradicted' } };
+    await assert.rejects(reviewStaticProofWithCodex(systemSubmission, systemFirst,
+      options(fakeCli(t, mistakenProof))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  }
+
+  for (const [name, submitted, adminTrigger] of [
+    ['C string', { ...reservedPortSubmission,
+      files: reservedPortSubmission.files.map((file, index) => index === 1
+        ? { ...file, content: 'int main(void) { const char *text = "mount(\\"server\\", \\"/mnt\\")"; return connect_reserved(); }\n' } : file) },
+    { file_index: 1, line: 1, operation: 'mount' }],
+    ['C block comment', { ...reservedPortSubmission,
+      files: reservedPortSubmission.files.map((file, index) => index === 1
+        ? { ...file, content: 'int main(void) {\n/* mount("server:/export", "/mnt", "nfs", 0, 0); */\nreturn connect_reserved(); }\n' } : file) },
+    { file_index: 1, line: 2, operation: 'mount' }],
+    ['shell echo', { ...reservedPortSubmission,
+      files: reservedPortSubmission.files.map((file, index) => index === 3
+        ? { ...file, content: 'echo sudo mount server:/export /mnt\nsudo ./poc\n' } : file) },
+    { file_index: 3, line: 1, operation: 'mount' }],
+  ]) {
+    const firstWithFalseAdmin = await reviewSubmissionWithCodex(submitted,
+      options(fakeCli(t, answer)));
+    const mistakenFirst = structuredClone(answer);
+    mistakenFirst.verdict = 'unlikely';
+    mistakenFirst.integrity = { verdict: 'suspect', reason: `${name} is not a privileged trigger.`,
+      admin_action_required: true, admin_trigger: adminTrigger };
+    mistakenFirst.proof = null;
+    await assert.rejects(reviewSubmissionWithCodex(submitted,
+      options(fakeCli(t, mistakenFirst))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'admin_trigger');
+    const mistakenProof = { verdict: 'refutes', reason: `${name} is not a privileged trigger.`,
+      admin_action_required: true, admin_trigger: adminTrigger,
+      checks: { ...checks, admin_action: 'contradicted' } };
+    await assert.rejects(reviewStaticProofWithCodex(submitted, firstWithFalseAdmin,
+      options(fakeCli(t, mistakenProof))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  }
+
+  const exportSubmission = { ...reservedPortSubmission,
+    files: reservedPortSubmission.files.map((file, index) => index === 3
+      ? { ...file, content: 'sudo exportfs -ra\n./poc\n' } : file) };
+  const exportFirst = structuredClone(answer);
+  exportFirst.verdict = 'unlikely';
+  exportFirst.integrity = { verdict: 'suspect', reason: 'The trigger changes the target NFS export with exportfs.',
+    admin_action_required: true, admin_trigger: { file_index: 3, line: 1, operation: 'exportfs' } };
+  exportFirst.proof = null;
+  const confirmedAdmin = await reviewSubmissionWithCodex(exportSubmission,
+    options(fakeCli(t, exportFirst)));
+  assert.equal(confirmedAdmin.integrity.admin_action_required, true);
+  assert.equal(confirmedAdmin.integrity.admin_trigger.operation, 'exportfs');
+
+  const exportProof = { verdict: 'refutes', reason: 'The trigger changes the target NFS export with exportfs.',
+    admin_action_required: true, admin_trigger: { file_index: 3, line: 1, operation: 'exportfs' },
+    checks: { ...checks, admin_action: 'contradicted' } };
+  const exportFirstLikely = await reviewSubmissionWithCodex(exportSubmission,
+    options(fakeCli(t, answer)));
+  const confirmedProof = await reviewStaticProofWithCodex(exportSubmission, exportFirstLikely,
+    options(fakeCli(t, exportProof)));
+  assert.equal(confirmedProof.admin_action_required, true);
+  assert.equal(confirmedProof.admin_trigger.operation, 'exportfs');
 });
 
 test('independent proof review only supports when every static check includes an unprivileged trigger', async t => {
@@ -250,13 +360,14 @@ test('independent proof review only supports when every static check includes an
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
     log: 'supported', defenses: 'supported', admin_action: 'supported' };
   const confirmed = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
-    { verdict: 'supports', reason: 'All submitted claims match the shown source.', admin_action_required: false, checks },
+    { verdict: 'supports', reason: 'All submitted claims match the shown source.', admin_action_required: false,
+      admin_trigger: null, checks },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.deepEqual(confirmed, { verdict: 'supports', reason: 'All submitted claims match the shown source.',
-    admin_action_required: false, checks });
+    admin_action_required: false, admin_trigger: null, checks });
   const ordinarySetup = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'supports', reason: 'Existing export is target setup, not a trigger privilege.',
-      admin_action_required: false, checks },
+      admin_action_required: false, admin_trigger: null, checks },
     { type: 'turn.completed' }, 0, 'QEMU VM preparation, network namespaces, Soft-RoCE/RDMA device setup')));
   assert.equal(ordinarySetup.admin_action_required, false);
   const conflicting = { verdict: 'supports', reason: 'Unresolved guard.', checks: { ...checks, defenses: 'uncertain' } };
@@ -265,26 +376,32 @@ test('independent proof review only supports when every static check includes an
   error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
   const uncertain = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'uncertain', reason: 'Missing guard context.', admin_action_required: false,
-      checks: conflicting.checks },
+      admin_trigger: null, checks: conflicting.checks },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(uncertain.verdict, 'uncertain');
-  const requiresAdmin = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
-    { verdict: 'refutes', reason: 'Trigger requires root access.', admin_action_required: true,
+  const mountSubmission = { ...submission, files: submission.files.map((file, index) => index === 1
+    ? { ...file, content: 'int main(void) { return mount("server:/export", "/mnt", "nfs", 0, 0); }\n' } : file) };
+  const mountFirst = await reviewSubmissionWithCodex(mountSubmission, options(fakeCli(t, answer)));
+  const requiresAdmin = await reviewStaticProofWithCodex(mountSubmission, mountFirst, options(fakeCli(t,
+    { verdict: 'refutes', reason: 'Original C PoC invokes privileged mount() for its trigger.',
+      admin_action_required: true, admin_trigger: { file_index: 1, line: 1, operation: 'mount' },
       checks: { ...checks, admin_action: 'contradicted' } },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(requiresAdmin.admin_action_required, true);
+  assert.equal(requiresAdmin.admin_trigger.operation, 'mount');
   assert.equal(requiresAdmin.checks.admin_action, 'contradicted');
   const unknownPrivilege = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'uncertain', reason: 'Privilege prerequisite is missing.', admin_action_required: null,
-      checks: { ...checks, admin_action: 'uncertain' } },
+      admin_trigger: null, checks: { ...checks, admin_action: 'uncertain' } },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(unknownPrivilege.admin_action_required, null);
   for (const invalid of [
     { verdict: 'supports', reason: 'Admin trigger.', admin_action_required: true,
+      admin_trigger: { file_index: 1, line: 1, operation: 'mount' },
       checks: { ...checks, admin_action: 'contradicted' } },
     { verdict: 'supports', reason: 'Missing assessment.', admin_action_required: false,
-      checks: { ...checks, admin_action: 'uncertain' } },
-    { verdict: 'supports', reason: 'Missing flag.', checks },
+      admin_trigger: null, checks: { ...checks, admin_action: 'uncertain' } },
+    { verdict: 'supports', reason: 'Missing flag.', admin_trigger: null, checks },
   ]) {
     await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, invalid,
       { type: 'turn.completed' }, 0, '<first-review>'))),

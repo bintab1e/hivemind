@@ -21,6 +21,10 @@ const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
 const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+$/;
 const existingIdPattern = /^A-\d{3,}$/;
+const privilegedCTriggerOps = new Set(['mount', 'umount', 'umount2', 'init_module', 'finit_module',
+  'delete_module', 'reboot', 'kexec_load', 'setns', 'unshare', 'pivot_root', 'chroot']);
+const privilegedShellTriggerOps = new Set(['mount', 'umount', 'exportfs', 'modprobe', 'insmod',
+  'rmmod', 'sysctl', 'setcap', 'capsh', 'unshare', 'nsenter', 'iptables', 'nft']);
 
 function value(input, name, max, required = false) {
   if (input == null || input === '') {
@@ -51,6 +55,33 @@ function object(input, name) {
   if (input == null) return {};
   if (typeof input !== 'object' || Array.isArray(input)) invalid(`Invalid ${name}`);
   return input;
+}
+
+function anchoredAdminTrigger(db, submissionId, trigger) {
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger) ||
+      !Number.isInteger(trigger.file_index) || trigger.file_index < 0 || trigger.file_index >= MAX_FILES ||
+      !Number.isInteger(trigger.line) || trigger.line < 1 ||
+      typeof trigger.operation !== 'string') return false;
+  const file = db.prepare(`SELECT name, content FROM submission_artifacts
+    WHERE submission_id = ? AND ordinal = ? AND ordinal < 1000`).get(submissionId, trigger.file_index);
+  if (!file) return false;
+  let source;
+  try { source = new TextDecoder('utf-8', { fatal: true }).decode(file.content); }
+  catch { return false; }
+  const operation = trigger.operation;
+  if (/\.c$/i.test(file.name)) {
+    // Keep newlines so the model's original source line remains the same after masking comments and literals.
+    const code = source.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+      match => match.replace(/[^\r\n]/g, ' '))
+      .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, match => match.replace(/[^\r\n]/g, ' '))
+      .replace(/\/\/.*$/gm, '');
+    if (!/\b(?:int|signed|void)\s+main\s*\(/.test(code) || !privilegedCTriggerOps.has(operation)) return false;
+    const line = code.split(/\r?\n/)[trigger.line - 1];
+    return !!line && new RegExp(`\\b${operation}\\s*\\(`).test(line);
+  }
+  if (!/\.sh$/i.test(file.name) || !privilegedShellTriggerOps.has(operation)) return false;
+  const line = source.split(/\r?\n/)[trigger.line - 1]?.replace(/(^|\s)#.*$/, '$1').trim();
+  return !!line && new RegExp(`(?:^|[;&|]\\s*)(?:(?:sudo|doas)\\s+)?${operation}\\b`).test(line);
 }
 
 function base64Bytes(encoded) {
@@ -726,7 +757,11 @@ export function completeSubmission(db, id, result, leaseToken) {
     if (run.status !== 'not_run' || result.server_serial || run.observation || run.kernelCommit) invalid('Dynamic evidence is not accepted by the static screening route');
     const primaryAdmin = review.integrity?.admin_action_required;
     const secondaryAdmin = review.proof_review?.admin_action_required;
-    const adminActionRequired = primaryAdmin === true || secondaryAdmin === true ? true
+    const primaryAdminAnchored = primaryAdmin === true && anchoredAdminTrigger(db, id, review.integrity?.admin_trigger);
+    const secondaryAdminAnchored = secondaryAdmin === true && anchoredAdminTrigger(db, id, review.proof_review?.admin_trigger);
+    const unanchoredAdminClaim = primaryAdmin === true && !primaryAdminAnchored ||
+      secondaryAdmin === true && !secondaryAdminAnchored;
+    const adminActionRequired = primaryAdminAnchored || secondaryAdminAnchored ? true
       : primaryAdmin === false && secondaryAdmin === false ? false : null;
     const summary = { static_verdict: review.verdict, dynamic_status: 'not_run',
       integrity: review.integrity?.verdict ?? 'uncertain',
@@ -741,9 +776,17 @@ export function completeSubmission(db, id, result, leaseToken) {
       } } : {}) };
     const reason = reviewReason(review.reason, 'review reason', 3000) || 'Static screening completed';
     if (adminActionRequired === true) {
-      const adminReason = secondaryAdmin === true ? review.proof_review.reason : review.integrity?.reason;
+      const adminReason = secondaryAdminAnchored ? review.proof_review.reason : review.integrity?.reason;
       const out = mark(db, id, 'rejected', reviewReason(adminReason, 'administrator action reason', 3000)
         || 'Administrator action is required to trigger the finding', summary);
+      db.exec('COMMIT'); return out;
+    }
+    if (review.integrity?.verdict === 'suspect' && primaryAdmin !== true) {
+      const out = mark(db, id, 'rejected', reviewReason(review.integrity.reason, 'integrity reason', 2000) || reason, summary);
+      db.exec('COMMIT'); return out;
+    }
+    if (unanchoredAdminClaim) {
+      const out = mark(db, id, 'needs_review', 'Administrator trigger lacks an anchored non-port privileged operation', summary);
       db.exec('COMMIT'); return out;
     }
     if (review.integrity?.verdict === 'suspect') {

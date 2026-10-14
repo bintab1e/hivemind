@@ -160,13 +160,13 @@ test('missing or disputed static proof never receives a management number', t =>
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 
-test('administrator-dependent triggers are rejected and unknown prerequisites are held', t => {
+test('unanchored administrator claims and unknown prerequisites are held', t => {
   const db = setup(t);
   for (const [name, change, expected] of [
     ['primary-admin', result => { result.review.integrity.admin_action_required = true;
-      result.review.integrity.reason = 'Original PoC requires sudo mount'; }, 'rejected'],
+      result.review.integrity.reason = 'Original PoC requires sudo mount'; }, 'needs_review'],
     ['secondary-admin', result => { result.review.proof_review = { ...proofReview,
-      admin_action_required: true, verdict: 'refutes', reason: 'Target administrator must change a kernel setting' }; }, 'rejected'],
+      admin_action_required: true, verdict: 'refutes', reason: 'Target administrator must change a kernel setting' }; }, 'needs_review'],
     ['primary-unknown', result => { result.review.integrity.admin_action_required = null; }, 'needs_review'],
     ['secondary-unknown', result => { result.review.proof_review = { ...proofReview,
       admin_action_required: null, verdict: 'uncertain' }; }, 'needs_review'],
@@ -180,6 +180,56 @@ test('administrator-dependent triggers are rejected and unknown prerequisites ar
     assert.equal(approve(db, id, result).status, expected, name);
   }
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
+});
+
+test('only original non-port privileged trigger anchors cause administrator rejection', t => {
+  const db = setup(t);
+  const cases = [
+    { name: 'client-reserved-port', source: 'int main(void) { return connect_reserved(); }\n',
+      trigger: { file_index: 0, line: 1, operation: 'connect_reserved' }, status: 'needs_review' },
+    { name: 'sudo-client-wrapper', source: poc, script: 'sudo ./poc\n',
+      trigger: { file_index: 2, line: 1, operation: 'sudo' }, status: 'needs_review' },
+    { name: 'commented-c-mount', source: 'int main(void) { /* mount(0); */ return 0; }\n',
+      trigger: { file_index: 0, line: 1, operation: 'mount' }, status: 'needs_review' },
+    { name: 'string-c-mount', source: 'int main(void) { puts("mount(0)"); return 0; }\n',
+      trigger: { file_index: 0, line: 1, operation: 'mount' }, status: 'needs_review' },
+    { name: 'real-c-mount', source: 'int main(void) { return mount("x", "y", "z", 0, 0); }\n',
+      trigger: { file_index: 0, line: 1, operation: 'mount' }, status: 'rejected' },
+    { name: 'real-shell-exportfs', source: poc, script: 'sudo exportfs -ra\n',
+      trigger: { file_index: 2, line: 1, operation: 'exportfs' }, status: 'rejected' },
+  ];
+  for (const sample of cases) {
+    const input = raw(sample.name);
+    input.files[0] = artifact('source.c', 'poc', sample.source);
+    if (sample.script) input.files.push(artifact('trigger.sh', 'other', sample.script));
+    const id = submitSubmission(db, input, 'analyst').submission_id;
+    const result = verdict();
+    result.review.integrity = { verdict: 'suspect', admin_action_required: true,
+      admin_trigger: sample.trigger, reason: 'Claimed privileged trigger' };
+    const completed = approve(db, id, result);
+    assert.equal(completed.status, sample.status, sample.name);
+    const stored = JSON.parse(db.prepare('SELECT verification_json FROM submissions WHERE id = ?').get(id).verification_json);
+    assert.equal(stored.admin_action_required, sample.status === 'rejected' ? true : null, sample.name);
+  }
+  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
+});
+
+test('independent proof reviewer needs an original privileged trigger anchor', t => {
+  const db = setup(t);
+  for (const [name, script, expected] of [
+    ['shell-comment', '# sudo exportfs -ra\n', 'needs_review'],
+    ['shell-narrative', 'echo sudo exportfs -ra\n', 'needs_review'],
+    ['shell-trigger', 'sudo exportfs -ra\n', 'rejected'],
+  ]) {
+    const input = raw(name);
+    input.files.push(artifact('trigger.sh', 'other', script));
+    const id = submitSubmission(db, input, 'analyst').submission_id;
+    const result = verdict();
+    result.review.proof_review = { ...proofReview, verdict: 'refutes',
+      admin_action_required: true, admin_trigger: { file_index: 2, line: 1, operation: 'exportfs' },
+      reason: 'Original shell trigger changes exports' };
+    assert.equal(approve(db, id, result).status, expected, name);
+  }
 });
 
 test('valid long static-review reasons are stored without failing completion', t => {
@@ -199,9 +249,12 @@ test('valid long static-review reasons are stored without failing completion', t
   assert.equal(rejected.status, 'rejected');
   assert.ok(Buffer.byteLength(rejected.reason) <= 1000);
 
-  const adminId = submit(db, 'long-admin-reason');
+  const adminInput = raw('long-admin-reason');
+  adminInput.files[0] = artifact('source.c', 'poc', 'int main(void) { return mount("x", "y", "z", 0, 0); }\n');
+  const adminId = submitSubmission(db, adminInput, 'analyst').submission_id;
   const adminResult = verdict();
   adminResult.review.integrity.admin_action_required = true;
+  adminResult.review.integrity.admin_trigger = { file_index: 0, line: 1, operation: 'mount' };
   adminResult.review.integrity.reason = '관리자 권한이 필요한 마운트 작업입니다. '.repeat(60);
   const adminRejected = approve(db, adminId, adminResult);
   assert.equal(adminRejected.status, 'rejected');

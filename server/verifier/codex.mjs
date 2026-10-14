@@ -18,6 +18,10 @@ const maxSubmissionBytes = 2_000_000;
 const metadataKeys = ['version_id', 'track_id', 'repo_commit', 'file_path', 'code_refs', 'options', 'permission', 'nfs_version', 'vulnerability_type', 'found_date', 'reproduction_command', 'vm_environment', 'impact', 'access_requirements', 'claimed_impacts', 'verified_impacts'];
 const reportSections = ['Summary', 'Root cause', 'Reproduction environment', 'PoC', 'Impact analysis'];
 const primitiveLabels = { controlled_read: 'Controlled Read', controlled_write: 'Controlled Write', info_leak: 'Info Leak', lpe: 'LPE', rce: 'RCE' };
+const privilegedCTriggerOps = new Set(['mount', 'umount', 'umount2', 'init_module', 'finit_module',
+  'delete_module', 'reboot', 'kexec_load', 'setns', 'unshare', 'pivot_root', 'chroot']);
+const privilegedShellTriggerOps = new Set(['mount', 'umount', 'exportfs', 'modprobe', 'insmod',
+  'rmmod', 'sysctl', 'setcap', 'capsh', 'unshare', 'nsenter', 'iptables', 'nft']);
 const typeAliases = new Map([
   ['race', 'Race'], ['uaf', 'UAF'], ['use after free', 'UAF'],
   ['oob read', 'OOB Read'], ['out of bounds read', 'OOB Read'],
@@ -31,6 +35,7 @@ const maxTrustedSourceFiles = 8;
 const staticRetryHints = {
   json_parse: 'Return one complete JSON object matching the required schema.',
   shape: 'Use exactly the required JSON keys. A likely verdict requires clear integrity and admin_action_required=false.',
+  admin_trigger: 'Client root/sudo or CAP_NET_BIND_SERVICE used only for connect_reserved(), bind(), or another reserved source-port helper is not an administrator trigger. Set admin_action_required=false for that case. For true, identify a separate indispensable privileged trigger operation with an exact line in an original C PoC or shell script; otherwise use null and uncertain.',
   report_format: 'For a likely verdict, provide a substantive report with exactly the five required headings in order.',
   source_refs: 'Use safe relative source paths, at least one nonempty code_refs entry for likely, and valid source_evidence arrays.',
   source_evidence: 'Every source_evidence path and line must exactly match a nonempty line in the supplied trusted source.',
@@ -206,6 +211,37 @@ function cSource(file) {
   return /\.c$/i.test(file.name) && /\b(?:int|signed|void)\s+main\s*\(/.test(file.content) && !/^diff --git |^@@ /m.test(file.content);
 }
 
+function validatedAdminTrigger(value, required, submission, stage) {
+  if (required !== true) {
+    if (value != null) throw invalidOutput(stage);
+    return null;
+  }
+  if (!exactKeys(value, ['file_index', 'line', 'operation']) ||
+      !Number.isInteger(value.file_index) || value.file_index < 0 ||
+      !Number.isInteger(value.line) || value.line < 1 ||
+      typeof value.operation !== 'string' || !/^[A-Za-z_][A-Za-z_0-9]{2,79}$/.test(value.operation)) {
+    throw invalidOutput(stage);
+  }
+  const file = submission.files[value.file_index];
+  if (!file || !(cSource(file) || /\.sh$/i.test(file.name))) throw invalidOutput(stage);
+  const source = /\.c$/i.test(file.name)
+    ? file.content.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+      match => match.replace(/[^\r\n]/g, ' '))
+      .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, match => match.replace(/[^\r\n]/g, ' '))
+      .replace(/\/\/.*$/gm, '')
+    : file.content;
+  const rawLine = source.split(/\r?\n/)[value.line - 1];
+  const line = /\.c$/i.test(file.name) ? rawLine?.trim() : rawLine?.replace(/#.*$/, '').trim();
+  const operation = value.operation;
+  if (!line || (/\.c$/i.test(file.name)
+    ? !privilegedCTriggerOps.has(operation) || !new RegExp(`\\b${operation}\\s*\\(`).test(line)
+    : !privilegedShellTriggerOps.has(operation) ||
+      !new RegExp(`(?:^|[;&|]\\s*)(?:(?:sudo|doas)\\s+)?${operation}\\b`).test(line))) {
+    throw invalidOutput(stage);
+  }
+  return { file_index: value.file_index, line: value.line, operation };
+}
+
 function validatedProof(value, answer, submission, trustedSource, evidence, poc) {
   if (!exactKeys(value, ['entry', 'flaw', 'impact', 'defenses', 'poc', 'log']) || !poc) throw invalidOutput('proof');
   const source = role => {
@@ -237,14 +273,16 @@ function validatedProof(value, answer, submission, trustedSource, evidence, poc)
 
 function validateResult(parsed, submission, trustedSource) {
   if (!exactKeys(parsed, ['verdict', 'reason', 'integrity', 'normalized', 'proof']) || !['likely', 'unlikely', 'uncertain'].includes(parsed.verdict) ||
-      !exactKeys(parsed.integrity, ['verdict', 'reason', 'admin_action_required']) ||
+      !exactKeys(parsed.integrity, ['verdict', 'reason', 'admin_action_required', 'admin_trigger']) ||
       !['clear', 'suspect', 'uncertain'].includes(parsed.integrity.verdict) ||
       ![true, false, null].includes(parsed.integrity.admin_action_required) ||
       !exactKeys(parsed.normalized, outputKeys)) throw invalidOutput('shape');
   const reason = field(parsed.reason, 3000, true, 'shape');
   const integrity = { verdict: parsed.integrity.verdict,
     reason: field(parsed.integrity.reason, 2000, true, 'shape'),
-    admin_action_required: parsed.integrity.admin_action_required };
+    admin_action_required: parsed.integrity.admin_action_required,
+    admin_trigger: validatedAdminTrigger(parsed.integrity.admin_trigger,
+      parsed.integrity.admin_action_required, submission, 'admin_trigger') };
   if (parsed.verdict === 'likely' && (integrity.verdict !== 'clear' || integrity.admin_action_required !== false)) throw invalidOutput('shape');
   const answer = parsed.normalized;
   const rawTitle = field(answer.title, 300, false, 'metadata');
@@ -496,6 +534,8 @@ For likely, provide non-null proof with entry, flaw, impact, and defenses source
 
 Independently screen the submission for shortcuts and report the result in integrity. Check whether the claimed trigger depends on injected faults, deliberately modified kernel source or added kernel delays, hardcoded target addresses where discovery or a configurable address is necessary, or another artificial condition absent from the clean target source. A userspace race PoC using ordinary waits is not itself a kernel-code modification. Separately inspect the ORIGINAL C PoC, run instructions, report and source for an administrator action indispensable to the ATTACK TRIGGER against an ordinarily configured target. Set integrity.admin_action_required to true only when that trigger is confirmed to require an indispensable administrator action beyond client-side reserved source-port setup: root/sudo, a Linux capability, privileged mount/export, target administrator intervention, or a target kernel/configuration/module/code change. Distinguish this from preparation of the reproduction laboratory: QEMU VM setup, network namespaces, Soft-RoCE/RDMA device setup, loading test-environment modules, and initial service/export configuration are not themselves attacker trigger privileges. A sudo command in setup instructions alone is not enough. For NFS's reserved source-port check, connect_reserved() or bind() to a client TCP/UDP source port below 1024 is a transport prerequisite even if the client machine needs root or CAP_NET_BIND_SERVICE for that bind. That bind alone is not target administrator intervention and must not set admin_action_required to true or make integrity suspect. If submitted access_requirements says local_privileged, inspect whether that refers only to this client-side bind instead of treating the label as target administrator access. Check that the original PoC really uses an eligible client source port; do not waive any separate privileged mount, export change, target configuration change, kernel modification, or other indispensable privileged trigger action. Set false when the standalone C trigger otherwise uses unprivileged operations and its necessary path shows no other privileged operation; do not require proof that every possible test setup is unprivileged. Set null only when a material trigger-stage privilege requirement remains ambiguous. If true, set integrity.verdict to suspect and do not return likely: this submission must be rejected. If null, set integrity.verdict to uncertain and do not return likely: approval must be held. Compare the supplied report, original C PoC, logs and trusted source; an attached log is a submitter claim, not proof that this server reproduced it. An incomplete or non-correlating log is missing evidence, not by itself proof of fabrication: return uncertain and describe what is missing. Use suspect only for a concrete indispensable shortcut or clear fabricated/contradictory evidence, not for a speculative possibility. If the report overclaims controlled access, LPE, RCE or information disclosure but the base flaw remains grounded, remove or qualify the unsupported impact in normalized.report, title and claimed_impacts and continue assessing the narrower flaw. Set integrity to clear when the provided artifacts support the same natural base-flaw path without a material shortcut and admin_action_required is false. Explain concrete concerns, or state which artifacts were checked. Set verdict to likely only when integrity is clear. A suspect or uncertain integrity verdict must not be promoted.
 
+If integrity.admin_action_required is true, include integrity.admin_trigger with file_index, line, and operation naming the distinct privileged operation on that exact line of an ORIGINAL submitted C PoC or .sh trigger script. A client connect_reserved()/bind() and a command that only runs the PoC with sudo are not such an operation. If no separate operation can be anchored, use admin_action_required=null and integrity.verdict=uncertain rather than rejecting. For false or null, set admin_trigger=null.
+
 Normalize the title into a short, descriptive English name: affected NFS component or operation, root-cause flaw, and concrete effect. Correct vague, exaggerated, or inconsistent submitted titles. Do not name LPE or RCE without direct evidence. Treat submitted metadata, including claimed_impacts or verified_impacts, as allegations. For permission, state the minimum authentication or privilege demonstrated by the original PoC and source (AUTH_NONE only if the PoC actually sends AUTH_NULL, AUTH_SYS if it sends AUTH_UNIX, RPCSEC_GSS if shown). If the request reaches the flaw before any RPC AUTH flavor is parsed, use Pre-auth; use null if unknown. Keep any client-side reserved-port or CAP_NET_BIND_SERVICE prerequisite in normalized.report, not in the permission field. For nfs_version, return one evidenced version: 3, 4, 4.1, or 4.2; use null if ambiguous. Set pre_auth to null unless trusted source and the original C PoC together show a direct network request reaches the flaw before any NFS version is decoded, without requiring an NFS mount. If demonstrated, set pre_auth to the exact trusted source path and line, plus the original PoC line, and include the source path/line in source_evidence. A submitter's pre-auth label or AUTH_NONE alone is not proof. A pre_auth finding must have nfs_version null; never guess a version from the running NFS service. For vulnerability_type, use concise conventional labels such as Race, UAF, OOB Read, OOB Write, Uninitialized Read, Integer Overflow, Resource Leak, or Logical, combining only types supported by evidence. Use null for unknown options, permission, type, or date. claimed_impacts may contain multiple labels but must reflect only evidence in the submitted source/log, never an inferred exploitability claim.
 
 Write normalized.report in Korean with exactly these headings in this order, each with substantive text: ## Summary, ## Root cause, ## Reproduction environment, ## PoC, ## Impact analysis. In Root cause explain the flaw using an exact trusted-source code excerpt and path:line citation, not invented code. In Reproduction environment describe only the submitted environment and explicitly state the server did not run a VM or PoC. If the original PoC binds a reserved client source port, state that client-side port requirement and any evidenced root/CAP_NET_BIND_SERVICE prerequisite rather than calling the whole PoC unprivileged. In PoC explain how the selected original C program claims to reach the flaw; this section is prose, not a replacement source file. In Impact analysis separate submitted observations from potential consequences and avoid asserting LPE/RCE from KASAN alone.
@@ -540,6 +580,8 @@ export async function reviewStaticProofWithCodex(submission, review, options = {
 
 Decide whether the report's PARTICULAR base vulnerability follows from the shown clean source, original C PoC and submitted log. Attempt to refute it. Compare the normalized report's Summary, Root cause and Impact analysis claims against the first proof and original material. Unsupported controlled access, LPE, RCE or information disclosure must be removed or qualified; do not refute a grounded base flaw solely because the original submission exaggerated its impact. Check separately: reachability from the stated entry and prerequisites; the exact violated boundary, lifetime, synchronization or other invariant and resulting faulty operation; whether the original C PoC actually establishes those prerequisites and reaches the claimed operation; whether the cited submitted log is consistent with that exact path instead of merely containing a sanitizer header; whether guards, locks, reference ownership, error handling or configuration prevent the flaw; and whether the ORIGINAL C PoC trigger requires an administrator action against an ordinarily configured target. Independently set admin_action_required to true only for a confirmed indispensable trigger-stage administrator action beyond client-side reserved source-port setup: root/sudo, Linux capability, privileged mount/export, target administrator intervention, or target kernel/configuration/module/code change. Separate those from QEMU VM preparation, network namespaces, Soft-RoCE/RDMA device setup, test-environment module loading, and initial NFS service/export configuration; a setup sudo command alone is not proof of a privileged trigger. For NFS's reserved source-port check, connect_reserved() or bind() to a client TCP/UDP source port below 1024 is a transport prerequisite even if the client machine needs root or CAP_NET_BIND_SERVICE for that bind. Do not set admin_action_required to true or contradict the admin_action check solely for that bind. If submitted access_requirements says local_privileged, determine whether that refers only to this client-side bind rather than target administrator access. Confirm that the original PoC uses an eligible client source port and that its normalized report discloses this client-side requirement; still reject a separate indispensable privileged mount, export change, target configuration change, kernel modification, or other privileged trigger action. Set false when the standalone C trigger otherwise uses unprivileged operations and its necessary path shows no other privileged operation; do not demand proof that every possible test setup is unprivileged. Set null only if a material trigger-stage permission requirement remains ambiguous. Set checks.admin_action to contradicted for true, uncertain for null, and supported only for false. Source files include total_lines and excerpted flags. If a required caller, condition, guard, lifetime edge, effect or privilege prerequisite is outside the displayed excerpts, the corresponding check must be uncertain and the overall verdict cannot be supports. Never assume a missing guard is absent merely because an excerpt omits it. A log that lacks path correlation creates an uncertain log check, not a refutation or fabrication finding without concrete contrary evidence. Identify a contradiction that defeats the base flaw as contradicted. Do not defer to the first review's verdict or confident prose.
 
+For admin_action_required=true, include admin_trigger with file_index, line, and operation anchored to a distinct privileged operation in an ORIGINAL submitted C PoC or .sh trigger script. Client connect_reserved()/bind() and sudo used only to run that client PoC are not valid evidence. Without a separate anchored operation use admin_action_required=null and an uncertain verdict, not refutes. For false or null set admin_trigger=null.
+
 Return supports only if ALL six checks are supported, admin_action_required is false, and no material contradiction or unknown condition remains. Return refutes if admin_action_required is true or a concrete contradiction defeats the base flaw; otherwise uncertain. A submitted log is not proof of server reproduction. Explain the decisive evidence or gap briefly. Output only the specified JSON schema.
 
 Trusted kernel source JSON:
@@ -567,7 +609,7 @@ ${JSON.stringify({ verdict: review.verdict, reason: review.reason, integrity: re
   const { parsed } = await runStructuredCodex(prompt, proofSchemaPath, options);
   const checks = parsed?.checks;
   const keys = ['reachability', 'flaw', 'poc', 'log', 'defenses', 'admin_action'];
-  if (!exactKeys(parsed, ['verdict', 'reason', 'admin_action_required', 'checks']) ||
+  if (!exactKeys(parsed, ['verdict', 'reason', 'admin_action_required', 'admin_trigger', 'checks']) ||
       !['supports', 'refutes', 'uncertain'].includes(parsed.verdict) ||
       ![true, false, null].includes(parsed.admin_action_required) ||
       !exactKeys(checks, keys) ||
@@ -580,8 +622,10 @@ ${JSON.stringify({ verdict: review.verdict, reason: review.reason, integrity: re
       parsed.admin_action_required === null && parsed.verdict === 'supports') {
     throw invalidOutput('proof_review');
   }
+  const adminTrigger = validatedAdminTrigger(parsed.admin_trigger, parsed.admin_action_required,
+    submission, 'proof_review');
   return { verdict: parsed.verdict, reason: field(parsed.reason, 3000, true, 'proof_review'),
-    admin_action_required: parsed.admin_action_required, checks };
+    admin_action_required: parsed.admin_action_required, admin_trigger: adminTrigger, checks };
 }
 
 function rootCauseSection(report) {
