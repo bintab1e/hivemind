@@ -32,19 +32,26 @@ function normalizedTitle(title, filePath, log) {
   return `${path.posix.basename(filePath)} ${fault} ${access}`.slice(0, 300);
 }
 
-export function canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit, nfsVersion }) {
+export function canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit, nfsVersion, preAuth = false }) {
   const normalized = review?.normalized;
   const relevance = review?.relevance;
   if (review?.verdict !== 'likely' || relevance?.verdict !== 'supports' || poc?.language !== 'c' || poc.filename !== 'poc.c' ||
       !normalized?.file_path || !/^[a-f0-9]{40}$/.test(kernelCommit || '') ||
-      !['3', '4', '4.1', '4.2'].includes(nfsVersion) || typeof serverSerial !== 'string') return null;
+      !(preAuth ? nfsVersion === null && normalized.pre_auth : ['3', '4', '4.1', '4.2'].includes(nfsVersion)) ||
+      typeof serverSerial !== 'string') return null;
   const source = trustedSource?.files?.find(file => file.path === normalized.file_path);
   const anchor = review.grounding?.evidence?.find(item => item.path === normalized.file_path && item.line === relevance.source_line &&
     source?.lines?.some(line => line.number === item.line && line.text === item.text && line.text.trim()));
   const pocLine = poc.source?.split(/\r?\n/)[relevance.poc_line - 1];
   const log = relevantKasanLog(serverSerial, relevance.trace_line);
+  const preAuthProof = normalized.pre_auth;
   if (!anchor || !pocLine?.trim() || !log || relevance.source_path !== normalized.file_path ||
-      review.grounding?.source_commit !== kernelCommit) return null;
+      review.grounding?.source_commit !== kernelCommit || preAuth &&
+      (!Number.isInteger(preAuthProof.source_line) || !Number.isInteger(preAuthProof.poc_line) ||
+        !poc.source.split(/\r?\n/)[preAuthProof.poc_line - 1]?.trim() ||
+        !review.grounding.evidence.some(item => item.path === preAuthProof.source_path && item.line === preAuthProof.source_line &&
+          trustedSource.files.some(file => file.path === item.path && file.lines.some(line =>
+            line.number === item.line && line.text === item.text && line.text.trim()))))) return null;
 
   const title = normalizedTitle(normalized.title, normalized.file_path, log);
   const reviewed = sections(normalized.report);
@@ -55,12 +62,19 @@ export function canonicalArtifacts({ review, trustedSource, poc, serverSerial, k
   const snippet = sourceLines.map(line => line.text).join('\n');
   const sourceReference = `${normalized.file_path}:${anchor.line}`;
   const mountSource = nfsVersion === '3' ? '10.77.0.1:/srv/export' : '10.77.0.1:/';
-  const mountOptions = `vers=${nfsVersion},proto=tcp${nfsVersion === '3' ? ',nolock' : ''}`;
+  const mountOptions = nfsVersion && `vers=${nfsVersion},proto=tcp${nfsVersion === '3' ? ',nolock' : ''}`;
+  const runCommand = `/tmp/hivemind-poc 10.77.0.1${preAuth ? '' : ' /mnt/nfs'}`;
   const prose = {
     Summary: [`**${title}**`, safeProse(reviewed?.Summary || review.reason), `검증 결과: 원본 C PoC 시작 후 서버 VM에서 ${impacts.join(', ')} 보고가 관찰되었습니다.`].join('\n\n'),
     'Root cause': [safeProse(reviewed?.['Root cause'] || normalized.report), `검증한 커널 소스 조각 (${sourceReference}):`, '```c', snippet, '```', `정적 검토의 소스 앵커 ${sourceReference}와 PoC 이후 KASAN 스택 프레임을 연결했습니다.`].join('\n\n'),
-    'Reproduction environment': [`QEMU 서버 VM과 클라이언트 VM, 커널 커밋 \`${kernelCommit}\`.`, `클라이언트는 \`${mountSource}\`를 \`/mnt/nfs\`에 \`${mountOptions}\`로 마운트했습니다.`, '서버 VM은 PoC 시작 전 깨끗한 기준선에서 시작했습니다.'].join('\n\n'),
-    PoC: [safeProse(reviewed?.PoC || ''), `원본 제출 C 파일을 \`poc.c\`로 보존하고 클라이언트 VM에서 \`gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c\`로 빌드했습니다.`, '클라이언트 VM에서 `/tmp/hivemind-poc 10.77.0.1 /mnt/nfs`를 실행한 뒤 서버 VM serial에서 KASAN 보고를 수집했습니다.', `검증 시 연결된 PoC 코드 (${poc.filename}:${relevance.poc_line}):`, '```c', pocLine.trim(), '```'].filter(Boolean).join('\n\n'),
+    'Reproduction environment': [`QEMU 서버 VM과 클라이언트 VM, 커널 커밋 \`${kernelCommit}\`.`,
+      preAuth ? '클라이언트는 NFS 마운트 없이 버전 디코딩 전의 직접 네트워크 요청을 보냈습니다.'
+        : `클라이언트는 \`${mountSource}\`를 \`/mnt/nfs\`에 \`${mountOptions}\`로 마운트했습니다.`,
+      '서버 VM은 PoC 시작 전 깨끗한 기준선에서 시작했습니다.'].join('\n\n'),
+    PoC: [safeProse(reviewed?.PoC || ''), `원본 제출 C 파일을 \`poc.c\`로 보존하고 클라이언트 VM에서 \`gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c\`로 빌드했습니다.`,
+      `클라이언트 VM에서 \`${runCommand}\`를 실행한 뒤 서버 VM serial에서 KASAN 보고를 수집했습니다.`,
+      ...(preAuth ? [`정적 pre-auth 근거: ${normalized.pre_auth.source_path}:${normalized.pre_auth.source_line}, 원본 PoC ${poc.filename}:${normalized.pre_auth.poc_line}.`] : []),
+      `검증 시 연결된 PoC 코드 (${poc.filename}:${relevance.poc_line}):`, '```c', pocLine.trim(), '```'].filter(Boolean).join('\n\n'),
     'Impact analysis': [`이번 2VM 재현에서 확인된 영향: **${impacts.join(', ')}**.`, 'Controlled Read/Write, LPE, RCE, Info Leak은 이 재현만으로 확인되지 않았습니다.'].join('\n\n'),
   };
   const report = `${headings.map(heading => `## ${heading}\n\n${prose[heading]}`).join('\n\n')}\n`;
@@ -68,9 +82,10 @@ export function canonicalArtifacts({ review, trustedSource, poc, serverSerial, k
     '# Reproduction', '',
     `Kernel commit: \`${kernelCommit}\``,
     'Topology: isolated QEMU server and client VMs; server address `10.77.0.1`.',
-    `NFS mount: \`mount -t nfs -o ${mountOptions} ${mountSource} /mnt/nfs\`.`,
+    preAuth ? 'NFS mount: none; direct pre-auth transport request, no NFS version decoded.'
+      : `NFS mount: \`mount -t nfs -o ${mountOptions} ${mountSource} /mnt/nfs\`.`,
     'Compile in the client VM: `gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c`.',
-    'Run in the client VM: `/tmp/hivemind-poc 10.77.0.1 /mnt/nfs`.',
+    `Run in the client VM: \`${runCommand}\`.`,
     `Observed after PoC start: ${impacts.join(', ')} in the server VM serial output.`,
     'Evidence: `kasan.log`.', '',
   ].join('\n');

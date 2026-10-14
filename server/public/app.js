@@ -17,7 +17,7 @@ const impacts = [
   ['lpe', 'LPE'], ['rce', 'RCE'], ['info_leak', 'Info Leak'],
 ];
 const accessLabels = {
-  auth_null: 'AUTH_NULL', auth_unix: 'AUTH_UNIX', rpcsec_gss: 'RPCSEC_GSS',
+  pre_auth: 'Pre-auth', auth_null: 'AUTH_NULL', auth_unix: 'AUTH_UNIX', rpcsec_gss: 'RPCSEC_GSS',
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };

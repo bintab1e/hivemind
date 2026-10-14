@@ -40,6 +40,7 @@ const answer = {
     options: null,
     permission: 'AUTH_SYS',
     nfs_version: '4.2',
+    pre_auth: null,
     vulnerability_type: 'OOB Read',
     found_date: null,
     claimed_impacts: ['kasan_read'],
@@ -156,6 +157,26 @@ test('canonicalizes common permission and NFS version aliases, rejecting ambiguo
   const unstructured = structuredClone(answer);
   unstructured.normalized.report = '## Summary\nOnly one section.';
   await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unstructured))), error => error.code === 'invalid_output');
+});
+
+test('pre-auth review requires grounded source and original C PoC lines without a fabricated NFS version', async t => {
+  const direct = structuredClone(answer);
+  direct.normalized.nfs_version = null;
+  direct.normalized.permission = 'Pre-auth';
+  direct.normalized.pre_auth = { source_path: 'fs/nfsd/nfs4proc.c', source_line: 1, poc_line: 1 };
+  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, direct)));
+  assert.equal(reviewed.normalized.nfs_version, null);
+  assert.deepEqual(reviewed.normalized.pre_auth, direct.normalized.pre_auth);
+  for (const change of [
+    result => { result.normalized.pre_auth.source_line = 2; },
+    result => { result.normalized.pre_auth.poc_line = 9; },
+    result => { result.normalized.nfs_version = '4.2'; },
+  ]) {
+    const invalid = structuredClone(direct);
+    change(invalid);
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalid))),
+      error => error.code === 'ungrounded_output');
+  }
 });
 
 test('fails closed when CLI is missing or submitted paths are unsafe', async () => {

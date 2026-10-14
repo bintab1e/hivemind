@@ -43,6 +43,9 @@ export function validateManifest(manifest) {
   if ((manifest.files || []).includes(manifest.poc)) throw new Error('files must not repeat the PoC');
   if (manifest.nfsVersion !== undefined && (typeof manifest.nfsVersion !== 'string' || !VALID_VERSIONS.has(manifest.nfsVersion))) throw new Error('unsupported NFS version');
   if (manifest.mount !== undefined && typeof manifest.mount !== 'boolean') throw new Error('mount must be boolean');
+  if (manifest.mount === false ? manifest.nfsVersion !== undefined : !VALID_VERSIONS.has(manifest.nfsVersion)) {
+    throw new Error('NFS mount and version must match');
+  }
   if (manifest.serverSetup !== undefined && (!Array.isArray(manifest.serverSetup) || manifest.serverSetup.length)) {
     throw new Error('serverSetup is forbidden: server-console evidence must not be submitter-controlled');
   }

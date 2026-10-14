@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { CodexReviewError, VerifierUnavailableError } from './codex.mjs';
-import { postJson, runWorkerOnce, stableWorkerId } from './worker.mjs';
+import { postJson, processSubmissionJob, runWorkerOnce, stableWorkerId } from './worker.mjs';
 
 const commit = 'a'.repeat(40);
 const id = 'b'.repeat(64);
@@ -117,6 +117,40 @@ test('uses exact original C PoC and fixed guest manifest, sends only post-PoC se
   assert.equal(completed.result.review.relevance.symbolized_line, 17);
   assert.deepEqual(completed.result.review.normalized.logs, [{ filename: 'evidence-1.log', original_name: 'report.txt', source_index: 2 }]);
   assert.equal(fs.readdirSync(dir).some(name => name.startsWith('hv-')), false);
+});
+
+test('grounded direct pre-auth PoC runs without an NFS mount or invented version', async t => {
+  const { config } = setup(t);
+  const preAuthJob = { ...job, metadata: { ...job.metadata,
+    nfs_version: 'Transport pre-authentication; no decoded NFS version' } };
+  const reviewer = async () => ({ verdict: 'likely', reason: 'Pre-auth transport path is plausible',
+    grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1,
+      text: trustedSource.files[0].lines[0].text }] },
+    normalized: { file_path: 'fs/nfsd/nfs4proc.c', nfs_version: null, permission: 'Pre-auth',
+      pre_auth: { source_path: 'fs/nfsd/nfs4proc.c', source_line: 1, poc_line: 1 },
+      poc: { source_index: 1, source, original_name: 'arbitrary-name.c', filename: 'poc.c', language: 'c' } } });
+  let ran = false;
+  const runner = async ({ bundleDir, outputDir }) => {
+    ran = true;
+    const manifest = JSON.parse(fs.readFileSync(path.join(bundleDir, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.mount, false);
+    assert.equal(Object.hasOwn(manifest, 'nfsVersion'), false);
+    assert.deepEqual(manifest.run, ['@BINARY@', '@SERVER@']);
+    fs.mkdirSync(outputDir);
+    const serverSerialPath = path.join(outputDir, 'server.serial.log');
+    fs.writeFileSync(serverSerialPath, '');
+    return { status: 'not_observed', reason: 'No KASAN', kernelCommit: commit,
+      observation: { serverEvidenceStartOffset: 0 }, evidence: { serverSerialPath } };
+  };
+  const result = await processSubmissionJob(preAuthJob, { config, sourceLoader, reviewer, runner });
+  assert.equal(ran, true);
+  assert.deepEqual([result.reproduction.status, result.reproduction.nfsVersion, result.reproduction.mount],
+    ['not_observed', null, false]);
+  const staticReview = await reviewer();
+  const metadataOnly = await processSubmissionJob(preAuthJob, { config, sourceLoader,
+    reviewer: async () => ({ ...staticReview, normalized: { ...staticReview.normalized, pre_auth: null } }),
+    runner: () => { throw new Error('metadata alone must not run a VM'); } });
+  assert.match(metadataOnly.reproduction.reason, /NFS version/);
 });
 
 test('malformed PoC text fails closed and still completes the leased job', async t => {

@@ -198,9 +198,14 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     if (!poc) return { review, reproduction: inconclusive('No original userspace PoC was selected'), server_serial: '' };
     const submittedVersion = submission.metadata?.nfs_version;
     const reviewedVersion = review.normalized?.nfs_version;
-    const nfsVersion = version(submittedVersion) || version(reviewedVersion);
-    if (!nfsVersion || submittedVersion && version(submittedVersion) !== nfsVersion ||
-        reviewedVersion && version(reviewedVersion) !== nfsVersion) {
+    const preAuth = review.normalized?.pre_auth;
+    const preAuthMode = preAuth && reviewedVersion == null && review.normalized.permission === 'Pre-auth' &&
+      !version(submittedVersion) &&
+      review.grounding.evidence.some(item => item.path === preAuth.source_path && item.line === preAuth.source_line) &&
+      Number.isInteger(preAuth.poc_line) && preAuth.poc_line > 0 && poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim();
+    const nfsVersion = preAuthMode ? null : version(submittedVersion) || version(reviewedVersion);
+    if (!preAuthMode && (!nfsVersion || preAuth || submittedVersion && version(submittedVersion) !== nfsVersion ||
+        reviewedVersion && version(reviewedVersion) !== nfsVersion)) {
       return { review, reproduction: inconclusive('NFS version is missing, ambiguous, or disagrees with static review'), server_serial: '' };
     }
     privateDir = fs.mkdtempSync(path.join(config.workRoot, 'hv-'));
@@ -210,7 +215,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     fs.writeFileSync(path.join(bundleDir, poc.filename), poc.source, { mode: 0o600 });
     fs.writeFileSync(path.join(bundleDir, 'manifest.json'), JSON.stringify({
       schemaVersion: 1, project: 'knfsd', targetCommit, poc: poc.filename, files: [],
-      nfsVersion, mount: true, expected: { stream: 'server', contains: 'BUG: KASAN:' },
+      ...(preAuthMode ? { mount: false, run: ['@BINARY@', '@SERVER@'] } : { nfsVersion, mount: true }),
+      expected: { stream: 'server', contains: 'BUG: KASAN:' },
     }), { mode: 0o600 });
     const outputDir = path.join(privateDir, 'output');
     await onPhase('qemu_reproduction');
@@ -218,7 +224,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       rootfsImage: config.rootfsImage, outputDir });
     serverSerial = serialExcerpt(result.evidence.serverSerialPath, result.observation?.serverEvidenceStartOffset);
     const { evidence, ...portable } = result;
-    reproduction = { ...portable, nfsVersion };
+    reproduction = { ...portable, nfsVersion, mount: !preAuthMode };
     if (result.status === 'observed' && (result.kernelCommit !== targetCommit || result.observation?.guestCompleted !== true ||
         result.observation?.targetCommitMatch !== true || result.observation?.pocStarted !== true ||
         result.observation?.baselineClean !== true || result.observation?.serverEvidenceAfterPoc !== true)) {
@@ -243,7 +249,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       }
       if (review.relevance.verdict !== 'supports') reproduction = inconclusive('KASAN trace relevance was not confirmed');
       else if (reproduction.status === 'observed') {
-        artifacts = canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit: targetCommit, nfsVersion });
+        artifacts = canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit: targetCommit, nfsVersion,
+          preAuth: Boolean(preAuthMode) });
         if (!artifacts) reproduction = inconclusive('Canonical report lacks grounded source, PoC, or relevant server KASAN evidence');
         else {
           review.normalized.title = artifacts.title;

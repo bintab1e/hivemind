@@ -51,6 +51,21 @@ test('missing grounded source, PoC line, or matching trace cannot yield canonica
   assert.equal(canonicalArtifacts({ ...input, nfsVersion: '4.1,4.2' }), null);
 });
 
+test('pre-auth artifacts describe direct 2VM transport without inventing an NFS mount or version', () => {
+  const preAuthReview = structuredClone(review);
+  preAuthReview.normalized.pre_auth = { source_path: filePath, source_line: 43, poc_line: 1 };
+  const result = canonicalArtifacts({ review: preAuthReview, trustedSource, poc, serverSerial: serial,
+    kernelCommit: commit, nfsVersion: null, preAuth: true });
+  assert.ok(result);
+  assert.match(result.report.content, /NFS 마운트 없이/);
+  assert.match(result.reproduction.content, /NFS mount: none/);
+  assert.match(result.reproduction.content, /hivemind-poc 10\.77\.0\.1`/);
+  assert.doesNotMatch(result.reproduction.content, /vers=|4\.2|\/mnt\/nfs/);
+  preAuthReview.normalized.pre_auth.source_line = 99;
+  assert.equal(canonicalArtifacts({ review: preAuthReview, trustedSource, poc, serverSerial: serial,
+    kernelCommit: commit, nfsVersion: null, preAuth: true }), null);
+});
+
 test('worker refuses conflicting NFS versions before starting two VMs', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hivemind-canonical-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

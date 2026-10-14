@@ -450,6 +450,7 @@ function canonicalNfsVersion(input) {
 
 function canonicalPermission(input) {
   const value = String(input ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+  if (['PRE-AUTH', 'PRE-AUTHENTICATION'].includes(value)) return 'Pre-auth';
   if (['AUTH_SYS', 'AUTH_UNIX', 'SEC=SYS'].includes(value)) return 'AUTH_SYS';
   if (['AUTH_NONE', 'AUTH_NULL'].includes(value)) return 'AUTH_NONE';
   if (['RPCSEC_GSS', 'KERBEROS', 'SEC=KRB5'].includes(value)) return 'RPCSEC_GSS';
@@ -738,11 +739,16 @@ export function completeSubmission(db, id, result, leaseToken) {
     const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
     const testedVersion = canonicalNfsVersion(run.nfsVersion);
     const submittedVersion = metadata.nfs_version == null ? null : canonicalNfsVersion(metadata.nfs_version);
+    const preAuth = normalized.pre_auth;
+    const preAuthMode = preAuth != null && normalized.nfs_version == null && run.nfsVersion == null &&
+      run.mount === false && submittedVersion === null;
+    const versionedMode = preAuth == null && run.mount !== false && nfsVersion && testedVersion === nfsVersion &&
+      (metadata.nfs_version == null || submittedVersion === nfsVersion);
     const privilege = canonicalPermission(normalized.permission);
     const vulnerabilityType = canonicalVulnerabilityType(normalized.vulnerability_type);
     if (!title || !filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..') ||
-        !nfsVersion || !testedVersion || nfsVersion !== testedVersion ||
-        metadata.nfs_version != null && submittedVersion !== nfsVersion || !privilege || !vulnerabilityType) {
+        !preAuthMode && !versionedMode || !privilege || !vulnerabilityType ||
+        preAuthMode && privilege !== 'Pre-auth' || versionedMode && privilege === 'Pre-auth') {
       const out = mark(db, id, 'needs_review', 'Verified finding lacks consistent title, source path, tested NFS version, permission or vulnerability type', summary);
       db.exec('COMMIT'); return out;
     }
@@ -758,6 +764,13 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', error.message, summary); db.exec('COMMIT'); return out;
     }
     if (!poc) { const out = mark(db, id, 'needs_review', 'No selected PoC source', summary); db.exec('COMMIT'); return out; }
+    if (preAuthMode && (!Number.isInteger(preAuth.source_line) || !Number.isInteger(preAuth.poc_line) ||
+        preAuth.poc_line < 1 || !poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim() ||
+        !review.grounding?.evidence?.some(item => item.path === preAuth.source_path && item.line === preAuth.source_line &&
+          typeof item.text === 'string' && item.text.trim()))) {
+      const out = mark(db, id, 'needs_review', 'Pre-auth reachability lacks grounded source and original PoC lines', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (!groundedRelevance(review, commit, filePath, evidence, poc)) {
       const out = mark(db, id, 'needs_review', 'Codex could not link the trusted source, original PoC and post-run KASAN trace', summary);
       db.exec('COMMIT'); return out;
@@ -782,16 +795,17 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     const at = now();
-    const access = /AUTH_NONE|AUTH_NULL/i.test(privilege || '') ? ['auth_null'] : /AUTH_SYS|AUTH_UNIX/i.test(privilege || '') ? ['auth_unix'] : [];
+    const access = privilege === 'Pre-auth' ? ['pre_auth'] : privilege === 'RPCSEC_GSS' ? ['rpcsec_gss'] :
+      /AUTH_NONE|AUTH_NULL/i.test(privilege || '') ? ['auth_null'] : /AUTH_SYS|AUTH_UNIX/i.test(privilege || '') ? ['auth_unix'] : [];
     const foundDate = /^\d{4}-\d{2}-\d{2}$/.test(normalized.found_date || '') ? normalized.found_date : row.submitted_at.slice(0, 10);
     const data = {
       schema_version: 1, kind: 'finding', version_id: version, repo_commit: commit, title,
       file_path: filePath, scope: [filePath], code_refs: Array.isArray(normalized.code_refs) ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.length <= 300).slice(0, 30) : [],
       angle: 'qemu-two-vm-reproduction', created_at: at,
-      vm_environment: `QEMU server/client, NFS ${nfsVersion}, kernel ${commit}`,
+      vm_environment: `QEMU server/client, ${preAuthMode ? 'direct pre-auth request without NFS mount' : `NFS ${nfsVersion}`}, kernel ${commit}`,
       verified_impacts: evidence.impacts, access_requirements: access,
       impact: vulnerabilityType,
-      reproduction_command: 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c && /tmp/hivemind-poc 10.77.0.1 /mnt/nfs',
+      reproduction_command: `gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c && /tmp/hivemind-poc 10.77.0.1${preAuthMode ? '' : ' /mnt/nfs'}`,
       poc_source: poc.source, poc_sha256: hash(poc.source), kasan_log: evidence.log, kasan_sha256: hash(evidence.log),
       registry_target: 'knfsd', registry_option: value(normalized.options, 'options', 200),
       registry_privilege: privilege, registry_nfs_version: nfsVersion,

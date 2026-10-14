@@ -100,6 +100,61 @@ test('unstructured submission stays out of registry until independent 2VM eviden
   assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
 });
 
+test('grounded pre-auth 2VM evidence is registered without a fabricated NFS version', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-preauth-submissions-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const input = raw('preauth-accepted');
+  input.metadata.nfs_version = 'Transport pre-authentication; no decoded NFS version';
+  const id = submitSubmission(db, input, 'pc01').submission_id;
+  const claimed = claimSubmission(db, commit);
+  const result = verdict();
+  result.review.normalized.nfs_version = null;
+  result.review.normalized.permission = 'Pre-auth';
+  result.review.normalized.pre_auth = { source_path: 'fs/nfsd/nfs4proc.c', source_line: 42, poc_line: 1 };
+  result.reproduction.nfsVersion = null;
+  result.reproduction.mount = false;
+  result.artifacts.report.content = report.replace('NFS 4.2', 'direct pre-auth request without NFS mount');
+  result.artifacts.reproduction.content = `Two QEMU VMs, direct pre-auth request without NFS mount, kernel ${commit}.`;
+  const approved = completeSubmission(db, id, result, claimed.lease_token);
+  assert.equal(approved.status, 'approved');
+  const finding = listRegistry(db).find(item => item.management_id === approved.management_id);
+  assert.equal(finding.nfs_version, null);
+  assert.equal(finding.privilege, 'Pre-auth');
+  assert.deepEqual(finding.access_requirements, ['pre_auth']);
+  assert.match(finding.vm_environment, /without NFS mount/);
+  assert.doesNotMatch(finding.reproduction_command, /\/mnt\/nfs|vers=/);
+});
+
+test('pre-auth metadata alone, false permission, or mismatched VM mode cannot assign a number', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-preauth-gates-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  for (const [label, mutate] of [
+    ['metadata-only', result => { result.review.normalized.pre_auth = null; }],
+    ['wrong-permission', result => { result.review.normalized.permission = 'AUTH_NONE'; }],
+    ['mounted-vm', result => { result.reproduction.mount = true; }],
+    ['invented-version', result => { result.reproduction.nfsVersion = '4.2'; }],
+    ['missing-source-proof', result => { result.review.normalized.pre_auth.source_line = 99; }],
+  ]) {
+    const input = raw(`preauth-${label}`);
+    input.metadata.nfs_version = 'Transport pre-authentication; no decoded NFS version';
+    const id = submitSubmission(db, input, 'pc01').submission_id;
+    const claimed = claimSubmission(db, commit);
+    const result = verdict();
+    result.review.normalized.nfs_version = null;
+    result.review.normalized.permission = 'Pre-auth';
+    result.review.normalized.pre_auth = { source_path: 'fs/nfsd/nfs4proc.c', source_line: 42, poc_line: 1 };
+    result.reproduction.nfsVersion = null;
+    result.reproduction.mount = false;
+    mutate(result);
+    assert.equal(completeSubmission(db, id, result, claimed.lease_token).status, 'needs_review', label);
+  }
+  assert.equal(listRegistry(db).length, 0);
+});
+
 test('inconsistent metadata or missing canonical files never receives a management number', t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-format-gates-'));
   const db = openDatabase(path.join(directory, 'db.sqlite3'));

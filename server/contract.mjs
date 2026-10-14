@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export const evidenceLimits = { poc: 250_000, kasan: 600_000 };
 export const verifiedImpactTypes = ['kasan_read', 'kasan_write', 'controlled_read', 'controlled_write', 'rce', 'lpe', 'info_leak'];
-export const accessRequirementTypes = ['auth_null', 'auth_unix', 'rpcsec_gss', 'authenticated_client', 'malicious_server', 'local_user', 'local_privileged'];
+export const accessRequirementTypes = ['pre_auth', 'auth_null', 'auth_unix', 'rpcsec_gss', 'authenticated_client', 'malicious_server', 'local_user', 'local_privileged'];
 const hasKorean = value => typeof value === 'string' && /[가-힣]/u.test(value);
 
 export class HttpError extends Error {

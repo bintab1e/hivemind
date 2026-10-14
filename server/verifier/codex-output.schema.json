@@ -9,7 +9,7 @@
     "normalized": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["title", "report", "file_path", "code_refs", "source_evidence", "options", "permission", "nfs_version", "vulnerability_type", "found_date", "claimed_impacts", "poc_file_index", "poc_language", "build_command", "run_command", "log_file_indexes"],
+      "required": ["title", "report", "file_path", "code_refs", "source_evidence", "options", "permission", "nfs_version", "pre_auth", "vulnerability_type", "found_date", "claimed_impacts", "poc_file_index", "poc_language", "build_command", "run_command", "log_file_indexes"],
       "properties": {
         "title": { "type": ["string", "null"] },
         "report": { "type": ["string", "null"] },
@@ -19,6 +19,7 @@
         "options": { "type": ["string", "null"] },
         "permission": { "type": ["string", "null"] },
         "nfs_version": { "type": ["string", "null"] },
+        "pre_auth": { "type": ["object", "null"], "additionalProperties": false, "required": ["source_path", "source_line", "poc_line"], "properties": { "source_path": { "type": "string" }, "source_line": { "type": "integer" }, "poc_line": { "type": "integer" } } },
         "vulnerability_type": { "type": ["string", "null"] },
         "found_date": { "type": ["string", "null"] },
         "claimed_impacts": {

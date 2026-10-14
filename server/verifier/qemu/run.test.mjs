@@ -20,6 +20,9 @@ test('only supported, bounded guest manifests enter the VM', () => {
   assert.throws(() => validateManifest({ ...valid, project: 'NFS-Ganesha' }), /knfsd/);
   assert.throws(() => validateManifest({ ...valid, targetCommit: 'a'.repeat(12) }), /full kernel commit/);
   assert.throws(() => validateManifest({ ...valid, nfsVersion: 4.2 }), /unsupported NFS version/);
+  assert.equal(validateManifest({ ...valid, nfsVersion: undefined, mount: false }).mount, false);
+  assert.throws(() => validateManifest({ ...valid, nfsVersion: undefined, mount: true }), /mount and version/);
+  assert.throws(() => validateManifest({ ...valid, mount: false }), /mount and version/);
 });
 
 test('only post-start server KASAN can be observed', () => {
