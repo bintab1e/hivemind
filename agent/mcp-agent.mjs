@@ -15,6 +15,7 @@ const localTools = [
     properties: {
       project: { type: 'string', enum: ['knfsd'], description: '현재 지원 대상은 knfsd뿐이다.' },
       title: { type: 'string', maxLength: 300, description: '영향받는 기능, 원인, 결과를 담은 짧고 중립적인 제목. 서버가 근거에 맞게 정규화한다.' },
+      existing_management_id: { type: 'string', pattern: '^A-\\d{3,}$', description: '이미 승인된 동일 knfsd 취약점의 프리미티브·PoC를 강화해 다시 제출할 때 기존 관리 번호(예: A-005). 새 취약점이면 생략한다. 기존 기록은 서버 재검증·승인 전까지 바뀌지 않는다.' },
       report: { type: 'string', description: '원본 분석 보고서. report.md로 files에 첨부하면 생략한다.' },
       metadata: { type: 'object', description: '분석 PC에서 직접 확인한 조건과 주장. 최종 체크·분류는 서버 2VM 검증 결과로 결정한다.', properties: {
         file_path: { type: 'string', description: '커널 체크아웃 기준 상대 경로' },

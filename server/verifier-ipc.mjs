@@ -109,7 +109,7 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null, data
             Object.keys(body).some(key => key !== 'target_commit') ||
             (Object.hasOwn(body, 'target_commit') &&
               (typeof body.target_commit !== 'string' || !/^[a-f0-9]{40}$/.test(body.target_commit)))) invalid('Invalid claim request');
-        return reply(res, 200, { job: claimSubmission(db, body.target_commit) });
+        return reply(res, 200, { job: claimSubmission(db, body.target_commit, dataDir) });
       }
       if (req.method === 'POST' && req.url === '/progress') {
         const body = await inputJson(req);

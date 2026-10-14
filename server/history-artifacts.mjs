@@ -181,6 +181,18 @@ function artifactRow(db, managementId, artifactId = null) {
   return db.prepare(`${select}${from} WHERE a.management_id = ? ORDER BY ${order}`).all(managementId);
 }
 
+function latestVerifiedArtifacts(db, managementId) {
+  const submission = db.prepare(`SELECT id FROM submissions WHERE management_id = ?
+    AND finding_id IS NULL AND status = 'approved' ORDER BY submitted_at DESC, id DESC LIMIT 1`).get(managementId);
+  if (!submission) return [];
+  return db.prepare(`SELECT name, size, sha256, content FROM submission_artifacts
+    WHERE submission_id = ? AND ordinal BETWEEN 1000 AND 1003 ORDER BY ordinal`).all(submission.id)
+    .map((row, index) => ({ ...row,
+      id: createHash('sha256').update(`${submission.id}\0${row.name}`).digest('hex'),
+      kind: index === 0 ? 'report' : index === 3 ? 'verification' : 'poc',
+      download_name: row.name, original_name: row.name, previewable: true }));
+}
+
 export function importHistoryArtifacts(db, dataDir, sourceDir, manifest) {
   const entries = validateManifest(db, manifest);
   const sourceRoot = fs.realpathSync(sourceDir);
@@ -243,11 +255,14 @@ export function importHistoryArtifacts(db, dataDir, sourceDir, manifest) {
 export function listHistoryArtifacts(db, managementId) {
   if (!idPattern.test(managementId) || !db.prepare('SELECT 1 FROM registry_history WHERE management_id = ?').get(managementId)) invalid('Historical finding not found', 404);
   const rows = artifactRow(db, managementId);
-  return rows.map(row => ({ ...row, previewable: isPreviewable(row) }));
+  return [...latestVerifiedArtifacts(db, managementId).map(({ content, ...row }) => row),
+    ...rows.map(row => ({ ...row, previewable: isPreviewable(row) }))];
 }
 
 export function openHistoryArtifact(db, dataDir, managementId, artifactId) {
   if (!idPattern.test(managementId) || !artifactPattern.test(artifactId)) invalid('Historical artifact not found', 404);
+  const verified = latestVerifiedArtifacts(db, managementId).find(item => item.id === artifactId);
+  if (verified) return { ...verified, content: Buffer.from(verified.content) };
   const row = artifactRow(db, managementId, artifactId);
   if (!row) invalid('Historical artifact not found', 404);
   const file = path.join(artifactDirectory(dataDir), artifactId);

@@ -63,13 +63,15 @@ function historicalReport(db, dataDir, managementId) {
   try {
     opened = openHistoryArtifact(db, dataDir, managementId, report.id);
     const buffer = Buffer.alloc(Math.min(opened.size, maxExcerptBytes));
-    const count = fs.readSync(opened.fd, buffer, 0, buffer.length, 0);
+    const count = opened.content
+      ? opened.content.copy(buffer, 0, 0, buffer.length)
+      : fs.readSync(opened.fd, buffer, 0, buffer.length, 0);
     return excerpt(buffer.subarray(0, count));
   } catch (error) {
     if (error.status === 404 || error.code === 'ENOENT') return '';
     throw error;
   } finally {
-    if (opened) fs.closeSync(opened.fd);
+    if (opened?.fd !== undefined) fs.closeSync(opened.fd);
   }
 }
 
@@ -77,7 +79,7 @@ function liveReport(db, findingId, markdown) {
   const artifact = db.prepare(`SELECT substr(a.content, 1, ?) AS excerpt
     FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
     WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal = 1000
-    ORDER BY s.completed_at DESC, s.id DESC LIMIT 1`).get(maxExcerptBytes, findingId);
+    ORDER BY s.submitted_at DESC, s.id DESC LIMIT 1`).get(maxExcerptBytes, findingId);
   if (artifact) return excerpt(artifact.excerpt);
   try { return excerpt(readFrontMatter(markdown).body); }
   catch { return ''; }

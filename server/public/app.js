@@ -68,6 +68,7 @@ function showView() {
   $('finding-export-csv').hidden = view !== 'registry';
   if (view !== 'findings' && $('zip-submit-dialog').open) $('zip-submit-dialog').close();
   if (view !== 'patch' && $('patch-upload-dialog').open) $('patch-upload-dialog').close();
+  if (view !== 'queue' && $('queue-detail').open) $('queue-detail').close();
   $('finding-status-stats').hidden = view !== 'registry';
   $('queue-view').hidden = view !== 'queue';
   $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
@@ -183,6 +184,7 @@ const reviewLabel = finding => {
 const impactEvidence = (finding, present) => {
   if (!present) return '기록 없음';
   if (!isRegistered(finding)) return '제출 주장, 정적 검증 대기';
+  if (finding.origin === 'history' && finding.latest_verification?.result === 'verified') return '서버 2VM 재현으로 확인';
   return finding.review_provider === 'codex_qemu'
     ? '서버 2VM 재현으로 확인'
     : '제출 증빙 포함, Kimi likely 정적 판정. 서버 독립 재현 아님';
@@ -975,29 +977,59 @@ const queueStatusLabels = {
 const queueWorkerLabels = { busy: '작업 중', idle: '유휴', offline: '오프라인' };
 const queuePhaseLabel = row => row.phase ? queuePhaseLabels[row.phase] || row.phase : '검증 중';
 const queueSubmitter = row => row.origin === 'manual_upload' ? `직접 제출 · ${row.reporter || '표시명 없음'}` : row.agent_id;
+let queueDetailSubmissionId = '';
 
-function renderQueueTable(id, rows, columns, emptyMessage) {
+function renderQueueDetail(row) {
+  $('queue-detail-title').textContent = row.title || '제목 없음';
+  $('queue-detail-subtitle').textContent = `${row.project || '대상 미입력'} · ${queueSubmitter(row) || '제보자 미입력'}`;
+  const facts = $('queue-detail-facts');
+  clear(facts);
+  const phase = row.phase ? queuePhaseLabel(row) : row.status === 'processing' ? '검증 중' : '—';
+  facts.append(
+    detailFact('상태', queueStatusLabels[row.status] || row.status),
+    detailFact('검증 단계', `${phase}${row.stale ? ' · 응답 지연' : ''}`),
+    detailFact('제출 순서 / 시도 횟수', `${row.position || '—'} · ${number(row.attempts)}`),
+    detailFact('제출 시각', when(row.submitted_at)),
+    detailFact('검증 시작 / 단계 갱신', `${when(row.claimed_at)} · ${when(row.phase_updated_at)}`),
+    detailFact('마지막 작업 응답', when(row.last_activity_at)),
+    detailFact('완료 시각', when(row.completed_at)),
+    detailFact('대상 커밋', row.target_commit),
+    detailFact('접수 ID', row.submission_id),
+  );
+  if (row.existing_management_id) facts.append(detailFact('보강 대상 관리번호', row.existing_management_id));
+  if (row.management_id) facts.append(detailFact('관리번호', row.management_id));
+  if (row.reason) {
+    const reason = detailFact('검증 결과 / 오류 사유', row.reason);
+    reason.classList.add('review-summary');
+    facts.append(reason);
+  }
+}
+
+function openQueueDetail(row) {
+  queueDetailSubmissionId = row.submission_id;
+  renderQueueDetail(row);
+  $('queue-detail').showModal();
+}
+
+function renderQueueList(id, rows, emptyMessage) {
   const container = $(id);
   clear(container);
   if (!rows.length) { container.append(element('div', 'table-empty', emptyMessage)); return; }
-  const table = element('table', 'queue-table');
-  const head = element('thead');
-  const heading = element('tr');
-  for (const [label] of columns) heading.append(element('th', '', label));
-  head.append(heading);
-  const body = element('tbody');
   for (const row of rows) {
-    const tr = element('tr');
-    for (const [, value, className] of columns) tr.append(element('td', className || '', value(row) || '—'));
-    body.append(tr);
+    const item = element('button', 'queue-entry');
+    item.type = 'button';
+    item.dataset.submissionId = row.submission_id;
+    item.append(element('strong', 'queue-entry-title', row.title || '제목 없음'),
+      element('span', 'queue-entry-reporter', queueSubmitter(row) || '제보자 미입력'));
+    item.addEventListener('click', () => openQueueDetail(row));
+    container.append(item);
   }
-  table.append(head, body);
-  container.append(table);
 }
 
 function renderVerificationQueue() {
   for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked']) clear($(id));
   if (state.queueError) {
+    if ($('queue-detail').open) $('queue-detail').close();
     $('queue-updated').textContent = '조회 실패';
     $('queue-worker-count').textContent = '';
     for (const id of ['queue-active-count', 'queue-pending-count', 'queue-blocked-count']) $(id).textContent = '';
@@ -1068,23 +1100,15 @@ function renderVerificationQueue() {
     board.append(columns);
     $('queue-workers').append(board);
   }
-  const title = row => `${row.project || '대상 미입력'} · ${row.title || '제목 없음'} (${row.submission_id})`;
-  renderQueueTable('queue-active', queue.active, [
-    ['취약점', title, 'queue-title-cell'], ['제보자', queueSubmitter],
-    ['검증 단계', row => `${queuePhaseLabel(row)}${row.stale ? ' · 응답 지연' : ''}`],
-    ['상태', row => queueStatusLabels[row.status] || row.status],
-    ['단계 갱신', row => when(row.phase_updated_at)], ['대상 커밋', row => row.target_commit, 'queue-commit'],
-  ], '현재 검증 중인 신규 제출이 없습니다.');
-  renderQueueTable('queue-pending', queue.pending, [
-    ['순서', row => row.position, 'queue-position'], ['취약점', title, 'queue-title-cell'],
-    ['제보자', queueSubmitter], ['대상 커밋', row => row.target_commit, 'queue-commit'],
-    ['제출 시각', row => when(row.submitted_at)],
-  ], '검증을 기다리는 신규 제출이 없습니다.');
-  renderQueueTable('queue-blocked', queue.blocked, [
-    ['취약점', title, 'queue-title-cell'], ['상태', row => queueStatusLabels[row.status] || row.status],
-    ['사유', row => row.reason, 'queue-reason'], ['제보자', queueSubmitter],
-    ['대상 커밋', row => row.target_commit, 'queue-commit'],
-  ], '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
+  renderQueueList('queue-active', queue.active, '현재 검증 중인 신규 제출이 없습니다.');
+  renderQueueList('queue-pending', queue.pending, '검증을 기다리는 신규 제출이 없습니다.');
+  renderQueueList('queue-blocked', queue.blocked, '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
+  if ($('queue-detail').open) {
+    const current = [...queue.active, ...queue.pending, ...queue.blocked]
+      .find(row => row.submission_id === queueDetailSubmissionId);
+    if (current) renderQueueDetail(current);
+    else $('queue-detail').close();
+  }
 }
 
 async function loadVerificationQueue() {
@@ -1310,7 +1334,9 @@ async function submitZip(event) {
   if (zipSubmitting) return;
   const title = $('zip-title').value.trim();
   const reporter = $('zip-reporter').value.trim();
+  const existingManagementId = $('zip-existing-id').value.trim().toUpperCase();
   if (!title || !reporter) return uploadMessage('취약점 명과 제보자 표시명을 입력해 주세요.', true);
+  if (existingManagementId && !/^A-\d{3,}$/.test(existingManagementId)) return uploadMessage('기존 관리번호는 A-001 형식으로 입력해 주세요.', true);
   const file = $('zip-file').files?.[0];
   if (!file || !/\.zip$/i.test(file.name)) return uploadMessage('ZIP 파일을 선택해 주세요.', true);
   if (!file.size || file.size > 8_000_000) return uploadMessage('ZIP은 8 MB 이하의 비어 있지 않은 파일이어야 합니다.', true);
@@ -1325,7 +1351,8 @@ async function submitZip(event) {
     for (let i = 0; i < bytes.length; i += 24_576) zipBase64 += btoa(String.fromCharCode(...bytes.subarray(i, i + 24_576)));
     const response = await api('/api/submissions/upload', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project: 'knfsd', title, reporter, track_id: trackId, zip_base64: zipBase64 }),
+      body: JSON.stringify({ project: 'knfsd', title, reporter, track_id: trackId, zip_base64: zipBase64,
+        ...(existingManagementId ? { existing_management_id: existingManagementId } : {}) }),
     }).then(result => result.json());
     if (!/^[a-f0-9]{64}$/.test(response.submission_id || '')) throw new Error('접수 번호를 확인할 수 없습니다. 검증 큐를 확인해 주세요.');
     $('zip-submit-form').reset();
@@ -1416,6 +1443,12 @@ function selectCoverageAgent(id) {
 }
 for (const button of document.querySelectorAll('[data-detail-tab]')) button.addEventListener('click', () => { state.detailTab = button.dataset.detailTab; showDetailTab(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
+$('close-queue-detail').addEventListener('click', () => $('queue-detail').close());
+$('queue-detail').addEventListener('close', () => {
+  if (activeView() !== 'queue') return;
+  const item = [...document.querySelectorAll('.queue-entry')].find(button => button.dataset.submissionId === queueDetailSubmissionId);
+  (item || $('queue-title')).focus();
+});
 window.addEventListener('popstate', refresh);
 refresh();
 setInterval(refresh, 30_000);

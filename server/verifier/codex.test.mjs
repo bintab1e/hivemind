@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 
 const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [
   { number: 1, text: 'int nfsd4_proc_compound(void) { return 0; }' },
@@ -12,7 +12,7 @@ const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4pro
 const options = cliPath => ({ cliPath, trustedSource });
 
 test('both structured-output schemas are valid JSON', () => {
-  for (const name of ['codex-output.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json']) {
+  for (const name of ['codex-output.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json', 'codex-same-root.schema.json']) {
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(new URL(name, import.meta.url), 'utf8')));
   }
 });
@@ -68,6 +68,19 @@ process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
   fs.writeFileSync(cli, code, { mode: 0o700 });
   return cli;
 }
+
+test('same-root review compares the prior report and new grounded source, not the title alone', async t => {
+  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
+  const existing = { management_id: 'A-005', title: 'Similar title', file_path: 'fs/nfsd/nfs4proc.c',
+    report: 'The earlier flaw was a separate lifetime error in another operation.' };
+  const cliPath = fakeCli(t, { verdict: 'different', reason: 'Different violated invariant' },
+    { type: 'turn.completed' }, 0, '<existing>');
+  const result = await reviewSameRootCauseWithCodex(existing, reviewed, { cliPath, trustedSource });
+  assert.equal(result.verdict, 'different');
+  assert.match(result.reason, /Different/);
+  await assert.rejects(reviewSameRootCauseWithCodex({ ...existing, report: '' }, reviewed,
+    { cliPath, trustedSource }), error => error.code === 'invalid_same_root_input');
+});
 
 test('primitive review stays advisory and grounds each suggested direction in pinned source', async t => {
   const finding = {

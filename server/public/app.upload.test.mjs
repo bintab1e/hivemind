@@ -6,7 +6,7 @@ import vm from 'node:vm';
 test('manual ZIP form submits to the verifier queue and shows its receipt', async () => {
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-  for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-target', 'zip-file', 'zip-submit-result']) {
+  for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-existing-id', 'zip-target', 'zip-file', 'zip-submit-result']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /id="open-zip-submit"/);
@@ -22,7 +22,7 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
     replaceChildren(...children) { this.children = children; },
     append(...children) { this.children.push(...children); },
   });
-  for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-target', 'zip-file', 'zip-submit-button', 'zip-submit-result']) {
+  for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-existing-id', 'zip-target', 'zip-file', 'zip-submit-button', 'zip-submit-result']) {
     nodes.set(id, makeElement(id === 'zip-target' ? 'select' : 'div'));
   }
   nodes.set('zip-submit-dialog', {
@@ -32,6 +32,7 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   nodes.get('zip-submit-form').reset = () => {
     nodes.get('zip-title').value = '';
     nodes.get('zip-reporter').value = '';
+    nodes.get('zip-existing-id').value = '';
     nodes.get('zip-target').value = '';
     nodes.get('zip-file').files = [];
   };
@@ -79,13 +80,29 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   assert.equal(nodes.get('zip-submit-result').children[2].href, '?view=queue');
   const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 
+  nodes.get('zip-title').value = 'UAF with stronger primitive';
+  nodes.get('zip-reporter').value = '연구원';
+  nodes.get('zip-existing-id').value = 'A-043';
+  nodes.get('zip-target').value = 'rc';
+  nodes.get('zip-file').files = [{ name: 'evidence.zip', size: zip.length, arrayBuffer: async () => Uint8Array.from(zip).buffer }];
+  await context.upload.submitZip({ preventDefault() {} });
+  assert.equal(JSON.parse(calls.filter(call => call.path === '/api/submissions/upload')[1].options.body).existing_management_id, 'A-043');
+
+  nodes.get('zip-title').value = 'invalid revision';
+  nodes.get('zip-reporter').value = '연구원';
+  nodes.get('zip-existing-id').value = 'A-43';
+  await context.upload.submitZip({ preventDefault() {} });
+  assert.match(text(nodes.get('zip-submit-result')), /A-001 형식/);
+  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 2);
+
   nodes.get('zip-title').value = 'too large';
   nodes.get('zip-reporter').value = '연구원';
+  nodes.get('zip-existing-id').value = '';
   nodes.get('zip-target').value = 'rc';
   nodes.get('zip-file').files = [{ name: 'too-large.zip', size: 8_000_001 }];
   await context.upload.submitZip({ preventDefault() {} });
   assert.match(text(nodes.get('zip-submit-result')), /8 MB 이하/);
-  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 1);
+  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 2);
   targets = [];
   await context.upload.loadUploadTargets();
   assert.equal(nodes.get('zip-submit-button').disabled, true);

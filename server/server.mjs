@@ -673,7 +673,10 @@ function callTool(db, agentId, name, args) {
     }
     case 'list_findings': {
       const { versionId, commit } = selectedVersion(db, args);
-      const findings = dashboard(db, { version_id: versionId, repo_commit: commit }).findings;
+      const managementIds = new Map(db.prepare('SELECT finding_id, management_id FROM finding_registry WHERE management_id IS NOT NULL')
+        .all().map(row => [row.finding_id, row.management_id]));
+      const findings = dashboard(db, { version_id: versionId, repo_commit: commit }).findings
+        .map(item => ({ ...item, management_id: managementIds.get(item.event_id) ?? null }));
       for (const item of findings) logExposure(db, agentId, item.hypothesis_id, 'summary');
       return { findings, note: '제출자가 2VM 재현 자료와 함께 보고한 항목입니다. 영향 표시는 제출자의 검증 기록입니다.' };
     }
@@ -956,6 +959,7 @@ export async function startServer(options = {}) {
           'Content-Disposition': `${artifact.previewable ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(artifact.download_name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
         };
         res.writeHead(200, headers);
+        if (artifact.content) { res.end(artifact.content); return; }
         fs.createReadStream('', { fd: artifact.fd, autoClose: true }).on('error', error => {
           console.error('Historical artifact read failed:', error.message);
           res.destroy();

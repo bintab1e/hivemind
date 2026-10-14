@@ -139,6 +139,16 @@ export function withdrawFinding(db, id, at = new Date().toISOString()) {
 
 export function listRegistry(db) {
   const historyVerifications = latestHistoryVerifications(db);
+  const approvedVersions = new Map();
+  for (const row of db.prepare(`SELECT management_id, agent_id, reason, submitted_at, completed_at,
+      accepted_json, verification_json FROM submissions WHERE status = 'approved'
+      AND management_id IS NOT NULL AND accepted_json IS NOT NULL
+      ORDER BY submitted_at DESC, id DESC`).all()) {
+    const accepted = JSON.parse(row.accepted_json);
+    if (!approvedVersions.has(row.management_id)) approvedVersions.set(row.management_id,
+      { latest: { ...row, accepted }, impacts: new Set() });
+    for (const impact of accepted.verified_impacts || []) approvedVersions.get(row.management_id).impacts.add(impact);
+  }
   const duplicateReviews = new Map(db.prepare(`SELECT row_id, verdict, reason, evidence_json,
     sources_checked_json, checked_at, outcome FROM duplicate_reviews
     WHERE id IN (SELECT MAX(id) FROM duplicate_reviews GROUP BY row_id)`).all().map(row => [row.row_id, {
@@ -170,24 +180,42 @@ export function listRegistry(db) {
       registration_status: row.management_id ? 'verified' : 'pending',
       verified_at: approved_at, updated_at,
       file_path: data.file_path || null, code_refs: data.code_refs || [],
-      access_requirements: data.access_requirements || [], verified_impacts: data.verified_impacts || [],
+      access_requirements: data.access_requirements || [], verified_impacts:
+        [...new Set([...(data.verified_impacts || []), ...(approvedVersions.get(row.management_id)?.impacts || [])])],
       vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command || null,
       kasan_summary: data.kasan_log?.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || null,
     };
   });
   const history = db.prepare('SELECT * FROM registry_history ORDER BY management_id').all().map(row => {
+    const version = approvedVersions.get(row.management_id);
+    const accepted = version?.latest.accepted;
+    const verification = version ? JSON.parse(version.latest.verification_json) : null;
+    const earlier = historyVerifications.get(row.management_id);
+    const impacts = new Set([...(earlier?.result === 'verified' ? earlier.observed_impacts : []),
+      ...(version?.impacts || [])]);
     const { manual_overrides_json, ...record } = row;
     return {
     ...record, event_id: `history:${row.management_id}`, origin: 'history',
     duplicate_review: duplicateReviews.get(`history:${row.management_id}`) ?? null,
     internal_duplicate_review: internalDuplicateReviews.get(`history:${row.management_id}`) ?? null,
-    latest_verification: historyVerifications.get(row.management_id) ?? null,
-    agent_id: null, created_at: null, review_status: null, review_verdict: null, review_provider: null,
-    review_summary: null, primitive_review_status: null, primitive_review_summary: null,
-    primitive_review_completed_at: null, registration_status: 'history', verified_at: null,
+    latest_verification: version ? {
+      result: 'verified', static_verdict: 'likely', reproduction_status: 'observed',
+      kernel_commit: verification?.kernel_commit, observed_impacts: [...impacts],
+      reason: version.latest.reason, completed_at: version.latest.completed_at,
+    } : earlier ?? null,
+    agent_id: version?.latest.agent_id ?? null, created_at: null,
+    review_status: version ? 'complete' : null, review_verdict: version ? 'likely' : null,
+    review_provider: version ? 'codex_qemu' : null, review_summary: version?.latest.reason ?? null,
+    primitive_review_status: null, primitive_review_summary: null,
+    primitive_review_completed_at: null,
+    registration_status: version || earlier?.result === 'verified' ? 'verified' : 'history',
+    verified_at: version?.latest.completed_at ?? null,
     updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null, has_patch: 0,
-    file_path: null, code_refs: [], access_requirements: [], verified_impacts: [],
-    vm_environment: null, reproduction_command: null, kasan_summary: null,
+    file_path: accepted?.file_path ?? null, code_refs: accepted?.code_refs ?? [],
+    access_requirements: [], verified_impacts: [...impacts],
+    vm_environment: accepted?.vm_environment ?? null,
+    reproduction_command: accepted?.reproduction_command ?? null,
+    kasan_summary: accepted?.kasan_summary ?? null,
   };
   });
   return [...history, ...live];

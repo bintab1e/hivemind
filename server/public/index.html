@@ -41,22 +41,22 @@
       </section>
 
       <section id="queue-view" class="viewer" aria-labelledby="queue-title" hidden>
-        <div class="viewer-head"><h2 id="queue-title">검증 큐</h2><span id="queue-updated" class="count"></span></div>
+        <div class="viewer-head"><h2 id="queue-title" tabindex="-1">검증 큐</h2><span id="queue-updated" class="count"></span></div>
         <div id="queue-stats" class="stat-strip" aria-label="신규 제출 검증 현황"></div>
         <div class="coverage-section-heading"><strong>검증 에이전트</strong><span id="queue-worker-count"></span></div>
         <div id="queue-workers" class="queue-workers" aria-label="검증 에이전트 상태"></div>
         <div class="queue-columns">
           <section class="queue-column" aria-label="검증 대기">
             <div class="coverage-section-heading"><strong>검증 대기</strong><span id="queue-pending-count"></span></div>
-            <div id="queue-pending" class="table-scroll" role="region" aria-label="검증 대기 중인 신규 취약점" tabindex="0"></div>
+            <div id="queue-pending" class="queue-list" role="region" aria-label="검증 대기 중인 신규 취약점" tabindex="0"></div>
           </section>
           <section class="queue-column" aria-label="검증 중">
             <div class="coverage-section-heading"><strong>검증 중</strong><span id="queue-active-count"></span></div>
-            <div id="queue-active" class="table-scroll" role="region" aria-label="진행 중인 신규 취약점 검증" tabindex="0"></div>
+            <div id="queue-active" class="queue-list" role="region" aria-label="진행 중인 신규 취약점 검증" tabindex="0"></div>
           </section>
           <section class="queue-column" aria-label="반려 · 보완 · 오류">
             <div class="coverage-section-heading"><strong>반려 · 보완 · 오류</strong><span id="queue-blocked-count"></span></div>
-            <div id="queue-blocked" class="table-scroll" role="region" aria-label="반려되었거나 보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
+            <div id="queue-blocked" class="queue-list" role="region" aria-label="반려되었거나 보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
           </section>
         </div>
       </section>
@@ -92,6 +92,7 @@
       <div class="zip-submit-fields">
         <label>취약점 명 <input id="zip-title" name="title" type="text" maxlength="300" required autocomplete="off" placeholder="취약점 명"></label>
         <label>제보자 표시명 <input id="zip-reporter" name="reporter" type="text" maxlength="100" required autocomplete="name" placeholder="이름 또는 팀 내 식별자"></label>
+        <label>기존 관리번호 (보강 제출 시) <input id="zip-existing-id" name="existing_management_id" type="text" maxlength="20" pattern="A-[0-9]{3,}" autocomplete="off" placeholder="예: A-043"></label>
         <label>대상 커널 <select id="zip-target" name="track_id" required disabled><option value="">불러오는 중</option></select></label>
         <label>증거 ZIP <input id="zip-file" name="archive" type="file" accept=".zip,application/zip" required></label>
         <button id="zip-submit-button" type="submit" disabled>검증 큐에 제출</button>
@@ -112,6 +113,11 @@
       <p id="patch-upload-result" class="zip-submit-result" role="status" aria-live="polite" hidden></p>
       <div class="patch-dialog-actions"><button id="patch-submit-button" class="edit-mode-button" type="submit">Sashiko 검토 요청</button></div>
     </form>
+  </dialog>
+
+  <dialog id="queue-detail" class="detail-dialog" aria-labelledby="queue-detail-title">
+    <div class="dialog-top"><div><p class="eyebrow">검증 상세</p><h2 id="queue-detail-title"></h2><p id="queue-detail-subtitle" class="muted"></p></div><button id="close-queue-detail" class="icon-button" type="button" aria-label="검증 상세 닫기" autofocus>×</button></div>
+    <div id="queue-detail-facts" class="detail-summary"></div>
   </dialog>
 
   <dialog id="detail" class="detail-dialog" aria-labelledby="detail-title">

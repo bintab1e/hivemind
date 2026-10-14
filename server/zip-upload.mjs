@@ -104,6 +104,10 @@ function englishName(entry, index, ext) {
 
 export function uploadedSubmission(db, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || input.project !== 'knfsd') invalid('Only knfsd ZIP uploads are supported');
+  if (input.existing_management_id != null &&
+      (typeof input.existing_management_id !== 'string' || !/^A-\d{3,}$/.test(input.existing_management_id))) {
+    invalid('Invalid existing_management_id');
+  }
   const reporter = required(input.reporter, 'reporter', 100);
   const title = required(input.title, 'title', 300);
   if (/[\x00-\x1f\x7f]/.test(reporter + title)) invalid('Reporter and title must be plain text');
@@ -153,7 +157,8 @@ export function uploadedSubmission(db, input) {
   if (files.some(file => Buffer.byteLength(file.content_base64, 'base64') > 600_000) ||
       cPocs.some(file => Buffer.byteLength(file.content) > 250_000)) invalid('ZIP text exceeds verifier limits', 413);
   const metadata = { version_id: target.version_id, repo_commit: target.repo_commit, track_id: input.track_id, reporter,
-    ...(nfsVersion ? { nfs_version: nfsVersion } : {}) };
+    ...(nfsVersion ? { nfs_version: nfsVersion } : {}),
+    ...(input.existing_management_id ? { existing_management_id: input.existing_management_id } : {}) };
   const reviewBytes = Buffer.byteLength(JSON.stringify({ project: 'knfsd', title, report: report.content, metadata,
     files: classified.filter(file => file !== report).map(file => ({ name: file.name, kind: file.type, content: file.content })) }));
   if (reviewBytes > 1_800_000) invalid('ZIP text exceeds verifier review limit', 413);

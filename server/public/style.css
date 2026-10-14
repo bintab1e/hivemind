@@ -97,7 +97,13 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-column{display:flex;flex-direction:column;min-width:0;border-right:1px solid #292e3b}
 .queue-column:last-child{border-right:0}
 .queue-column .coverage-section-heading{border-top:0}
-.queue-column .table-scroll{flex:1;min-width:0;width:100%;min-height:180px;max-height:500px}
+.queue-list{flex:1;min-width:0;width:100%;min-height:180px;max-height:500px;overflow:auto;scrollbar-color:#4d5265 #11151e}
+.queue-entry{display:flex;flex-direction:column;align-items:flex-start;gap:5px;width:100%;padding:12px 16px;border:0;border-top:1px solid #252b38;background:transparent;color:#e8ecf5;text-align:left;cursor:pointer}
+.queue-entry:nth-child(even){background:#131824}
+.queue-entry:hover,.queue-entry:focus-visible{background:#202638}
+.queue-entry:focus-visible{outline:2px solid #a78bfa;outline-offset:-2px}
+.queue-entry-title{font-size:11px;line-height:1.45;overflow-wrap:anywhere}
+.queue-entry-reporter{color:#a8b2c3;font-size:10px;overflow-wrap:anywhere}
 .queue-table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;font-size:11px}
 .queue-table th,.queue-table td{padding:11px 12px;border-top:1px solid #252b38;border-right:1px solid #252b38;text-align:left;vertical-align:top}
 .queue-table th:last-child,.queue-table td:last-child{border-right:0}
@@ -105,9 +111,6 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-table tbody tr:nth-child(even) td{background:#131824}
 .queue-table tbody tr:hover td{background:#202638}
 .queue-title-cell{min-width:310px;max-width:460px;color:#e8ecf5;font-weight:700;line-height:1.45;overflow-wrap:anywhere}
-.queue-reason{min-width:250px;max-width:430px;line-height:1.45;overflow-wrap:anywhere}
-.queue-commit{font:10px/1.5 Consolas,"Cascadia Code",monospace;overflow-wrap:anywhere;max-width:250px}
-.queue-position{color:#c7b6ff;font-weight:700;text-align:right!important;font-variant-numeric:tabular-nums}
 .queue-error{color:#ffb8bd}
 .patch-table td{vertical-align:middle}
 .patch-table .patch-id{font:700 12px Consolas,"Cascadia Code",monospace;color:#c7b6ff;white-space:nowrap}
@@ -287,6 +290,7 @@ footer a{color:#b9a8fb}
 .zip-submit-dialog{width:min(760px,calc(100% - 28px));overflow:auto}
 .detail-dialog::backdrop,.zip-submit-dialog::backdrop{background:#050710d9}
 .detail-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+#queue-detail[open]{overflow:auto}
 .dialog-top{display:flex;justify-content:space-between;gap:15px;padding:22px 24px 16px}
 .dialog-top h2{font-size:20px;line-height:1.35;margin-bottom:7px}
 .dialog-top .icon-button{flex:none}

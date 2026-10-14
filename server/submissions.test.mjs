@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, complet
   getVerifiedArtifact, heartbeatPrimitiveWorker, heartbeatWorker, listVerificationQueue,
   listVerifiedArtifacts, progressSubmission, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
+import { importHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 import { postJson } from './verifier/worker.mjs';
 
 const commit = 'a'.repeat(40);
@@ -324,6 +325,103 @@ test('same kernel crash location is held for duplicate review before allocating 
   assert.equal(held.status, 'needs_review');
   assert.match(held.reason, /A-043/);
   assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
+});
+
+test('verified enhancement of a historical A finding keeps its ID, archive and later revision', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-historical-enhancement-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  db.prepare(`INSERT INTO registry_history(management_id, number, title, target, report_status, imported_at)
+    VALUES ('A-005', 5, 'Original flaw', 'knfsd', '제보 완료', ?)`).run(new Date().toISOString());
+  const sourceDir = path.join(directory, 'source');
+  mkdirSync(sourceDir);
+  const originalReport = 'Same nfsd_test bounds error in fs/nfsd/nfs4proc.c:42';
+  writeFileSync(path.join(sourceDir, 'original.md'), originalReport +
+    'x'.repeat(29_999 - Buffer.byteLength(originalReport)) + '한');
+  importHistoryArtifacts(db, directory, sourceDir, [{ management_id: 'A-005', kind: 'report',
+    source_path: 'original.md', display_name: 'original.md' }]);
+  const input = raw('history-enhancement-1');
+  input.metadata.existing_management_id = 'A-005';
+  const id = submitSubmission(db, input, 'pc01').submission_id;
+  const claimed = claimSubmission(db, commit, directory);
+  assert.equal(claimed.existing_finding.management_id, 'A-005');
+  assert.match(claimed.existing_finding.report, /Same nfsd_test/);
+  const result = verdict();
+  result.review.same_root_cause = { verdict: 'same', reason: 'Same bounds operation' };
+  assert.equal(completeSubmission(db, id, result, claimed.lease_token).management_id, 'A-005');
+  assert.deepEqual(JSON.parse(db.prepare('SELECT verification_json FROM submissions WHERE id = ?').get(id).verification_json)
+    .same_root_cause, { verdict: 'same', reason: 'Same bounds operation' });
+  assert.deepEqual(listRegistry(db).map(item => item.management_id), ['A-005']);
+  assert.equal(listRegistry(db)[0].report_status, '제보 완료');
+  assert.equal(listRegistry(db)[0].registration_status, 'verified');
+  assert.deepEqual(listRegistry(db)[0].verified_impacts, ['kasan_read']);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 42);
+  const files = listHistoryArtifacts(db, 'A-005');
+  assert.equal(files[0].name, 'report.md');
+  assert.ok(files.some(item => item.name === 'original.md'));
+  assert.equal(openHistoryArtifact(db, directory, 'A-005', files[0].id).content.toString(), report);
+  const secondInput = raw('history-enhancement-2');
+  secondInput.metadata.existing_management_id = 'A-005';
+  const second = submitSubmission(db, secondInput, 'pc02').submission_id;
+  const secondClaim = claimSubmission(db, commit, directory);
+  assert.match(secondClaim.existing_finding.report, /## Summary/);
+  const secondResult = verdict();
+  secondResult.review.same_root_cause = { verdict: 'same', reason: 'Same bounds operation' };
+  secondResult.artifacts.report.content = report.replace('A server-side', 'An independently verified server-side');
+  assert.equal(completeSubmission(db, second, secondResult, secondClaim.lease_token).management_id, 'A-005');
+  assert.equal(listRegistry(db).length, 1);
+  assert.equal(listHistoryArtifacts(db, 'A-005').filter(item => item.name === 'report.md').length, 1);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM finding_revision_audit').get().n, 2);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM submissions WHERE status = 'approved' AND management_id = 'A-005'").get().n, 2);
+});
+
+test('live enhancement needs same-root review and retains newest report plus all verified impacts', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'hivemind-live-enhancement-'));
+  const db = openDatabase(path.join(directory, 'db.sqlite3'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  const original = submitSubmission(db, raw('live-original'), 'pc01').submission_id;
+  const first = completeSubmission(db, original, verdict(), claimSubmission(db, commit).lease_token);
+  assert.equal(first.management_id, 'A-043');
+  const previous = listRegistry(db)[0];
+  const unmatched = raw('live-unmatched');
+  unmatched.metadata.existing_management_id = 'A-043';
+  const wrongId = submitSubmission(db, unmatched, 'pc02').submission_id;
+  const wrongResult = verdict();
+  wrongResult.review.same_root_cause = { verdict: 'different', reason: 'A different flaw' };
+  assert.equal(completeSubmission(db, wrongId, wrongResult, claimSubmission(db, commit).lease_token).status, 'needs_review');
+  assert.deepEqual(JSON.parse(db.prepare('SELECT verification_json FROM submissions WHERE id = ?').get(wrongId).verification_json)
+    .same_root_cause, { verdict: 'different', reason: 'A different flaw' });
+  assert.equal(getVerifiedArtifact(db, previous.event_id, 'report.md').toString(), report);
+  const older = raw('live-older');
+  older.metadata.existing_management_id = 'A-043';
+  const newer = raw('live-newer');
+  newer.metadata.existing_management_id = 'A-043';
+  const oldId = submitSubmission(db, older, 'pc02').submission_id;
+  const newId = submitSubmission(db, newer, 'pc03').submission_id;
+  const oldClaim = claimSubmission(db, commit);
+  const newClaim = claimSubmission(db, commit);
+  assert.equal(oldClaim.submission_id, oldId);
+  assert.equal(newClaim.submission_id, newId);
+  const newestResult = verdict();
+  newestResult.review.same_root_cause = { verdict: 'same', reason: 'Same source invariant' };
+  newestResult.artifacts.report.content = report.replace('A server-side', 'Newest server-side');
+  assert.equal(completeSubmission(db, newId, newestResult, newClaim.lease_token).management_id, 'A-043');
+  const writeLog = 'BUG: KASAN: slab-out-of-bounds in nfsd_test\nWrite of size 8 at addr deadbeef\n nfsd_test+0x12/0x30';
+  const olderResult = verdict();
+  olderResult.review.same_root_cause = { verdict: 'same', reason: 'Same source invariant' };
+  olderResult.server_serial = writeLog;
+  olderResult.artifacts.log.content = writeLog;
+  olderResult.artifacts.report.content = report.replace('A server-side', 'Older server-side');
+  assert.equal(completeSubmission(db, oldId, olderResult, oldClaim.lease_token).management_id, 'A-043');
+  assert.equal(listRegistry(db).length, 1);
+  assert.deepEqual(new Set(listRegistry(db)[0].verified_impacts), new Set(['kasan_read', 'kasan_write']));
+  assert.equal(getVerifiedArtifact(db, previous.event_id, 'report.md').toString(), newestResult.artifacts.report.content);
+  assert.equal(listVerifiedArtifacts(db, previous.event_id).length, 4);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM finding_revision_audit').get().n, 2);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM submissions WHERE status = 'approved' AND management_id = 'A-043'").get().n, 3);
 });
 
 test('agent HTTP intake and status require its token; verifier socket is local', async t => {

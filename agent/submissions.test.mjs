@@ -6,7 +6,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { handleMessage } from './mcp-agent.mjs';
-import { queueSubmission, syncSubmissions } from './submissions.mjs';
+import { buildSubmission, queueSubmission, syncSubmissions } from './submissions.mjs';
+
+test('strengthened submission carries a validated existing management ID', async () => {
+  const config = { repo_root: '/unused', home: '/unused', version_id: '7.3-rc4', track_id: 'rc' };
+  const args = { report: 'Strengthened primitive evidence', existing_management_id: 'A-005' };
+  const body = await buildSubmission(config, args, 'a'.repeat(40));
+  assert.equal(body.metadata.existing_management_id, 'A-005');
+  assert.equal(body.existing_management_id, undefined);
+  await assert.rejects(buildSubmission(config, { ...args, existing_management_id: 'B-005' }, 'a'.repeat(40)), /Invalid existing_management_id/);
+  await assert.rejects(buildSubmission(config, { ...args, metadata: { existing_management_id: 'A-999' } }, 'a'.repeat(40)), /top level/);
+});
 
 test('raw MCP submission accepts varied files without KASAN and retries with one ID', async t => {
   const base = await mkdtemp(path.join(tmpdir(), 'hivemind-submission-'));

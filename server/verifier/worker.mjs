@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 import { canonicalArtifacts } from './canonical.mjs';
 import { symbolizeKasanFrames } from './symbolize.mjs';
 import { runTwoVmReproduction } from './qemu/run.mjs';
@@ -91,7 +91,17 @@ function decodeJob(job) {
     }
   });
   const report = typeof job.report === 'string' ? job.report.slice(0, 150_000) : null;
-  return { project: job.project, title: job.title, report, metadata: job.metadata || {}, files };
+  const existing = job.existing_finding;
+  if (existing != null && (!existing || typeof existing !== 'object' ||
+      !/^A-\d{3,}$/.test(existing.management_id || '') ||
+      existing.management_id !== job.metadata?.existing_management_id ||
+      typeof existing.title !== 'string' || existing.title.length > 300 ||
+      existing.file_path != null && typeof existing.file_path !== 'string' ||
+      existing.report != null && (typeof existing.report !== 'string' || Buffer.byteLength(existing.report) > 90_000))) {
+    throw new WorkerError('invalid_job');
+  }
+  return { project: job.project, title: job.title, report, metadata: job.metadata || {}, files,
+    existing_finding: existing ?? null };
 }
 
 function version(value) {
@@ -143,7 +153,8 @@ function safeCodexDiagnostic(value) {
 }
 
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
-  relevanceReviewer = reviewReproductionWithCodex, symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction,
+  relevanceReviewer = reviewReproductionWithCodex, sameRootReviewer = reviewSameRootCauseWithCodex,
+  symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction,
   onPhase = async () => {} } = {}) {
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
   let reproduction = inconclusive('Reproduction was not run');
@@ -171,6 +182,17 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
         !review.grounding.evidence.some(item => item.path === review.normalized?.file_path &&
           trustedSource.files.some(file => file.path === item.path && file.lines.some(line => line.number === item.line && line.text === item.text)))) {
       return { review, reproduction: inconclusive('Static review lacks trusted source evidence'), server_serial: '' };
+    }
+    if (submission.metadata.existing_management_id) {
+      if (!submission.existing_finding?.report) {
+        review.same_root_cause = { verdict: 'uncertain', reason: 'Existing finding report is unavailable' };
+        return { review, reproduction: inconclusive('Existing root cause cannot be compared'), server_serial: '' };
+      }
+      review.same_root_cause = await sameRootReviewer(submission.existing_finding, review,
+        { cliPath: config.cliPath, trustedSource });
+      if (review.same_root_cause.verdict !== 'same') {
+        return { review, reproduction: inconclusive('New submission does not establish the same root cause'), server_serial: '' };
+      }
     }
     const poc = selectedPoc(review, submission.files);
     if (!poc) return { review, reproduction: inconclusive('No original userspace PoC was selected'), server_serial: '' };
@@ -244,7 +266,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     ...(infrastructureError ? { infrastructure_error: infrastructureError } : {}) };
 }
 
-export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, workerId = null } = {}) {
+export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer,
+  sameRootReviewer, symbolizer, runner, workerId = null } = {}) {
   let targetCommit;
   try {
     targetCommit = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8')).sourceCommit;
@@ -267,7 +290,8 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     ? transport(config.socketPath, '/progress', { submission_id: submissionId, lease_token: leaseToken, phase }).catch(() => {})
     : Promise.resolve();
   try {
-    const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, onPhase });
+    const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader,
+      relevanceReviewer, sameRootReviewer, symbolizer, runner, onPhase });
     if (!result.infrastructure_error) await onPhase('finalizing');
     if (Array.isArray(result.review?.normalized?.logs)) {
       result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);

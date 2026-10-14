@@ -90,6 +90,10 @@ test('new findings include only numbered verified rows and show the right verifi
   assert.equal(impactEvidence(rows[6], true), '서버 2VM 재현으로 확인');
   assert.equal(reviewLabel(rows[7]), '정적 검증 통과');
   assert.match(impactEvidence(rows[7], true), /서버 독립 재현 아님/);
+  const verifiedHistory = { origin: 'history', management_id: 'A-005', registration_status: 'verified',
+    review_provider: null, latest_verification: { result: 'verified' } };
+  assert.equal(impactEvidence(verifiedHistory, true), '서버 2VM 재현으로 확인');
+  assert.match(impactEvidence({ ...verifiedHistory, latest_verification: { result: 'inconclusive' } }, true), /서버 독립 재현 아님/);
   assert.equal(impactEvidence(rows[0], true), '제출 주장, 정적 검증 대기');
   assert.equal(impactEvidence(rows[6], false), '기록 없음');
   context.testView = 'registry';

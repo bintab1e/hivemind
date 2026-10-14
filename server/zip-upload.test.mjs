@@ -132,6 +132,30 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   assert.equal(db.prepare('SELECT report FROM submissions WHERE id = ?').get((await unnamed.json()).submission_id).report, report.trim());
 });
 
+test('manual ZIP strengthening targets an existing management ID without changing its record', async t => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-upload-strengthen-'));
+  const { server, db, url } = await startServer({ port: 0, dataDir, dashboardPassword: 'test-password' });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  setActiveTrack(db, 'rc', { version_id: '7.3-rc7', repo_commit: commit });
+  db.prepare(`INSERT INTO registry_history(management_id, number, title, target, report_status, imported_at)
+    VALUES ('A-005', 5, 'Prior verified finding', 'knfsd', '미제보', ?)`).run(new Date().toISOString());
+  const input = { project: 'knfsd', title: 'Stronger primitive', reporter: 'tester', track_id: 'rc',
+    existing_management_id: 'A-005', zip_base64: bundle().toString('base64') };
+  const post = body => fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+  const accepted = await post(input);
+  assert.equal(accepted.status, 202, await accepted.clone().text());
+  const { submission_id: submissionId } = await accepted.json();
+  const row = db.prepare('SELECT metadata_json, status, management_id FROM submissions WHERE id = ?').get(submissionId);
+  assert.equal(JSON.parse(row.metadata_json).existing_management_id, 'A-005');
+  assert.equal(row.status, 'pending');
+  assert.equal(row.management_id, null);
+  const queue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
+  assert.equal(queue.pending[0].existing_management_id, 'A-005');
+  assert.equal(db.prepare("SELECT title FROM registry_history WHERE management_id = 'A-005'").get().title, 'Prior verified finding');
+  assert.equal((await post({ ...input, existing_management_id: 'B-001' })).status, 400);
+  assert.equal((await post({ ...input, existing_management_id: 'A-999' })).status, 404);
+});
+
 test('malformed, unsafe and oversized ZIP entries fail before queue insertion', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hivemind-upload-bad-'));
   const { server, db, url } = await startServer({ port: 0, dataDir, dashboardPassword: 'test-password' });

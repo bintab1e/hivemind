@@ -1,6 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs';
 import { hash, invalid, isStandaloneUserspacePoc, readFrontMatter } from './contract.mjs';
 import { registerFinding, validateRegistryMetadata } from './registry.mjs';
+import { listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 2_000_000;
@@ -18,6 +20,7 @@ const verificationPhases = new Set(['preparing', 'static_review', 'qemu_reproduc
 const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
 const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+$/;
+const existingIdPattern = /^A-\d{3,}$/;
 
 function value(input, name, max, required = false) {
   if (input == null || input === '') {
@@ -39,6 +42,47 @@ function base64Bytes(encoded) {
   const bytes = Buffer.from(encoded, 'base64');
   if (!bytes.length || bytes.length > MAX_FILE_BYTES || bytes.toString('base64') !== encoded) invalid('Invalid attachment size or encoding', 413);
   return bytes;
+}
+
+function findExistingManagementId(db, managementId) {
+  const live = db.prepare(`SELECT r.finding_id, e.repo_commit, e.title, e.markdown,
+      r.approved_at, r.superseded_by FROM finding_registry r
+      JOIN events e ON e.id = r.finding_id
+      WHERE r.management_id = ? AND r.target = 'knfsd'`).get(managementId);
+  if (live?.approved_at && !live.superseded_by) return { kind: 'live', ...live };
+  const historical = db.prepare("SELECT title FROM registry_history WHERE management_id = ? AND target = 'knfsd'").get(managementId);
+  return historical ? { kind: 'history', ...historical } : null;
+}
+
+function existingFindingContext(db, managementId, dataDir) {
+  const found = findExistingManagementId(db, managementId);
+  if (!found) return null;
+  if (found.kind === 'live') {
+    const prior = db.prepare(`SELECT a.content FROM submission_artifacts a
+      JOIN submissions s ON s.id = a.submission_id
+      WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal = 1000
+      ORDER BY s.submitted_at DESC, s.id DESC LIMIT 1`).get(found.finding_id);
+    const parsed = readFrontMatter(found.markdown);
+    return { management_id: managementId, title: found.title, file_path: parsed.data.file_path ?? null,
+      report: Buffer.from(prior?.content ?? parsed.body).toString('utf8').slice(0, 30_000) };
+  }
+  let report = null;
+  if (dataDir) {
+    const artifact = listHistoryArtifacts(db, managementId).find(item => item.kind === 'report');
+    if (artifact) {
+      let opened;
+      try {
+        opened = openHistoryArtifact(db, dataDir, managementId, artifact.id);
+        const bytes = Buffer.alloc(Math.min(opened.size, 30_000));
+        const length = opened.content
+          ? opened.content.copy(bytes, 0, 0, bytes.length)
+          : fs.readSync(opened.fd, bytes, 0, bytes.length, 0);
+        report = new TextDecoder().decode(bytes.subarray(0, length));
+      } catch { report = null; }
+      finally { if (opened?.fd !== undefined) fs.closeSync(opened.fd); }
+    }
+  }
+  return { management_id: managementId, title: found.title, file_path: null, report };
 }
 
 export function initializeSubmissions(db) {
@@ -76,6 +120,15 @@ export function initializeSubmissions(db) {
       worker_id TEXT PRIMARY KEY, current_finding_id TEXT,
       started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS finding_revision_audit (
+      submission_id TEXT PRIMARY KEY REFERENCES submissions(id),
+      management_id TEXT NOT NULL, previous_event_json TEXT,
+      previous_registry_json TEXT NOT NULL, recorded_at TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS finding_revision_audit_no_update
+      BEFORE UPDATE ON finding_revision_audit BEGIN SELECT RAISE(ABORT, 'Finding revisions are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS finding_revision_audit_no_delete
+      BEFORE DELETE ON finding_revision_audit BEGIN SELECT RAISE(ABORT, 'Finding revisions are append-only'); END;
   `);
   const columns = new Set(db.prepare('PRAGMA table_info(submissions)').all().map(column => column.name));
   if (!columns.has('lease_token')) db.exec('ALTER TABLE submissions ADD COLUMN lease_token TEXT');
@@ -84,6 +137,7 @@ export function initializeSubmissions(db) {
   if (!columns.has('phase_updated_at')) db.exec('ALTER TABLE submissions ADD COLUMN phase_updated_at TEXT');
   if (!columns.has('last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN last_activity_at TEXT');
   if (!columns.has('origin')) db.exec("ALTER TABLE submissions ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'");
+  if (!columns.has('accepted_json')) db.exec('ALTER TABLE submissions ADD COLUMN accepted_json TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
   const primitiveColumns = new Set(db.prepare('PRAGMA table_info(primitive_reviews)').all().map(column => column.name));
   if (!primitiveColumns.has('retry_after')) db.exec('ALTER TABLE primitive_reviews ADD COLUMN retry_after TEXT');
@@ -96,7 +150,9 @@ export function listVerificationQueue(db) {
   const fields = `id AS submission_id, agent_id, origin,
     CASE WHEN origin = 'manual_upload' THEN json_extract(metadata_json, '$.reporter') END AS reporter,
     project, title, status, reason, submitted_at,
-    claimed_at, completed_at, attempts, management_id, phase, phase_updated_at, last_activity_at,
+    claimed_at, completed_at, attempts, management_id,
+    json_extract(metadata_json, '$.existing_management_id') AS existing_management_id,
+    phase, phase_updated_at, last_activity_at,
     json_extract(metadata_json, '$.repo_commit') AS target_commit`;
   const rows = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('pending', 'processing') ORDER BY submitted_at, id`).all();
   const activityCutoff = Date.now() - WORKER_ONLINE_MS;
@@ -180,6 +236,11 @@ export function submitSubmission(db, input, agentId, origin = 'agent') {
   const title = value(input.title, 'title', 300);
   const report = value(input.report, 'report', MAX_REPORT_BYTES);
   const metadata = object(input.metadata, 'metadata');
+  const existingManagementId = metadata.existing_management_id;
+  if (existingManagementId != null &&
+      (typeof existingManagementId !== 'string' || !existingIdPattern.test(existingManagementId))) {
+    invalid('Invalid existing_management_id');
+  }
   const metadataJson = JSON.stringify(metadata);
   if (Buffer.byteLength(metadataJson) > 20_000) invalid('Metadata too large', 413);
   if (!Array.isArray(input.files) || input.files.length > MAX_FILES) invalid('Invalid files');
@@ -207,6 +268,9 @@ export function submitSubmission(db, input, agentId, origin = 'agent') {
       if (existing.raw_sha256 !== digest || existing.origin !== origin) invalid('client_submission_id was reused with different content', 409);
       db.exec('COMMIT');
       return { submission_id: id, status: existing.status, replayed: true };
+    }
+    if (existingManagementId && !findExistingManagementId(db, existingManagementId)) {
+      invalid('Existing verified knfsd finding not found', 404);
     }
     const backlog = db.prepare("SELECT COUNT(*) AS total, SUM(agent_id = ?) AS own FROM submissions WHERE status IN ('pending', 'processing')").get(agentId);
     if (backlog.total >= MAX_PENDING_TOTAL || backlog.own >= MAX_PENDING_PER_AGENT) invalid('Verification queue is full', 429);
@@ -239,15 +303,18 @@ export function getSubmission(db, id, agentId = null) {
 
 export function listVerifiedArtifacts(db, findingId) {
   return db.prepare(`SELECT a.name, a.kind, a.sha256, a.size
-    FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
-    WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal BETWEEN 1000 AND 1003
-    ORDER BY a.ordinal`).all(findingId);
+    FROM submission_artifacts a WHERE a.submission_id = (
+      SELECT id FROM submissions WHERE finding_id = ? AND status = 'approved'
+      ORDER BY submitted_at DESC, id DESC LIMIT 1)
+      AND a.ordinal BETWEEN 1000 AND 1003 ORDER BY a.ordinal`).all(findingId);
 }
 
 export function getVerifiedArtifact(db, findingId, filename) {
   if (!Object.values(artifactFiles).includes(filename)) invalid('Unknown artifact', 404);
-  const row = db.prepare(`SELECT a.content FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
-    WHERE s.finding_id = ? AND s.status = 'approved' AND a.name = ? AND a.ordinal BETWEEN 1000 AND 1003`).get(findingId, filename);
+  const row = db.prepare(`SELECT a.content FROM submission_artifacts a WHERE a.submission_id = (
+      SELECT id FROM submissions WHERE finding_id = ? AND status = 'approved'
+      ORDER BY submitted_at DESC, id DESC LIMIT 1)
+      AND a.name = ? AND a.ordinal BETWEEN 1000 AND 1003`).get(findingId, filename);
   if (!row) invalid('Artifact not found', 404);
   return Buffer.from(row.content);
 }
@@ -260,7 +327,7 @@ export function retrySubmission(db, id) {
   return getSubmission(db, id);
 }
 
-export function claimSubmission(db, targetCommit = null) {
+export function claimSubmission(db, targetCommit = null, dataDir = null) {
   if (targetCommit !== null && (typeof targetCommit !== 'string' || !/^[a-f0-9]{40}$/.test(targetCommit))) invalid('Invalid target_commit');
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -276,8 +343,13 @@ export function claimSubmission(db, targetCommit = null) {
     db.prepare("UPDATE submissions SET status = 'processing', claimed_at = ?, lease_token = ?, attempts = attempts + 1, phase = 'preparing', phase_updated_at = ?, last_activity_at = ? WHERE id = ?").run(claimedAt, leaseToken, claimedAt, claimedAt, row.id);
     const files = db.prepare('SELECT name, kind, content FROM submission_artifacts WHERE submission_id = ? ORDER BY ordinal').all(row.id)
       .map(file => ({ name: file.name, kind: file.kind, content_base64: Buffer.from(file.content).toString('base64') }));
+    const metadata = JSON.parse(row.metadata_json);
+    const existingFinding = metadata.existing_management_id
+      ? existingFindingContext(db, metadata.existing_management_id, dataDir) : null;
     db.exec('COMMIT');
-    return { submission_id: row.id, lease_token: leaseToken, agent_id: row.agent_id, project: row.project, title: row.title, report: row.report, metadata: JSON.parse(row.metadata_json), files };
+    return { submission_id: row.id, lease_token: leaseToken, agent_id: row.agent_id,
+      project: row.project, title: row.title, report: row.report, metadata, files,
+      ...(metadata.existing_management_id ? { existing_finding: existingFinding } : {}) };
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
@@ -501,7 +573,9 @@ export function claimPrimitiveReview(db, workerId, supportedCommits) {
         e.title, e.repo_commit, e.markdown, s.id AS submission_id
       FROM primitive_reviews p JOIN finding_registry r ON r.finding_id = p.finding_id
       JOIN events e ON e.id = p.finding_id
-      JOIN submissions s ON s.finding_id = p.finding_id AND s.status = 'approved'
+      JOIN submissions s ON s.id = (SELECT id FROM submissions
+        WHERE finding_id = p.finding_id AND status = 'approved'
+        ORDER BY submitted_at DESC, id DESC LIMIT 1)
       WHERE p.status = 'pending' AND e.repo_commit IN (${placeholders})
         AND (p.retry_after IS NULL OR p.retry_after <= ?)
       ORDER BY p.requested_at, p.finding_id LIMIT 1`).get(...commits, now());
@@ -619,12 +693,25 @@ export function completeSubmission(db, id, result, leaseToken) {
     checkLease(row, leaseToken);
     const review = object(result.review, 'review');
     const run = object(result.reproduction, 'reproduction');
+    const metadata = JSON.parse(row.metadata_json);
+    const existingManagementId = metadata.existing_management_id ?? null;
     if (!['likely', 'unlikely', 'uncertain'].includes(review.verdict)) invalid('Invalid static verdict');
     if (!['observed', 'not_observed', 'inconclusive'].includes(run.status)) invalid('Invalid reproduction status');
-    const summary = { static_verdict: review.verdict, dynamic_status: run.status, kernel_commit: run.kernelCommit ?? null, observation: run.observation ?? null };
+    const summary = { static_verdict: review.verdict, dynamic_status: run.status,
+      kernel_commit: run.kernelCommit ?? null, observation: run.observation ?? null,
+      ...(existingManagementId ? { same_root_cause: {
+        verdict: ['same', 'different', 'uncertain'].includes(review.same_root_cause?.verdict)
+          ? review.same_root_cause.verdict : 'uncertain',
+        reason: typeof review.same_root_cause?.reason === 'string'
+          ? review.same_root_cause.reason.slice(0, 1000) : null,
+      } } : {}) };
     const reason = value(review.reason, 'review reason', 1000) || value(run.reason, 'reproduction reason', 1000) || 'Verification completed';
     if (review.verdict === 'unlikely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (review.verdict !== 'likely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
+    if (existingManagementId && review.same_root_cause?.verdict !== 'same') {
+      const out = mark(db, id, 'needs_review', 'Same root cause as the existing finding was not established', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (run.status === 'not_observed' && run.observation?.guestCompleted && run.observation?.targetCommitMatch) {
       const out = mark(db, id, 'rejected', value(run.reason, 'reproduction reason', 1000) || 'PoC did not reproduce in two VMs', summary);
       db.exec('COMMIT'); return out;
@@ -634,7 +721,6 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_evidence', value(run.reason, 'reproduction reason', 1000) || 'Two-VM reproduction was inconclusive', summary);
       db.exec('COMMIT'); return out;
     }
-    const metadata = JSON.parse(row.metadata_json);
     const commit = value(metadata.repo_commit, 'repo_commit', 64);
     const version = value(metadata.version_id, 'version_id', 64);
     if (!commitPattern.test(commit || '') || !version || !/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(version) || run.kernelCommit !== commit) {
@@ -683,7 +769,14 @@ export function completeSubmission(db, id, result, leaseToken) {
     }
     const kasanHeader = evidence.log.split(/\r?\n/, 1)[0].replace(/\+0x[0-9a-f]+\/[0-9a-f]+/gi, '').trim();
     const fingerprint = hash(`${commit}\0${filePath}\0${kasanHeader}`);
-    const duplicate = db.prepare("SELECT management_id FROM submissions WHERE fingerprint = ? AND status = 'approved' LIMIT 1").get(fingerprint);
+    const existing = existingManagementId ? findExistingManagementId(db, existingManagementId) : null;
+    if (existingManagementId && !existing) {
+      const out = mark(db, id, 'needs_review', 'Existing managed finding is no longer available', summary);
+      db.exec('COMMIT'); return out;
+    }
+    const duplicate = db.prepare(`SELECT management_id FROM submissions
+      WHERE fingerprint = ? AND status = 'approved' AND (? IS NULL OR management_id <> ?)
+      LIMIT 1`).get(fingerprint, existingManagementId, existingManagementId);
     if (duplicate) {
       const out = mark(db, id, 'needs_review', `Possible duplicate of ${duplicate.management_id}; compare root cause before assigning another number`, summary);
       db.exec('COMMIT'); return out;
@@ -712,31 +805,116 @@ export function completeSubmission(db, id, result, leaseToken) {
       if (!error.status) throw error;
       const out = mark(db, id, 'needs_review', error.message, summary); db.exec('COMMIT'); return out;
     }
-    const markdown = frontMatter(data, artifacts.report.content);
-    const findingId = hash(`verified-submission\0${id}`);
-    db.prepare(`INSERT INTO events
-      (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title,
-       scope_json, created_at, received_at, markdown, based_on_json)
-      VALUES (?, ?, ?, ?, 'finding', ?, ?, ?, ?, ?, ?, ?, '[]')`).run(
-      findingId, row.agent_id, `verification/submissions/${id}.md`, hash(markdown), version, commit, title,
-      JSON.stringify([filePath]), at, at, markdown);
-    db.prepare(`INSERT INTO finding_reviews
-      (finding_id, provider, status, verdict, summary, requested_at, completed_at)
-      VALUES (?, 'codex_qemu', 'complete', 'likely', ?, ?, ?)`).run(findingId, reason, row.submitted_at, at);
-    registerFinding(db, findingId, data, at);
-    const sequence = db.prepare("UPDATE registry_sequences SET last_number = last_number + 1 WHERE target = 'knfsd' RETURNING last_number").get();
-    const managementId = `A-${String(sequence.last_number).padStart(3, '0')}`;
-    db.prepare('UPDATE finding_registry SET management_id = ?, number = ?, approved_at = ?, updated_at = ? WHERE finding_id = ?')
-      .run(managementId, sequence.last_number, at, at, findingId);
+    const accepted = { title, file_path: filePath, code_refs: data.code_refs,
+      verified_impacts: evidence.impacts, vm_environment: data.vm_environment,
+      reproduction_command: data.reproduction_command, kasan_summary: evidence.log.split(/\r?\n/, 1)[0],
+      option: data.registry_option, privilege, nfs_version: nfsVersion,
+      vulnerability_type: vulnerabilityType };
+    let findingId;
+    let managementId;
+    let visibleRevision = true;
+    if (existing) {
+      managementId = existingManagementId;
+      findingId = existing.kind === 'live' ? existing.finding_id : null;
+      const priorApproved = db.prepare(`SELECT id, submitted_at FROM submissions
+        WHERE management_id = ? AND status = 'approved'
+        ORDER BY submitted_at DESC, id DESC LIMIT 1`).get(managementId);
+      visibleRevision = !priorApproved || priorApproved.submitted_at < row.submitted_at ||
+        priorApproved.submitted_at === row.submitted_at && priorApproved.id < id;
+      if (visibleRevision) {
+        const previousRegistry = db.prepare(`SELECT * FROM ${existing.kind === 'live' ? 'finding_registry' : 'registry_history'}
+          WHERE ${existing.kind === 'live' ? 'finding_id' : 'management_id'} = ?`).get(findingId ?? managementId);
+        const previousEvent = findingId ? db.prepare('SELECT * FROM events WHERE id = ?').get(findingId) : null;
+        db.prepare(`INSERT INTO finding_revision_audit
+          (submission_id, management_id, previous_event_json, previous_registry_json, recorded_at)
+          VALUES (?, ?, ?, ?, ?)`).run(id, managementId,
+          previousEvent ? JSON.stringify(previousEvent) : null, JSON.stringify(previousRegistry), at);
+        const priorImpacts = findingId ? readFrontMatter(previousEvent.markdown).data.verified_impacts :
+          db.prepare(`SELECT observed_impacts_json FROM history_verification_runs
+            WHERE management_id = ? AND result = 'verified' ORDER BY id DESC LIMIT 1`).get(managementId)?.observed_impacts_json;
+        const earlier = db.prepare(`SELECT accepted_json FROM submissions
+          WHERE management_id = ? AND status = 'approved' AND accepted_json IS NOT NULL`).all(managementId);
+        const verified = new Set(evidence.impacts);
+        for (const impact of Array.isArray(priorImpacts) ? priorImpacts :
+          typeof priorImpacts === 'string' ? JSON.parse(priorImpacts) : []) verified.add(impact);
+        for (const item of earlier) {
+          for (const impact of JSON.parse(item.accepted_json).verified_impacts || []) verified.add(impact);
+        }
+        data.verified_impacts = [...verified];
+        const fields = { title, option: data.registry_option, privilege,
+          nfs_version: nfsVersion, vulnerability_type: vulnerabilityType };
+        const overrides = new Set(JSON.parse(previousRegistry[existing.kind === 'live'
+          ? 'admin_overrides_json' : 'manual_overrides_json']));
+        if (existing.kind === 'live') {
+          data.created_at = previousEvent.created_at;
+          const markdown = frontMatter(data, artifacts.report.content);
+          db.prepare(`UPDATE events SET version_id = ?, repo_commit = ?, title = ?, scope_json = ?,
+            sha256 = ?, markdown = ? WHERE id = ?`).run(version, commit, title,
+            JSON.stringify([filePath]), hash(markdown), markdown, findingId);
+          db.prepare(`UPDATE finding_reviews SET provider = 'codex_qemu', status = 'complete',
+            verdict = 'likely', summary = ?, requested_at = ?, completed_at = ? WHERE finding_id = ?`)
+            .run(reason, row.submitted_at, at, findingId);
+          const updates = Object.entries(fields).filter(([field]) => field !== 'title' && !overrides.has(field));
+          const setters = [...updates.map(([field]) => `${field} = ?`), 'updated_at = ?', 'revision = revision + 1'];
+          db.prepare(`UPDATE finding_registry SET ${setters.join(', ')} WHERE finding_id = ?`)
+            .run(...updates.map(([, value]) => value), at, findingId);
+          db.prepare(`UPDATE primitive_reviews SET status = 'pending', summary = NULL, requested_at = ?,
+            claimed_at = NULL, completed_at = NULL, last_activity_at = NULL, lease_token = NULL,
+            retry_after = NULL, attempts = 0, worker_id = NULL WHERE finding_id = ?`).run(at, findingId);
+        } else {
+          const updates = Object.entries(fields).filter(([field]) => !overrides.has(field));
+          const setters = [...updates.map(([field]) => `${field} = ?`), 'updated_at = ?', 'revision = revision + 1'];
+          db.prepare(`UPDATE registry_history SET ${setters.join(', ')} WHERE management_id = ?`)
+            .run(...updates.map(([, value]) => value), at, managementId);
+        }
+      }
+    } else {
+      const markdown = frontMatter(data, artifacts.report.content);
+      findingId = hash(`verified-submission\0${id}`);
+      db.prepare(`INSERT INTO events
+        (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title,
+         scope_json, created_at, received_at, markdown, based_on_json)
+        VALUES (?, ?, ?, ?, 'finding', ?, ?, ?, ?, ?, ?, ?, '[]')`).run(
+        findingId, row.agent_id, `verification/submissions/${id}.md`, hash(markdown), version, commit, title,
+        JSON.stringify([filePath]), at, at, markdown);
+      db.prepare(`INSERT INTO finding_reviews
+        (finding_id, provider, status, verdict, summary, requested_at, completed_at)
+        VALUES (?, 'codex_qemu', 'complete', 'likely', ?, ?, ?)`).run(findingId, reason, row.submitted_at, at);
+      registerFinding(db, findingId, data, at);
+      const sequence = db.prepare("UPDATE registry_sequences SET last_number = last_number + 1 WHERE target = 'knfsd' RETURNING last_number").get();
+      managementId = `A-${String(sequence.last_number).padStart(3, '0')}`;
+      db.prepare('UPDATE finding_registry SET management_id = ?, number = ?, approved_at = ?, updated_at = ? WHERE finding_id = ?')
+        .run(managementId, sequence.last_number, at, at, findingId);
+    }
     const insertArtifact = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
     for (const [ordinal, role] of Object.keys(artifactFiles).entries()) {
       const content = role === 'poc' ? artifacts.poc.source : artifacts[role].content;
       const kind = role === 'reproduction' ? 'other' : role === 'log' ? 'log' : role === 'poc' ? 'poc' : 'report';
       insertArtifact.run(id, 1000 + ordinal, artifactFiles[role], kind, hash(content), Buffer.byteLength(content), Buffer.from(content));
     }
-    db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
-      .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), at, id);
-    db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
+    db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, accepted_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
+      .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), JSON.stringify(accepted), at, id);
+    if (existing?.kind === 'live' && !visibleRevision) {
+      const currentEvent = db.prepare('SELECT * FROM events WHERE id = ?').get(findingId);
+      const currentRegistry = db.prepare('SELECT * FROM finding_registry WHERE finding_id = ?').get(findingId);
+      const parsed = readFrontMatter(currentEvent.markdown);
+      const impacts = new Set([...(parsed.data.verified_impacts || []), ...evidence.impacts]);
+      if (impacts.size > (parsed.data.verified_impacts || []).length) {
+        db.prepare(`INSERT INTO finding_revision_audit
+          (submission_id, management_id, previous_event_json, previous_registry_json, recorded_at)
+          VALUES (?, ?, ?, ?, ?)`).run(id, managementId,
+          JSON.stringify(currentEvent), JSON.stringify(currentRegistry), at);
+        const markdown = frontMatter({ ...parsed.data, verified_impacts: [...impacts] }, parsed.body);
+        db.prepare('UPDATE events SET markdown = ?, sha256 = ? WHERE id = ?')
+          .run(markdown, hash(markdown), findingId);
+        db.prepare('UPDATE finding_registry SET updated_at = ?, revision = revision + 1 WHERE finding_id = ?')
+          .run(at, findingId);
+        db.prepare(`UPDATE primitive_reviews SET status = 'pending', summary = NULL, requested_at = ?,
+          claimed_at = NULL, completed_at = NULL, last_activity_at = NULL, lease_token = NULL,
+          retry_after = NULL, attempts = 0, worker_id = NULL WHERE finding_id = ?`).run(at, findingId);
+      }
+    }
+    if (!existing) db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
       .run(findingId, at);
     db.exec('COMMIT');
     return getSubmission(db, id);

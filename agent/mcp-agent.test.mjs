@@ -8,6 +8,7 @@ test('MCP advertises raw submissions and rejects obsolete direct finding tools',
   const listed = await handleMessage(config, '', { jsonrpc: '2.0', id: 1, method: 'tools/list' });
   const names = listed.result.tools.map(tool => tool.name);
   assert(names.includes('submit_vulnerability'));
+  assert.equal(listed.result.tools.find(tool => tool.name === 'submit_vulnerability').inputSchema.properties.existing_management_id.pattern, '^A-\\d{3,}$');
   assert(!names.includes('queue_finding'));
   assert(!names.includes('queue_finding_revision'));
   for (const name of ['queue_finding', 'queue_finding_revision']) {

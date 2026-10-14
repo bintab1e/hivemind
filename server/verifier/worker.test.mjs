@@ -133,6 +133,25 @@ test('malformed PoC text fails closed and still completes the leased job', async
   assert.equal(calls[1].body.result.server_serial, '');
 });
 
+test('enhancement with a different root cause stops before 2VM reproduction', async t => {
+  const { config } = setup(t);
+  let completed;
+  const enhancement = { ...job, metadata: { ...job.metadata, existing_management_id: 'A-005' },
+    existing_finding: { management_id: 'A-005', title: 'Old flaw', file_path: 'fs/nfsd/nfs4proc.c',
+      report: 'An earlier root cause.' } };
+  const transport = async (_socket, endpoint, body) => endpoint === '/claim' ? { job: enhancement } :
+    (endpoint === '/complete' ? (completed = body, {}) : {});
+  await runWorkerOnce({ config, transport, sourceLoader,
+    reviewer: async () => ({ verdict: 'likely', reason: 'Plausible', model: 'test',
+      grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1,
+        text: trustedSource.files[0].lines[0].text }] },
+      normalized: { file_path: 'fs/nfsd/nfs4proc.c', report: 'A new root cause.' } }),
+    sameRootReviewer: async () => ({ verdict: 'different', reason: 'Different source invariant' }),
+    runner: async () => { throw new Error('2VM must not run'); } });
+  assert.equal(completed.result.review.same_root_cause.verdict, 'different');
+  assert.equal(completed.result.reproduction.status, 'inconclusive');
+});
+
 test('missing or changed trusted kernel source prevents static review and VM execution', async t => {
   const { config } = setup(t);
   let completed;
