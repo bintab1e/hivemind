@@ -2,19 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reason", "checks"],
+  "required": ["verdict", "reason", "admin_action_required", "checks"],
   "properties": {
     "verdict": { "type": "string", "enum": ["supports", "refutes", "uncertain"] },
     "reason": { "type": "string" },
+    "admin_action_required": { "type": ["boolean", "null"] },
     "checks": {
       "type": "object", "additionalProperties": false,
-      "required": ["reachability", "flaw", "poc", "log", "defenses"],
+      "required": ["reachability", "flaw", "poc", "log", "defenses", "admin_action"],
       "properties": {
         "reachability": { "$ref": "#/$defs/check" },
         "flaw": { "$ref": "#/$defs/check" },
         "poc": { "$ref": "#/$defs/check" },
         "log": { "$ref": "#/$defs/check" },
-        "defenses": { "$ref": "#/$defs/check" }
+        "defenses": { "$ref": "#/$defs/check" },
+        "admin_action": { "$ref": "#/$defs/check" }
       }
     }
   },

@@ -372,7 +372,8 @@ function checkedPoc(db, submissionId, normalized) {
 function supportedStaticProof(db, submissionId, review, poc) {
   const checks = review.proof_review?.checks;
   if (review.proof_review?.verdict !== 'supports' || !checks ||
-      !['reachability', 'flaw', 'poc', 'log', 'defenses'].every(name => checks[name] === 'supported')) return false;
+      !['reachability', 'flaw', 'poc', 'log', 'defenses', 'admin_action']
+        .every(name => checks[name] === 'supported')) return false;
   const proof = review.proof;
   const evidence = review.grounding?.evidence;
   if (!proof || !Array.isArray(evidence)) return false;
@@ -685,8 +686,13 @@ export function completeSubmission(db, id, result, leaseToken) {
     const existingManagementId = metadata.existing_management_id ?? review.same_root_cause?.management_id ?? null;
     if (!['likely', 'unlikely', 'uncertain'].includes(review.verdict)) invalid('Invalid static verdict');
     if (run.status !== 'not_run' || result.server_serial || run.observation || run.kernelCommit) invalid('Dynamic evidence is not accepted by the static screening route');
+    const primaryAdmin = review.integrity?.admin_action_required;
+    const secondaryAdmin = review.proof_review?.admin_action_required;
+    const adminActionRequired = primaryAdmin === true || secondaryAdmin === true ? true
+      : primaryAdmin === false && secondaryAdmin === false ? false : null;
     const summary = { static_verdict: review.verdict, dynamic_status: 'not_run',
       integrity: review.integrity?.verdict ?? 'uncertain',
+      admin_action_required: adminActionRequired,
       proof_review: review.proof_review && typeof review.proof_review === 'object'
         ? { verdict: review.proof_review.verdict, reason: String(review.proof_review.reason || '').slice(0, 1000) } : null,
       ...(existingManagementId ? { same_root_cause: {
@@ -696,11 +702,22 @@ export function completeSubmission(db, id, result, leaseToken) {
           ? review.same_root_cause.reason.slice(0, 1000) : null,
       } } : {}) };
     const reason = value(review.reason, 'review reason', 1000) || 'Static screening completed';
+    if (adminActionRequired === true) {
+      const adminReason = secondaryAdmin === true ? review.proof_review.reason : review.integrity?.reason;
+      const out = mark(db, id, 'rejected', value(typeof adminReason === 'string' ? adminReason.slice(0, 1000) : null,
+        'administrator action reason', 1000)
+        || 'Administrator action is required to trigger the finding', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (review.integrity?.verdict === 'suspect') {
       const out = mark(db, id, 'rejected', value(review.integrity.reason, 'integrity reason', 1000) || reason, summary);
       db.exec('COMMIT'); return out;
     }
     if (review.integrity?.verdict !== 'clear') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
+    if (adminActionRequired !== false) {
+      const out = mark(db, id, 'needs_review', 'Administrator action requirement is unresolved', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (review.same_root_cause && review.same_root_cause.verdict !== 'same') {
       const out = mark(db, id, 'needs_review', 'Same-root comparison is unresolved', summary);
       db.exec('COMMIT'); return out;

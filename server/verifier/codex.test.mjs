@@ -32,7 +32,8 @@ const submission = {
 const answer = {
   verdict: 'likely',
   reason: 'The code path is plausible but requires reproduction.',
-  integrity: { verdict: 'clear', reason: 'Original C PoC, source and submitted log agree without test-only modifications.' },
+  integrity: { verdict: 'clear', reason: 'Original C PoC, source and submitted log agree without test-only modifications.',
+    admin_action_required: false },
   proof: {
     entry: { path: 'fs/nfsd/nfs4proc.c', line: 1, explanation: 'Entry point for the request.' },
     flaw: { path: 'fs/nfsd/nfs4proc.c', line: 2, explanation: 'Claimed faulty decode operation.' },
@@ -131,6 +132,7 @@ test('uses a C PoC, includes impact allegations, retains original evidence, and 
   assert.deepEqual(result.normalized.logs, [{ filename: 'evidence-1.log', original_name: 'report.txt', source_index: 2, content: submission.files[2].content }]);
   assert.deepEqual(result.grounding, { source_commit: trustedSource.commit, evidence: trustedSource.files[0].lines.map(line => ({ path: 'fs/nfsd/nfs4proc.c', line: line.number, text: line.text })) });
   assert.deepEqual(result.proof, answer.proof);
+  assert.equal(result.integrity.admin_action_required, false);
   assert.equal(Object.hasOwn(result, 'reproduced'), false);
   assert.equal(Object.hasOwn(result, 'approved'), false);
 });
@@ -158,22 +160,84 @@ test('likely static proof requires distinct grounded entry and flaw, original Po
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof');
 });
 
-test('independent proof review only supports when every static check is supported', async t => {
+test('first static review requires an explicit administrator-action assessment', async t => {
+  const ordinarySetup = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer,
+    { type: 'turn.completed' }, 0, 'An already running NFS service, existing export')));
+  assert.equal(ordinarySetup.integrity.admin_action_required, false);
+  for (const value of [undefined, 'false', 0]) {
+    const invalid = structuredClone(answer);
+    if (value === undefined) delete invalid.integrity.admin_action_required;
+    else invalid.integrity.admin_action_required = value;
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalid))),
+      error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'shape');
+  }
+  const adminTrigger = structuredClone(answer);
+  adminTrigger.verdict = 'unlikely';
+  adminTrigger.integrity = { verdict: 'suspect', reason: 'Original PoC requires root for its trigger.',
+    admin_action_required: true };
+  adminTrigger.proof = null;
+  const rejected = await reviewSubmissionWithCodex(submission, options(fakeCli(t, adminTrigger)));
+  assert.equal(rejected.integrity.admin_action_required, true);
+  assert.equal(rejected.verdict, 'unlikely');
+
+  const unknown = structuredClone(answer);
+  unknown.verdict = 'uncertain';
+  unknown.integrity = { verdict: 'uncertain', reason: 'PoC privilege prerequisite is not shown.',
+    admin_action_required: null };
+  unknown.proof = null;
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, unknown)))).integrity.admin_action_required, null);
+
+  const invalidApproval = structuredClone(answer);
+  invalidApproval.integrity.admin_action_required = true;
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalidApproval))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'shape');
+});
+
+test('independent proof review only supports when every static check includes an unprivileged trigger', async t => {
   const first = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
-    log: 'supported', defenses: 'supported' };
+    log: 'supported', defenses: 'supported', admin_action: 'supported' };
   const confirmed = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
-    { verdict: 'supports', reason: 'All submitted claims match the shown source.', checks },
+    { verdict: 'supports', reason: 'All submitted claims match the shown source.', admin_action_required: false, checks },
     { type: 'turn.completed' }, 0, '<first-review>')));
-  assert.deepEqual(confirmed, { verdict: 'supports', reason: 'All submitted claims match the shown source.', checks });
+  assert.deepEqual(confirmed, { verdict: 'supports', reason: 'All submitted claims match the shown source.',
+    admin_action_required: false, checks });
+  const ordinarySetup = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { verdict: 'supports', reason: 'Existing export is target setup, not a trigger privilege.',
+      admin_action_required: false, checks },
+    { type: 'turn.completed' }, 0, 'An already running NFS service, existing export')));
+  assert.equal(ordinarySetup.admin_action_required, false);
   const conflicting = { verdict: 'supports', reason: 'Unresolved guard.', checks: { ...checks, defenses: 'uncertain' } };
   await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, conflicting,
     { type: 'turn.completed' }, 0, '<first-review>'))),
   error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
   const uncertain = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
-    { verdict: 'uncertain', reason: 'Missing guard context.', checks: conflicting.checks },
+    { verdict: 'uncertain', reason: 'Missing guard context.', admin_action_required: false,
+      checks: conflicting.checks },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(uncertain.verdict, 'uncertain');
+  const requiresAdmin = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { verdict: 'refutes', reason: 'Trigger requires root access.', admin_action_required: true,
+      checks: { ...checks, admin_action: 'contradicted' } },
+    { type: 'turn.completed' }, 0, '<first-review>')));
+  assert.equal(requiresAdmin.admin_action_required, true);
+  assert.equal(requiresAdmin.checks.admin_action, 'contradicted');
+  const unknownPrivilege = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { verdict: 'uncertain', reason: 'Privilege prerequisite is missing.', admin_action_required: null,
+      checks: { ...checks, admin_action: 'uncertain' } },
+    { type: 'turn.completed' }, 0, '<first-review>')));
+  assert.equal(unknownPrivilege.admin_action_required, null);
+  for (const invalid of [
+    { verdict: 'supports', reason: 'Admin trigger.', admin_action_required: true,
+      checks: { ...checks, admin_action: 'contradicted' } },
+    { verdict: 'supports', reason: 'Missing assessment.', admin_action_required: false,
+      checks: { ...checks, admin_action: 'uncertain' } },
+    { verdict: 'supports', reason: 'Missing flag.', checks },
+  ]) {
+    await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, invalid,
+      { type: 'turn.completed' }, 0, '<first-review>'))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  }
   await assert.rejects(reviewStaticProofWithCodex(submission, { ...first, proof: null }, options(fakeCli(t, confirmed))),
     error => error.code === 'invalid_proof_input');
 });

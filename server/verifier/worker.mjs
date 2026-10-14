@@ -163,7 +163,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     await onPhase('static_review');
     const trustedSource = await sourceLoader(source, targetCommit, submission);
     review = await reviewer(submission, { cliPath: config.cliPath, trustedSource });
-    if (review.verdict !== 'likely' || review.integrity?.verdict !== 'clear') return { review, reproduction: notRun };
+    if (review.verdict !== 'likely' || review.integrity?.verdict !== 'clear' ||
+        review.integrity.admin_action_required !== false) return { review, reproduction: notRun };
     if (review.grounding?.source_commit !== targetCommit || !Array.isArray(review.grounding.evidence) ||
         !review.grounding.evidence.some(item => item.path === review.normalized?.file_path &&
           trustedSource.files.some(file => file.path === item.path && file.lines.some(line => line.number === item.line && line.text === item.text)))) {
@@ -177,8 +178,19 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       return { review, reproduction: notRun };
     }
     review.proof_review = await proofReviewer(submission, review, { cliPath: config.cliPath, trustedSource });
+    if (review.proof_review?.admin_action_required === true) {
+      review.integrity = { verdict: 'suspect', admin_action_required: true,
+        reason: review.proof_review.reason || 'Administrator action is required to trigger the finding' };
+      return { review, reproduction: notRun };
+    }
+    if (review.proof_review?.admin_action_required !== false) {
+      review.verdict = 'uncertain';
+      review.reason = 'Independent review could not rule out a required administrator action';
+      return { review, reproduction: notRun };
+    }
     if (review.proof_review?.verdict !== 'supports' ||
-        Object.values(review.proof_review.checks || {}).some(check => check !== 'supported')) {
+        !['reachability', 'flaw', 'poc', 'log', 'defenses', 'admin_action']
+          .every(name => review.proof_review.checks?.[name] === 'supported')) {
       review.verdict = 'uncertain';
       review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`.slice(0, 1000);
       return { review, reproduction: notRun };
@@ -225,7 +237,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       infrastructureError = error.code;
       if (error instanceof CodexReviewError) infrastructureDiagnostic = error.diagnostic;
     }
-    review = { verdict: 'uncertain', integrity: { verdict: 'uncertain', reason: 'Static review unavailable' },
+    review = { verdict: 'uncertain', integrity: { verdict: 'uncertain', admin_action_required: null,
+      reason: 'Static review unavailable' },
       reason: known ? `${error.code}${error instanceof CodexReviewError ? safeCodexDiagnostic(error.diagnostic) : ''}`
         : 'Static review unavailable', normalized: null, model: 'codex' };
   }

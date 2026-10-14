@@ -25,9 +25,12 @@ const proof = { entry: { path: 'fs/nfsd/nfs4proc.c', line: 41,
   flaw: sourceProof, impact: sourceProof, defenses: sourceProof,
   poc: { line: 1, explanation: 'This original C line constructs the submitted request.' },
   log: { index: 1, line: 1, explanation: 'This submitted trace names the claimed failure.' } };
-const proofReviewer = async () => ({ verdict: 'supports', reason: 'All five static links withstand independent review',
-  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported', defenses: 'supported' } });
-const reviewer = async () => ({ verdict: 'likely', integrity: { verdict: 'clear', reason: 'No artificial conditions' },
+const proofReviewer = async () => ({ verdict: 'supports', admin_action_required: false,
+  reason: 'All six static links withstand independent review',
+  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported',
+    defenses: 'supported', admin_action: 'supported' } });
+const reviewer = async () => ({ verdict: 'likely', integrity: { verdict: 'clear', admin_action_required: false,
+  reason: 'No artificial conditions' },
   reason: 'Plausible static candidate', model: 'test',
   proof,
   grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 42, text: line },
@@ -71,6 +74,39 @@ test('suspicious shortcut is never promoted even if source path is plausible', a
     proofReviewer, reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'suspect', reason: 'Injected kernel delay' } }) });
   assert.equal(result.review.integrity.verdict, 'suspect');
   assert.equal(result.artifacts, undefined);
+});
+
+test('administrator prerequisites stop before artifacts, including when found by the independent reviewer', async t => {
+  const cfg = config(t);
+  const sourceLoader = async () => trustedSource;
+  const primary = await processSubmissionJob(job, { config: cfg, sourceLoader,
+    reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'suspect',
+      admin_action_required: true, reason: 'Original trigger requires sudo mount' } }),
+    proofReviewer: async () => { throw new Error('independent review should not run'); } });
+  assert.equal(primary.review.integrity.admin_action_required, true);
+  assert.equal(primary.artifacts, undefined);
+  const secondary = await processSubmissionJob(job, { config: cfg, sourceLoader, reviewer,
+    proofReviewer: async () => ({ ...await proofReviewer(), verdict: 'refutes',
+      admin_action_required: true, reason: 'Original trigger requires sudo mount',
+      checks: { ...(await proofReviewer()).checks, admin_action: 'contradicted' } }) });
+  assert.equal(secondary.review.integrity.verdict, 'suspect');
+  assert.equal(secondary.review.integrity.admin_action_required, true);
+  assert.equal(secondary.artifacts, undefined);
+});
+
+test('unresolved administrator prerequisite holds the submission', async t => {
+  const cfg = config(t);
+  const sourceLoader = async () => trustedSource;
+  const primary = await processSubmissionJob(job, { config: cfg, sourceLoader,
+    reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'uncertain',
+      admin_action_required: null, reason: 'PoC privilege is not stated' } }), proofReviewer });
+  assert.equal(primary.artifacts, undefined);
+  const secondary = await processSubmissionJob(job, { config: cfg, sourceLoader, reviewer,
+    proofReviewer: async () => ({ ...await proofReviewer(), verdict: 'uncertain',
+      admin_action_required: null, reason: 'PoC privilege is not stated',
+      checks: { ...(await proofReviewer()).checks, admin_action: 'uncertain' } }) });
+  assert.equal(secondary.review.verdict, 'uncertain');
+  assert.equal(secondary.artifacts, undefined);
 });
 
 test('missing proof or independent contradiction prevents canonical promotion', async t => {

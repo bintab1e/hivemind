@@ -23,13 +23,16 @@ const proof = { entry: { path: 'fs/nfsd/nfs4proc.c', line: 41,
   flaw: sourceProof, impact: sourceProof, defenses: sourceProof,
   poc: { line: 1, explanation: 'The original C source line constructs the submitted request.' },
   log: { index: 1, line: 1, explanation: 'The submitted diagnostic line names the claimed failure.' } };
-const proofReview = { verdict: 'supports', reason: 'All required static links were independently challenged',
-  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported', defenses: 'supported' } };
+const proofReview = { verdict: 'supports', admin_action_required: false,
+  reason: 'All required static links were independently challenged',
+  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported',
+    defenses: 'supported', admin_action: 'supported' } };
 const raw = (id, metadata = {}) => ({ project: 'knfsd', client_submission_id: id, title: 'NFS request length error',
   report, metadata: { version_id: '7.3-rc7', repo_commit: commit, nfs_version: '4.2', ...metadata },
   files: [artifact('source.c', 'poc', poc), artifact('submitted.log', 'log', log)] });
 const verdict = ({ integrity = 'clear', existingId = null, anchorLine = 42 } = {}) => ({
-  review: { verdict: 'likely', integrity: { verdict: integrity, reason: integrity === 'clear' ? 'No artificial conditions' : 'Kernel delay added' },
+  review: { verdict: 'likely', integrity: { verdict: integrity, admin_action_required: false,
+    reason: integrity === 'clear' ? 'No artificial conditions' : 'Kernel delay added' },
     reason: 'Source and original C PoC support a plausible static candidate',
     proof, proof_review: proofReview,
     grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: anchorLine, text: line },
@@ -106,6 +109,28 @@ test('missing or disputed static proof never receives a management number', t =>
     const result = verdict();
     change(result);
     assert.equal(approve(db, id, result).status, 'needs_review', name);
+  }
+  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
+});
+
+test('administrator-dependent triggers are rejected and unknown prerequisites are held', t => {
+  const db = setup(t);
+  for (const [name, change, expected] of [
+    ['primary-admin', result => { result.review.integrity.admin_action_required = true;
+      result.review.integrity.reason = 'Original PoC requires sudo mount'; }, 'rejected'],
+    ['secondary-admin', result => { result.review.proof_review = { ...proofReview,
+      admin_action_required: true, verdict: 'refutes', reason: 'Target administrator must change a kernel setting' }; }, 'rejected'],
+    ['primary-unknown', result => { result.review.integrity.admin_action_required = null; }, 'needs_review'],
+    ['secondary-unknown', result => { result.review.proof_review = { ...proofReview,
+      admin_action_required: null, verdict: 'uncertain' }; }, 'needs_review'],
+    ['missing-primary-flag', result => { delete result.review.integrity.admin_action_required; }, 'needs_review'],
+    ['missing-second-flag', result => { result.review.proof_review = { ...proofReview };
+      delete result.review.proof_review.admin_action_required; }, 'needs_review'],
+  ]) {
+    const id = submit(db, name);
+    const result = verdict();
+    change(result);
+    assert.equal(approve(db, id, result).status, expected, name);
   }
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });

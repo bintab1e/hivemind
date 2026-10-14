@@ -7,9 +7,10 @@
     "verdict": { "type": "string", "enum": ["likely", "unlikely", "uncertain"] },
     "reason": { "type": "string" },
     "integrity": { "type": "object", "additionalProperties": false,
-      "required": ["verdict", "reason"], "properties": {
+      "required": ["verdict", "reason", "admin_action_required"], "properties": {
         "verdict": { "type": "string", "enum": ["clear", "suspect", "uncertain"] },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "admin_action_required": { "type": ["boolean", "null"] }
       }
     },
     "proof": {
