@@ -161,8 +161,130 @@ test('rejects unsupported Python selection when a C PoC exists and invalid model
 });
 
 test('rejects incomplete or failed Codex turns even if a result file exists', async t => {
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'turn.failed' }))), error => error instanceof CodexReviewError && error.code === 'runtime_failure');
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'item.completed' }))), error => error instanceof CodexReviewError && error.code === 'runtime_failure');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'turn.failed' }))), error => error instanceof CodexReviewError && error.code === 'turn_failed');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'item.completed' }))), error => error instanceof CodexReviewError && error.code === 'turn_incomplete');
+});
+
+test('classifies CLI execution failures without exposing diagnostics', async t => {
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'turn.completed' }, 0, 'missing-marker'))),
+    error => error instanceof CodexReviewError && error.code === 'cli_nonzero_exit');
+  const nonExecutable = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-noexec-test-')), 'noexec');
+  t.after(() => fs.rmSync(path.dirname(nonExecutable), { recursive: true, force: true }));
+  fs.writeFileSync(nonExecutable, '#!/bin/sh\nexit 0\n', { mode: 0o600 });
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(nonExecutable)),
+    error => error instanceof CodexReviewError && error.code === 'spawn_failed');
+  const overflowing = fakeCli(t, answer);
+  fs.appendFileSync(overflowing, "process.stdout.write('x'.repeat(4_100_000));\n");
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(overflowing)),
+    error => error instanceof CodexReviewError && error.code === 'cli_output_too_large');
+});
+
+test('classifies bounded nonzero-exit diagnostics into fixed safe codes', async t => {
+  const cases = [
+    ['auth_or_session', 'Authentication failed; secret=PRIVATE_EVIDENCE'],
+    ['rate_limited', 'Rate limit exceeded; secret=PRIVATE_EVIDENCE'],
+    ['context_too_large', 'Maximum context length exceeded; secret=PRIVATE_EVIDENCE'],
+    ['output_token_limit', 'Maximum output tokens exceeded; secret=PRIVATE_EVIDENCE'],
+    ['schema_error', 'Invalid output schema; secret=PRIVATE_EVIDENCE'],
+    ['parse_error', 'Failed to parse JSON; secret=PRIVATE_EVIDENCE'],
+    ['invalid_request', 'Invalid request; secret=PRIVATE_EVIDENCE'],
+    ['retry_exhausted', 'Retries exhausted; secret=PRIVATE_EVIDENCE'],
+    ['network_connection_reset', 'Upstream connection reset; secret=PRIVATE_EVIDENCE'],
+    ['approval_workspace_routing', 'Failed to load workspace requirements; secret=PRIVATE_EVIDENCE'],
+    ['policy_rejected', 'Request blocked by the safety policy; secret=PRIVATE_EVIDENCE'],
+  ];
+  for (const [expected, diagnostic] of cases) {
+    const cli = fakeCli(t, answer);
+    fs.appendFileSync(cli, `process.stderr.write(${JSON.stringify(diagnostic)}); process.exit(19);\n`);
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(cli)), error =>
+      error instanceof CodexReviewError && error.code === expected && !JSON.stringify(error).includes('PRIVATE_EVIDENCE'));
+  }
+  const jsonError = fakeCli(t, answer, { type: 'turn.failed', error: { message: 'context_length_exceeded; https://secret.invalid/12345' } });
+  fs.appendFileSync(jsonError, 'process.exit(19);\n');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(jsonError)), error =>
+    error.code === 'context_too_large' && !JSON.stringify(error).includes('secret.invalid'));
+  const beyondLimit = fakeCli(t, answer);
+  fs.appendFileSync(beyondLimit, "process.stderr.write('x'.repeat(70_000) + ' Rate limit exceeded'); process.exit(19);\n");
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(beyondLimit)), error => error.code === 'cli_nonzero_exit');
+});
+
+test('nonzero-exit diagnostics summarize only fixed enums and structured error codes', async t => {
+  const structured = fakeCli(t, answer, { type: 'turn.failed', error: {
+    code: 'context_length_exceeded', message: 'opaque PRIVATE_EVIDENCE', secret_id: 'PRIVATE_EVIDENCE' } });
+  fs.appendFileSync(structured, 'process.exit(1);\n');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(structured)), error => {
+    assert.equal(error.code, 'context_too_large');
+    assert.deepEqual(error.diagnostic, { exit_code: 'one', signal: 'none', stderr_size: 'empty',
+      json_error_events: 'turn_failed', json_error_keys: ['error', 'error.code', 'error.message'], hints: ['context_too_large'] });
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE_EVIDENCE|secret_id/);
+    return true;
+  });
+  const killed = fakeCli(t, answer);
+  fs.appendFileSync(killed, "process.kill(process.pid, 'SIGTERM');\n");
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(killed)), error =>
+    error.code === 'cli_nonzero_exit' && error.diagnostic.exit_code === 'signal' && error.diagnostic.signal === 'term');
+  const truncated = fakeCli(t, answer);
+  fs.appendFileSync(truncated, "process.stderr.write('x'.repeat(70_000) + ' Rate limit exceeded'); process.exit(1);\n");
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(truncated)), error =>
+    error.code === 'cli_nonzero_exit' && error.diagnostic.stderr_size === 'truncated' && error.diagnostic.hints.length === 0);
+});
+
+test('classifies JSON upstream errors into fixed network subtypes', async t => {
+  const cases = [
+    ['network_stream_disconnected', 'stream disconnected before completion'],
+    ['network_connection_reset', 'connection reset'],
+    ['network_connection_refused', 'connection refused'],
+    ['network_connection_timeout', 'connection timed out'],
+    ['network_dns', 'DNS resolution failure'],
+    ['network_tls', 'TLS handshake failure'],
+    ['upstream_gateway_timeout', 'gateway timeout'],
+    ['upstream_service_unavailable', 'service unavailable'],
+    ['upstream_backend', 'backend error'],
+    ['network_error', 'network error'],
+    ['upstream_other', 'upstream error'],
+  ];
+  for (const [expected, message] of cases) {
+    const cli = fakeCli(t, answer, { type: 'turn.failed', error: { message: `${message}; PRIVATE_EVIDENCE` } });
+    fs.appendFileSync(cli, 'process.exit(1);\n');
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(cli)), error =>
+      error.code === expected && error.diagnostic.hints.includes(expected) && !JSON.stringify(error).includes('PRIVATE_EVIDENCE'));
+  }
+});
+
+test('retries bounded CLI failures and discards an earlier result file', async t => {
+  const transient = fakeCli(t, answer);
+  const transientCount = path.join(path.dirname(transient), 'attempts');
+  fs.appendFileSync(transient, `
+const countPath = ${JSON.stringify(transientCount)};
+const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+if (count === 1) {
+  process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: 'turn.failed', error: { message: 'connection reset; PRIVATE_EVIDENCE' } })}\n`)});
+  process.exit(1);
+}
+`);
+  assert.equal((await reviewSubmissionWithCodex(submission, options(transient))).verdict, 'likely');
+  assert.equal(fs.readFileSync(transientCount, 'utf8'), '2');
+
+  const persistent = fakeCli(t, answer);
+  const persistentCount = path.join(path.dirname(persistent), 'attempts');
+  fs.appendFileSync(persistent, `
+fs.appendFileSync(${JSON.stringify(persistentCount)}, 'x');
+process.stderr.write('Upstream connection reset; PRIVATE_EVIDENCE');
+process.exit(1);
+`);
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(persistent)), error =>
+    error.code === 'network_connection_reset' && !JSON.stringify(error).includes('PRIVATE_EVIDENCE'));
+  assert.equal(fs.readFileSync(persistentCount, 'utf8'), 'xxx');
+
+  const generic = fakeCli(t, answer);
+  const genericCount = path.join(path.dirname(generic), 'attempts');
+  fs.appendFileSync(generic, `
+fs.appendFileSync(${JSON.stringify(genericCount)}, 'x');
+process.exit(1);
+`);
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(generic)), error => error.code === 'cli_nonzero_exit');
+  assert.equal(fs.readFileSync(genericCount, 'utf8'), 'xx');
 });
 
 test('rejects invalid JSON shape and times out without promoting a claim', async t => {

@@ -25,6 +25,41 @@ const typeAliases = new Map([
 ]);
 const sourcePathPattern = /(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+\.(?:c|h)/g;
 const trustedPathPattern = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+\.(?:c|h)$/;
+const maxDiagnosticBytes = 64 * 1024;
+const networkFailure = code => code === 'upstream_or_network' || code.startsWith('network_') || code.startsWith('upstream_');
+const infrastructureFailureCodes = new Set(['auth_or_session', 'rate_limited', 'retry_exhausted',
+  'approval_workspace_routing', 'spawn_failed', 'timeout', 'invalid_configuration',
+  'cli_nonzero_exit', 'turn_failed', 'turn_incomplete', 'cli_output_too_large']);
+const diagnosticPatterns = [
+  ['approval_workspace_routing', /(?:MCP tool call requires approval|approval policy|approval required|workspace (?:routing|requirements)|routing discovery)/i],
+  ['policy_rejected', /(?:blocked by (?:the )?(?:content|safety) policy|content policy violation|violat(?:es|ion of) (?:the )?(?:content|safety) policy|rejected by (?:the )?safety policy)/i],
+  ['auth_or_session', /(?:not logged in|login required|authentication (?:failed|required)|unauthorized|invalid api key|token (?:expired|invalid)|session expired|account\/read failed)/i],
+  ['rate_limited', /(?:rate limit|rate_limit|too many requests|quota exceeded|usage limit)/i],
+  ['context_too_large', /(?:context(?:_length)?_exceeded|maximum context length|context window|prompt too long|input too large|too many input tokens)/i],
+  ['output_token_limit', /(?:output token limit|max(?:imum)? output tokens|too many output tokens|output_tokens? exceeded|response token limit)/i],
+  ['schema_error', /(?:invalid (?:output |json )?schema|output schema error|schema validation failed|unsupported json schema)/i],
+  ['parse_error', /(?:failed to parse|parse error|invalid json|malformed json|unexpected token)/i],
+  ['invalid_request', /(?:invalid request|bad request|invalid_request_error)/i],
+  ['retry_exhausted', /(?:retr(?:y|ies) exhausted|too many retries|retry limit reached|retries? failed)/i],
+  ['network_stream_disconnected', /stream disconnected/i],
+  ['network_connection_reset', /(?:connection reset|ECONNRESET)/i],
+  ['network_connection_refused', /(?:connection refused|ECONNREFUSED)/i],
+  ['network_connection_timeout', /(?:connection timed out|ETIMEDOUT|connect timeout|network timeout)/i],
+  ['network_dns', /(?:DNS (?:lookup|resolution|failure|error)|ENOTFOUND|EAI_AGAIN|name resolution)/i],
+  ['network_tls', /(?:TLS (?:handshake|error|failure)|certificate (?:verify|validation) failed|SSL error)/i],
+  ['upstream_gateway_timeout', /gateway timeout/i],
+  ['upstream_service_unavailable', /service unavailable/i],
+  ['upstream_backend', /\bbackend\b/i],
+  ['network_error', /network error/i],
+  ['upstream_other', /\bupstream\b/i],
+];
+const structuredErrorCodes = new Map([
+  ['authentication_error', 'auth_or_session'], ['invalid_api_key', 'auth_or_session'],
+  ['rate_limit_exceeded', 'rate_limited'], ['insufficient_quota', 'rate_limited'],
+  ['context_length_exceeded', 'context_too_large'], ['max_output_tokens', 'output_token_limit'],
+  ['invalid_json_schema', 'schema_error'], ['invalid_request_error', 'invalid_request'],
+  ['server_error', 'upstream_other'], ['content_filter', 'policy_rejected'],
+]);
 
 export class VerifierUnavailableError extends Error {
   constructor() {
@@ -34,11 +69,15 @@ export class VerifierUnavailableError extends Error {
 }
 
 export class CodexReviewError extends Error {
-  constructor(code) {
+  constructor(code, diagnostic = null) {
     super(`Codex static review ${code.replaceAll('_', ' ')}`);
     this.code = code;
+    this.diagnostic = diagnostic;
   }
 }
+
+export const isInfrastructureReviewError = error => error instanceof VerifierUnavailableError ||
+  error instanceof CodexReviewError && (networkFailure(error.code) || infrastructureFailureCodes.has(error.code));
 
 export async function loadTrustedKernelSource(sourceDir, expectedCommit, submission) {
   if (!path.isAbsolute(sourceDir || '') || !/^[a-f0-9]{40}$/.test(expectedCommit || '')) throw new CodexReviewError('invalid_source_configuration');
@@ -198,9 +237,53 @@ function validateResult(parsed, submission, trustedSource) {
   };
 }
 
+function nonzeroExitAnalysis(stdout, stderr, exitCode, signal, stderrTotal) {
+  let remaining = maxDiagnosticBytes;
+  const eventTypes = new Set();
+  const eventKeys = new Set();
+  const hints = new Set();
+  const scan = text => { for (const [code, pattern] of diagnosticPatterns) if (pattern.test(text)) hints.add(code); };
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line || line.length > maxDiagnosticBytes * 2) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type !== 'error' && event?.type !== 'turn.failed') continue;
+    eventTypes.add(event.type);
+    if (Object.hasOwn(event, 'message')) eventKeys.add('message');
+    if (Object.hasOwn(event, 'error')) eventKeys.add('error');
+    if (event.error && typeof event.error === 'object') {
+      if (Object.hasOwn(event.error, 'message')) eventKeys.add('error.message');
+      if (Object.hasOwn(event.error, 'code')) eventKeys.add('error.code');
+      if (Object.hasOwn(event.error, 'type')) eventKeys.add('error.type');
+      const mapped = structuredErrorCodes.get(event.error.code);
+      if (mapped) hints.add(mapped);
+    }
+    const message = typeof event.error?.message === 'string' ? event.error.message : event.message;
+    if (typeof message !== 'string' || remaining <= 0) continue;
+    const bounded = Buffer.from(message).subarray(0, remaining).toString('utf8');
+    remaining -= Buffer.byteLength(bounded);
+    scan(bounded);
+  }
+  scan(stderr);
+  return {
+    code: diagnosticPatterns.find(([code]) => hints.has(code))?.[0] ?? 'cli_nonzero_exit',
+    diagnostic: {
+      exit_code: exitCode === null ? 'signal' : exitCode === 1 ? 'one' : exitCode === 2 ? 'two' : 'other',
+      signal: signal === null ? 'none' : signal === 'SIGKILL' ? 'kill' : signal === 'SIGTERM' ? 'term' : signal === 'SIGABRT' ? 'abort' : 'other',
+      stderr_size: stderrTotal === 0 ? 'empty' : stderrTotal > maxDiagnosticBytes ? 'truncated' : stderrTotal < 1024 ? 'short' : 'long',
+      json_error_events: eventTypes.size === 2 ? 'both' : eventTypes.has('turn.failed') ? 'turn_failed' : eventTypes.has('error') ? 'error' : 'none',
+      json_error_keys: [...eventKeys].sort(),
+      hints: [...hints].sort(),
+    },
+  };
+}
+
 function runCodex(cliPath, args, prompt, cwd, timeoutMs, env) {
   return new Promise((resolve, reject) => {
     let stdout = '';
+    const stderrChunks = [];
+    let stderrBytes = 0;
+    let stderrTotal = 0;
     let overflow = false;
     let timedOut = false;
     const child = spawn(cliPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
@@ -214,13 +297,21 @@ function runCodex(cliPath, args, prompt, cwd, timeoutMs, env) {
       stdout += chunk;
       if (stdout.length > 4_000_000) { overflow = true; kill(); }
     });
-    child.stderr.on('data', () => {}); // Never expose CLI diagnostics or submitted evidence in logs.
+    child.stderr.on('data', chunk => {
+      stderrTotal = Math.min(maxDiagnosticBytes + 1, stderrTotal + chunk.length);
+      const size = Math.min(chunk.length, maxDiagnosticBytes - stderrBytes);
+      if (size > 0) { stderrChunks.push(Buffer.from(chunk.subarray(0, size))); stderrBytes += size; }
+    }); // Diagnostics are classified in memory only; their text is never returned or logged.
     child.stdin.on('error', () => {});
-    child.on('error', error => { clearTimeout(timer); reject(error.code === 'ENOENT' ? new VerifierUnavailableError() : new CodexReviewError('runtime_failure')); });
-    child.on('close', code => {
+    child.on('error', error => { clearTimeout(timer); reject(error.code === 'ENOENT' ? new VerifierUnavailableError() : new CodexReviewError('spawn_failed')); });
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
+      const analysis = !timedOut && !overflow && code !== 0
+        ? nonzeroExitAnalysis(stdout, Buffer.concat(stderrChunks).toString('utf8'), code, signal, stderrTotal) : null;
+      for (const chunk of stderrChunks) chunk.fill(0);
       if (timedOut) reject(new CodexReviewError('timeout'));
-      else if (overflow || code !== 0) reject(new CodexReviewError('runtime_failure'));
+      else if (overflow) reject(new CodexReviewError('cli_output_too_large'));
+      else if (code !== 0) reject(new CodexReviewError(analysis.code, analysis.diagnostic));
       else resolve(stdout);
     });
     child.stdin.end(prompt);
@@ -260,16 +351,25 @@ export async function runStructuredCodex(prompt, outputSchema, options) {
   if (process.env.CODEX_API_KEY) env.CODEX_API_KEY = process.env.CODEX_API_KEY;
   if (options.apiKey) env.CODEX_API_KEY = options.apiKey;
   try {
-    const events = await runCodex(cliPath, args, prompt, jobDir, timeoutMs, env);
+    let events;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      fs.rmSync(outputPath, { force: true });
+      try { events = await runCodex(cliPath, args, prompt, jobDir, timeoutMs, env); break; }
+      catch (error) {
+        if (!(error instanceof CodexReviewError) ||
+            attempt + 1 >= (networkFailure(error.code) ? 3 : error.code === 'cli_nonzero_exit' ? 2 : 1)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+      }
+    }
     let completed = false;
     for (const line of events.split(/\r?\n/)) {
       if (!line.trim()) continue;
       let event;
       try { event = JSON.parse(line); } catch { throw new CodexReviewError('invalid_output'); }
-      if (event.type === 'turn.failed') throw new CodexReviewError('runtime_failure');
+      if (event.type === 'turn.failed') throw new CodexReviewError('turn_failed');
       if (event.type === 'turn.completed') completed = true;
     }
-    if (!completed) throw new CodexReviewError('runtime_failure');
+    if (!completed) throw new CodexReviewError('turn_incomplete');
     let parsed;
     try {
       if (fs.statSync(outputPath).size > 100_000) throw new Error('oversize');

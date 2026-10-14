@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { loadTrustedKernelSource, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewReproductionWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 import { canonicalArtifacts } from './canonical.mjs';
 import { symbolizeKasanFrames } from './symbolize.mjs';
 import { runTwoVmReproduction } from './qemu/run.mjs';
@@ -123,6 +123,25 @@ function serialExcerpt(file, startOffset) {
 
 const inconclusive = reason => ({ status: 'inconclusive', reason });
 
+function safeCodexDiagnostic(value) {
+  if (!value || typeof value !== 'object') return '';
+  const pick = (key, choices) => choices.includes(value[key]) ? value[key] : 'unknown';
+  const keys = new Set(['message', 'error', 'error.message', 'error.code', 'error.type']);
+  const hints = new Set(['approval_workspace_routing', 'policy_rejected', 'auth_or_session', 'rate_limited',
+    'context_too_large', 'output_token_limit', 'schema_error', 'parse_error', 'invalid_request', 'retry_exhausted',
+    'network_stream_disconnected', 'network_connection_reset', 'network_connection_refused', 'network_connection_timeout',
+    'network_dns', 'network_tls', 'upstream_gateway_timeout', 'upstream_service_unavailable', 'upstream_backend',
+    'network_error', 'upstream_other']);
+  return ` ${JSON.stringify({
+    exit_code: pick('exit_code', ['one', 'two', 'other', 'signal']),
+    signal: pick('signal', ['none', 'kill', 'term', 'abort', 'other']),
+    stderr_size: pick('stderr_size', ['empty', 'short', 'long', 'truncated']),
+    json_error_events: pick('json_error_events', ['none', 'error', 'turn_failed', 'both']),
+    json_error_keys: Array.isArray(value.json_error_keys) ? value.json_error_keys.filter(key => keys.has(key)) : [],
+    hints: Array.isArray(value.hints) ? value.hints.filter(hint => hints.has(hint)) : [],
+  })}`;
+}
+
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
   relevanceReviewer = reviewReproductionWithCodex, symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction,
   onPhase = async () => {} } = {}) {
@@ -131,6 +150,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
   let serverSerial = '';
   let artifacts;
   let privateDir;
+  let infrastructureError;
   try {
     const submission = decodeJob(job);
     const kernelInfo = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8'));
@@ -211,12 +231,17 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       }
     }
   } catch (error) {
-    reproduction = inconclusive(error instanceof WorkerError ? error.code : 'Verifier environment unavailable');
-    if (review.verdict !== 'likely') review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
+    const known = error instanceof WorkerError || error instanceof CodexReviewError || error instanceof VerifierUnavailableError;
+    if (isInfrastructureReviewError(error)) infrastructureError = error.code;
+    reproduction = inconclusive(known ? error.code : 'Verifier environment unavailable');
+    if (review.verdict !== 'likely') review = { verdict: 'uncertain',
+      reason: known ? `${error.code}${error instanceof CodexReviewError ? safeCodexDiagnostic(error.diagnostic) : ''}`
+        : 'Static review unavailable', normalized: null, model: 'codex' };
   } finally {
     if (privateDir) fs.rmSync(privateDir, { recursive: true, force: true });
   }
-  return { review, reproduction, server_serial: serverSerial, ...(artifacts ? { artifacts } : {}) };
+  return { review, reproduction, server_serial: serverSerial, ...(artifacts ? { artifacts } : {}),
+    ...(infrastructureError ? { infrastructure_error: infrastructureError } : {}) };
 }
 
 export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, workerId = null } = {}) {
@@ -243,14 +268,18 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     : Promise.resolve();
   try {
     const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader, relevanceReviewer, symbolizer, runner, onPhase });
-    await onPhase('finalizing');
+    if (!result.infrastructure_error) await onPhase('finalizing');
     if (Array.isArray(result.review?.normalized?.logs)) {
       result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);
     }
+    const endpoint = result.infrastructure_error ? '/fail' : '/complete';
+    const body = result.infrastructure_error
+      ? { submission_id: submissionId, lease_token: leaseToken, reason: `Verifier ${result.infrastructure_error}` }
+      : { submission_id: submissionId, lease_token: leaseToken, result };
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await transport(config.socketPath, '/complete', { submission_id: submissionId, lease_token: leaseToken, result });
+        await transport(config.socketPath, endpoint, body);
         return true;
       } catch (error) {
         lastError = error;
@@ -258,9 +287,11 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
         if (attempt < 2) await delay(1000 * (attempt + 1));
       }
     }
-    try { await transport(config.socketPath, '/fail', { submission_id: submissionId, lease_token: leaseToken, reason: 'Verification result delivery failed' }); }
-    catch { throw new WorkerError('completion_and_failure_delivery_failed'); }
-    if (lastError) throw new WorkerError('completion_delivery_failed');
+    if (endpoint === '/complete') {
+      try { await transport(config.socketPath, '/fail', { submission_id: submissionId, lease_token: leaseToken, reason: 'Verification result delivery failed' }); }
+      catch { throw new WorkerError('completion_and_failure_delivery_failed'); }
+    }
+    if (lastError) throw new WorkerError(endpoint === '/fail' ? 'failure_delivery_failed' : 'completion_delivery_failed');
     return true;
   } finally {
     if (timer) clearInterval(timer);

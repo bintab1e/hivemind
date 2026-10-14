@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { CodexReviewError, VerifierUnavailableError } from './codex.mjs';
 import { postJson, runWorkerOnce, stableWorkerId } from './worker.mjs';
 
 const commit = 'a'.repeat(40);
@@ -243,4 +244,63 @@ test('worker does not claim a job without a pinned full kernel commit', async t 
   fs.writeFileSync(config.kernelInfoPath, JSON.stringify({ sourceCommit: 'main' }));
   await assert.rejects(runWorkerOnce({ config, transport: () => { throw new Error('claim must not happen'); } }),
     error => error.code === 'kernel_commit_unavailable');
+});
+
+test('static-review failures expose only typed error codes', async t => {
+  const { config } = setup(t);
+  for (const [failure, reviewReason, runReason] of [
+    [new CodexReviewError('runtime_failure'), 'runtime_failure', 'runtime_failure'],
+    [new Error('private submitted evidence'), 'Static review unavailable', 'Verifier environment unavailable'],
+  ]) {
+    let completed;
+    const transport = async (_socket, endpoint, body) => {
+      if (endpoint === '/claim') return { job };
+      if (endpoint === '/complete') completed = body.result;
+      return {};
+    };
+    const reviewer = async () => { throw failure; };
+    assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader }), true);
+    assert.equal(completed.review.reason, reviewReason);
+    assert.equal(completed.reproduction.reason, runReason);
+    assert.equal(completed.server_serial, '');
+    assert.doesNotMatch(JSON.stringify(completed), /private submitted evidence/);
+  }
+});
+
+test('persistent verifier infrastructure failures mark the lease error without running a PoC', async t => {
+  const { config } = setup(t);
+  for (const failure of [new CodexReviewError('network_connection_reset'), new CodexReviewError('cli_nonzero_exit'),
+    new CodexReviewError('turn_failed'), new CodexReviewError('turn_incomplete'),
+    new CodexReviewError('cli_output_too_large'), new VerifierUnavailableError()]) {
+    const calls = [];
+    const transport = async (_socket, endpoint, body) => {
+      calls.push({ endpoint, body });
+      return endpoint === '/claim' ? { job } : {};
+    };
+    const reviewer = async () => { throw failure; };
+    const runner = async () => { throw new Error('PoC must not run'); };
+    assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader, runner }), true);
+    assert.deepEqual(calls.map(call => call.endpoint), ['/claim', '/fail']);
+    assert.deepEqual(calls.at(-1).body, { submission_id: id, lease_token: leaseToken, reason: `Verifier ${failure.code}` });
+    assert.equal(calls.some(call => call.endpoint === '/complete'), false);
+  }
+});
+
+test('worker emits only allowlisted diagnostic enums for a failed Codex CLI', async t => {
+  const { config } = setup(t);
+  let completed;
+  const transport = async (_socket, endpoint, body) => {
+    if (endpoint === '/claim') return { job };
+    if (endpoint === '/complete') completed = body.result;
+    return {};
+  };
+  const diagnostic = { exit_code: 'one', signal: 'none', stderr_size: 'short', json_error_events: 'turn_failed',
+    json_error_keys: ['error.message', 'PRIVATE_EVIDENCE'], hints: ['invalid_request', 'PRIVATE_EVIDENCE'], secret: 'PRIVATE_EVIDENCE' };
+  const reviewer = async () => { throw new CodexReviewError('invalid_request', diagnostic); };
+  assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader }), true);
+  assert.match(completed.review.reason, /^invalid_request \{/);
+  assert.match(completed.review.reason, /"exit_code":"one"/);
+  assert.match(completed.review.reason, /"invalid_request"/);
+  assert.equal(completed.reproduction.reason, 'invalid_request');
+  assert.doesNotMatch(JSON.stringify(completed), /PRIVATE_EVIDENCE|secret/);
 });
