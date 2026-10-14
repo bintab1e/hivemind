@@ -10,10 +10,7 @@ import { reviewFindingWithKimi } from './integrations.mjs';
 const sha = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40);
 
-test('direct knfsd finding, evidence, patch history and dashboard auth', async t => {
-  const previousExtensions = process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS;
-  process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS = 'true';
-  t.after(() => { if (previousExtensions === undefined) delete process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS; else process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS = previousExtensions; });
+test('direct knfsd finding, evidence, and dashboard auth', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-hub-'));
   const password = 'a-one-time-password';
   const salt = 'test-salt';
@@ -38,20 +35,6 @@ test('direct knfsd finding, evidence, patch history and dashboard auth', async t
   assert.equal(dashboard.findings[0].static_review.status, 'unconfigured');
   assert.deepEqual(dashboard.findings[0].verified_impacts, ['kasan_write']);
   assert.equal(await (await fetch(`${url}/api/events/${result.event_id}/poc`, { headers: dashboardAuth })).text(), poc);
-  const patch = 'diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c\n--- a/fs/nfsd/nfs4proc.c\n+++ b/fs/nfsd/nfs4proc.c\n@@ -1 +1 @@\n-old\n+new\n';
-  const upload = await fetch(`${url}/api/findings/${result.event_id}/patches`, { method: 'POST', headers: { ...dashboardAuth, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'fix.patch', content_base64: Buffer.from(patch).toString('base64') }) });
-  assert.equal(upload.status, 201);
-  const uploaded = await upload.json();
-  assert.equal(uploaded.status, 'unconfigured');
-  assert.equal(await (await fetch(`${url}/api/patches/${uploaded.id}/content`, { headers: dashboardAuth })).text(), patch);
-  const history = await (await fetch(`${url}/api/findings/${result.event_id}/patches`, { headers: dashboardAuth })).json();
-  assert.equal(history.patches.length, 1);
-  const rpcPatch = patch.replaceAll('fs/nfsd/nfs4proc.c', 'net/sunrpc/svcsock.c');
-  const rpcUpload = await fetch(`${url}/api/findings/${result.event_id}/patches`, { method: 'POST', headers: { ...dashboardAuth, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'rpc.patch', content_base64: Buffer.from(rpcPatch).toString('base64') }) });
-  assert.equal(rpcUpload.status, 201);
-  const outside = patch.replaceAll('fs/nfsd/nfs4proc.c', '../other.c');
-  const bad = await fetch(`${url}/api/findings/${result.event_id}/patches`, { method: 'POST', headers: { ...dashboardAuth, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'bad.patch', content_base64: Buffer.from(outside).toString('base64') }) });
-  assert.equal(bad.status, 400);
   for (const [index, file] of ['fs/nfs/client.c', 'fs/nfs_common/nfsacl.c', 'fs/lockd/svc.c', 'net/sunrpc/svcsock.c', 'include/linux/sunrpc/svc.h', 'mm/slab_common.c'].entries()) {
     const related = markdown.replaceAll('fs/nfsd/nfs4proc.c', file);
     const response = await fetch(`${url}/v1/exchange/events`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: 'pc01', source_path: `exchange/outbox/pc01/related-${index}.md`, markdown: related, sha256: sha(related) }) });
@@ -107,11 +90,14 @@ test('Kimi static review sends only the supplied report and records uncertainty'
   assert.equal(request.messages[1].content.includes('kasan_log'), false);
 });
 
-test('patch and automatic review routes stay closed in the coverage-and-reporting MVP', async t => {
+test('removed patch routes return 404 even for authenticated users', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-mvp-'));
   const { server, db, url } = await startServer({ port: 0, dataDir, dashboardPassword: 'test-pass' });
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('patches', 'patch_reviews')").all(), []);
   const auth = { Authorization: `Basic ${Buffer.from('viewer:test-pass').toString('base64')}` };
-  const response = await fetch(`${url}/api/findings/${'a'.repeat(64)}/patches`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: '{}' });
-  assert.equal(response.status, 404);
+  for (const pathname of ['/api/patch-reviews', `/api/patch-reviews/${'a'.repeat(64)}`, `/api/patches/${'a'.repeat(64)}/content`, `/api/findings/${'a'.repeat(64)}/patches`, `/patch-reviews/${'a'.repeat(64)}`, '/patch-review.js']) {
+    assert.equal((await fetch(`${url}${pathname}`, { headers: auth })).status, 404, pathname);
+  }
+  assert.equal((await fetch(`${url}/api/patch-reviews`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: '{}' })).status, 404);
 });

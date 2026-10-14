@@ -9,7 +9,6 @@ import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, complet
   progressSubmission } from './submissions.mjs';
 import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplicateResult,
   recordInternalDuplicateResult } from './duplicate-registry.mjs';
-import { claimPatchReview, completePatchReview, failPatchReview } from './patch-reviews.mjs';
 
 function reply(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -84,24 +83,6 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null, data
       }
       if (req.method === 'POST' && req.url === '/duplicate/internal-result') {
         return reply(res, 200, recordInternalDuplicateResult(db, await inputJson(req), dataDir));
-      }
-      if (req.method === 'POST' && req.url === '/patch/claim') {
-        const body = await inputJson(req);
-        if (!body || typeof body !== 'object' || Array.isArray(body) ||
-            Object.keys(body).some(key => !['worker_id', 'supported_commits'].includes(key))) invalid('Invalid patch claim request');
-        return reply(res, 200, { job: claimPatchReview(db, body.worker_id, body.supported_commits) });
-      }
-      if (req.method === 'POST' && req.url === '/patch/complete') {
-        const body = await inputJson(req);
-        if (!body || typeof body !== 'object' || Array.isArray(body) ||
-            Object.keys(body).some(key => !['review_id', 'lease_token', 'status', 'result'].includes(key))) invalid('Invalid patch completion request');
-        return reply(res, 200, completePatchReview(db, body.review_id, body.lease_token, body.status, body.result));
-      }
-      if (req.method === 'POST' && req.url === '/patch/fail') {
-        const body = await inputJson(req);
-        if (!body || typeof body !== 'object' || Array.isArray(body) ||
-            Object.keys(body).some(key => !['review_id', 'lease_token', 'reason'].includes(key))) invalid('Invalid patch failure request');
-        return reply(res, 200, failPatchReview(db, body.review_id, body.lease_token, body.reason));
       }
       if (req.method === 'POST' && req.url === '/claim') {
         const body = await inputJson(req);

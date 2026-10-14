@@ -165,8 +165,7 @@ export function listRegistry(db) {
     e.corrects_event_id AS replaces_event_id, v.status AS review_status,
     v.verdict AS review_verdict, v.summary AS review_summary, v.provider AS review_provider,
     pr.status AS primitive_review_status, pr.summary AS primitive_review_summary,
-    pr.completed_at AS primitive_review_completed_at,
-    EXISTS(SELECT 1 FROM patches p WHERE p.finding_id = r.finding_id) AS has_patch
+    pr.completed_at AS primitive_review_completed_at
     FROM finding_registry r JOIN events e ON e.id = r.finding_id
     LEFT JOIN finding_reviews v ON v.finding_id = r.finding_id
     LEFT JOIN primitive_reviews pr ON pr.finding_id = r.finding_id
@@ -210,7 +209,7 @@ export function listRegistry(db) {
     primitive_review_completed_at: null,
     registration_status: version || earlier?.result === 'verified' ? 'verified' : 'history',
     verified_at: version?.latest.completed_at ?? null,
-    updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null, has_patch: 0,
+    updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null,
     file_path: accepted?.file_path ?? null, code_refs: accepted?.code_refs ?? [],
     access_requirements: [], verified_impacts: [...impacts],
     vm_environment: accepted?.vm_environment ?? null,

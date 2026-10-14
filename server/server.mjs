@@ -8,7 +8,7 @@ import { hash, evidenceLimits, verifiedImpactTypes, accessRequirementTypes, Http
 export { evidenceLimits, verifiedImpactTypes, accessRequirementTypes, validateEvent, parseLcov, mcpTools } from './contract.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { reviewFindingWithKimi, reviewPatchWithSashiko } from './integrations.mjs';
+import { reviewFindingWithKimi } from './integrations.mjs';
 import { completeFindingReview, initializeRegistry, listRegistry, registerFinding, registrySequences, retryFindingReview, updateRegistry, updateRegistryRow, validateRegistryMetadata, withdrawFinding } from './registry.mjs';
 import { initializeHistoryArtifacts, listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 import { appendHistoryVerification, initializeHistoryVerifications } from './history-verifications.mjs';
@@ -16,16 +16,12 @@ import { getSubmission, getVerifiedArtifact, initializeSubmissions, listSubmissi
 import { startVerifierIpc } from './verifier-ipc.mjs';
 import { initializeDuplicateRegistry } from './duplicate-registry.mjs';
 import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
-import { getPatchReview, getPatchReviewFile, initializePatchReviews, listPatchReviews,
-  submitPatchReview, validatePatchFile } from './patch-reviews.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
 const now = () => new Date().toISOString();
 const gunzipAsync = promisify(gunzip);
 const telemetryLimits = Object.freeze({ compressed_request: 8_000_000, decompressed_request: 128_000_000, coverage_json: 64_000_000 });
-const reviewExtensionsEnabled = () => process.env.HIVEMIND_ENABLE_REVIEW_EXTENSIONS === 'true';
-const sashikoConfigured = () => Boolean(reviewExtensionsEnabled() && process.env.SASHIKO_CLI && process.env.SASHIKO_REPO && process.env.LLM_API_KEY);
 function secureDataDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const mode = fs.statSync(directory).mode & 0o777;
@@ -81,13 +77,6 @@ export function openDatabase(file) {
       provider TEXT NOT NULL, status TEXT NOT NULL, verdict TEXT,
       summary TEXT, requested_at TEXT NOT NULL, completed_at TEXT
     );
-    CREATE TABLE IF NOT EXISTS patches (
-      id TEXT PRIMARY KEY, finding_id TEXT NOT NULL REFERENCES events(id),
-      filename TEXT NOT NULL, sha256 TEXT NOT NULL, patch TEXT NOT NULL,
-      status TEXT NOT NULL, result TEXT, uploaded_at TEXT NOT NULL,
-      completed_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS patches_finding ON patches(finding_id, uploaded_at);
   `);
   fs.chmodSync(file, 0o600);
   const batchColumns = new Set(db.prepare('PRAGMA table_info(batches)').all().map(column => column.name));
@@ -101,7 +90,6 @@ export function openDatabase(file) {
   initializeHistoryArtifacts(db);
   initializeHistoryVerifications(db);
   initializeSubmissions(db);
-  initializePatchReviews(db);
   initializeDuplicateRegistry(db);
   return db;
 }
@@ -472,8 +460,7 @@ function dashboard(db, requested = {}) {
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
     const staticReview = db.prepare('SELECT provider, status, verdict, summary, completed_at FROM finding_reviews WHERE finding_id = ?').get(item.id) || null;
-    const latestPatch = db.prepare('SELECT id, filename, status, result, uploaded_at, completed_at FROM patches WHERE finding_id = ? ORDER BY uploaded_at DESC LIMIT 1').get(item.id) || null;
-    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || null, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || null, file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), static_review: staticReview, patch: latestPatch, created_at: item.created_at };
+    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || null, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || null, file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), static_review: staticReview, created_at: item.created_at };
   });
   const taskMap = new Map();
   for (const row of [...observedLatest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
@@ -729,19 +716,6 @@ async function readJson(req) {
   catch { invalid('Invalid JSON'); }
 }
 
-function submitPatch(db, findingId, input) {
-  const finding = db.prepare("SELECT id FROM events WHERE id = ? AND kind = 'finding'").get(findingId);
-  if (!finding) invalid('Finding not found', 404);
-  const { filename, patch, sha256 } = validatePatchFile(input);
-  const id = hash(`${findingId}\0${sha256}`);
-  const existing = db.prepare('SELECT id, finding_id, filename, status, uploaded_at FROM patches WHERE id = ?').get(id);
-  if (existing) return existing;
-  const status = sashikoConfigured() ? 'pending' : 'unconfigured';
-  const uploadedAt = now();
-  db.prepare('INSERT INTO patches (id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, findingId, filename, sha256, patch, status, uploadedAt);
-  return { id, finding_id: findingId, filename, status, uploaded_at: uploadedAt };
-}
-
 async function processKimiReview(db) {
   const job = db.prepare("SELECT r.finding_id, e.title, e.markdown FROM finding_reviews r JOIN events e ON e.id = r.finding_id WHERE r.status = 'pending' ORDER BY r.requested_at LIMIT 1").get();
   if (!job) return;
@@ -752,18 +726,6 @@ async function processKimiReview(db) {
     completeFindingReview(db, job.finding_id, review);
   } catch (error) {
     db.prepare("UPDATE finding_reviews SET status = 'error', summary = ?, completed_at = ? WHERE finding_id = ?").run(String(error.message || 'Kimi review failed').slice(0, 1000), now(), job.finding_id);
-  }
-}
-
-async function processSashikoPatch(db, dataDir) {
-  const job = db.prepare("SELECT p.id, p.patch, e.repo_commit FROM patches p JOIN events e ON e.id = p.finding_id WHERE p.status = 'pending' ORDER BY p.uploaded_at LIMIT 1").get();
-  if (!job) return;
-  db.prepare("UPDATE patches SET status = 'processing' WHERE id = ?").run(job.id);
-  try {
-    const review = await reviewPatchWithSashiko({ patch: job.patch, baseCommit: job.repo_commit, repoPath: process.env.SASHIKO_REPO, cliPath: process.env.SASHIKO_CLI, dataDir });
-    db.prepare('UPDATE patches SET status = ?, result = ?, completed_at = ? WHERE id = ?').run(review.status, JSON.stringify({ exit_code: review.exit_code, result: review.result }), now(), job.id);
-  } catch (error) {
-    db.prepare("UPDATE patches SET status = 'error', result = ?, completed_at = ? WHERE id = ?").run(JSON.stringify({ error: String(error.message || 'Sashiko review failed').slice(0, 1000) }), now(), job.id);
   }
 }
 
@@ -786,8 +748,6 @@ export async function startServer(options = {}) {
   const db = openDatabase(path.join(dataDir, 'hivemind.sqlite3'));
   if (process.env.KIMI_API_KEY) db.prepare("UPDATE finding_reviews SET status = 'pending' WHERE status IN ('unconfigured', 'processing')").run();
   else db.prepare("UPDATE finding_reviews SET status = 'unconfigured' WHERE status IN ('pending', 'processing')").run();
-  if (sashikoConfigured()) db.prepare("UPDATE patches SET status = 'pending' WHERE status IN ('unconfigured', 'processing')").run();
-  else db.prepare("UPDATE patches SET status = 'unconfigured' WHERE status = 'processing'").run();
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -871,44 +831,6 @@ export async function startServer(options = {}) {
       }
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
-      if (url.pathname === '/api/patch-reviews' && req.method === 'GET') {
-        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
-        return send(res, 200, { reviews: listPatchReviews(db) });
-      }
-      if (url.pathname === '/api/patch-reviews' && req.method === 'POST') {
-        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to upload patches' });
-        if (req.headers.origin) {
-          let sameOrigin = false;
-          try { sameOrigin = new URL(req.headers.origin).origin === new URL(`http://${req.headers.host}`).origin; }
-          catch { /* invalid origin */ }
-          if (!sameOrigin) return send(res, 403, { error: 'Origin not allowed' });
-        }
-        if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site upload not allowed' });
-        return send(res, 201, submitPatchReview(db, await readJson(req)));
-      }
-      const patchReviewMatch = /^\/api\/patch-reviews\/([a-f0-9]{64})$/.exec(url.pathname);
-      if (patchReviewMatch && req.method === 'GET') {
-        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
-        return send(res, 200, { review: getPatchReview(db, patchReviewMatch[1]) });
-      }
-      const patchReviewFileMatch = /^\/api\/patch-reviews\/([a-f0-9]{64})\/file$/.exec(url.pathname);
-      if (patchReviewFileMatch && req.method === 'GET') {
-        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
-        const file = getPatchReviewFile(db, patchReviewFileMatch[1]);
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',
-          'Content-Length': Buffer.byteLength(file.patch),
-          'Content-Disposition': `attachment; filename="${file.filename}"`,
-          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-          'Referrer-Policy': 'no-referrer' });
-        res.end(file.patch);
-        return;
-      }
-      const patchReviewPageMatch = /^\/patch-reviews\/([a-f0-9]{64})$/.exec(url.pathname);
-      if (patchReviewPageMatch && req.method === 'GET') {
-        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
-        if (!db.prepare('SELECT 1 FROM patch_reviews WHERE id = ?').get(patchReviewPageMatch[1])) return send(res, 404, { error: 'Patch review not found' });
-        return send(res, 200, fs.readFileSync(path.join(publicDir, 'patch-review.html'), 'utf8'), 'text/html; charset=utf-8');
-      }
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions/upload-targets') return send(res, 200, { targets: uploadedTargets(db) });
       if (req.method === 'POST' && url.pathname === '/api/submissions/upload') {
@@ -968,17 +890,6 @@ export async function startServer(options = {}) {
       }
       if (req.method === 'GET' && url.pathname === '/api/coverage') return send(res, 200, coverageDetails(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/team-status.md') return send(res, 200, teamStatusMarkdown(dashboard(db, Object.fromEntries(url.searchParams))), 'text/markdown; charset=utf-8');
-      const findingPatchMatch = /^\/api\/findings\/([a-f0-9]{64})\/patches$/.exec(url.pathname);
-      if (reviewExtensionsEnabled() && findingPatchMatch && req.method === 'GET') {
-        if (!db.prepare("SELECT 1 FROM events WHERE id = ? AND kind = 'finding'").get(findingPatchMatch[1])) invalid('Finding not found', 404);
-        return send(res, 200, { patches: db.prepare('SELECT id, finding_id, filename, sha256, status, result, uploaded_at, completed_at FROM patches WHERE finding_id = ? ORDER BY uploaded_at DESC').all(findingPatchMatch[1]) });
-      }
-      if (reviewExtensionsEnabled() && findingPatchMatch && req.method === 'POST') return send(res, 201, submitPatch(db, findingPatchMatch[1], await readJson(req)));
-      const patchContentMatch = /^\/api\/patches\/([a-f0-9]{64})\/content$/.exec(url.pathname);
-      if (reviewExtensionsEnabled() && patchContentMatch && req.method === 'GET') {
-        const patch = db.prepare('SELECT patch FROM patches WHERE id = ?').get(patchContentMatch[1]);
-        return patch ? send(res, 200, patch.patch, 'text/plain; charset=utf-8') : send(res, 404, { error: 'Patch not found' });
-      }
       const evidenceMatch = /^\/api\/events\/([a-f0-9]{64})\/(poc|kasan)$/.exec(url.pathname);
       const verifiedArtifactsMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts$/.exec(url.pathname);
       if (req.method === 'GET' && verifiedArtifactsMatch) return send(res, 200, { artifacts: listVerifiedArtifacts(db, verifiedArtifactsMatch[1]) });
@@ -1002,7 +913,7 @@ export async function startServer(options = {}) {
         const row = db.prepare('SELECT id, kind, agent_id, title, markdown FROM events WHERE id = ?').get(url.pathname.slice('/api/events/'.length));
         return row ? send(res, 200, { ...row, markdown: row.kind === 'finding' ? readFrontMatter(row.markdown).body : row.markdown }) : send(res, 404, { error: 'Event not found' });
       }
-      const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/patch-review.js': ['patch-review.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
+      const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
       if (req.method === 'GET' && staticFiles[url.pathname]) {
         const [file, type] = staticFiles[url.pathname];
         return send(res, 200, fs.readFileSync(path.join(publicDir, file), 'utf8'), type);
@@ -1025,15 +936,10 @@ export async function startServer(options = {}) {
     }
   }
   let kimiBusy = false;
-  let sashikoBusy = false;
   const timer = setInterval(() => {
     if (process.env.KIMI_API_KEY && !kimiBusy) {
       kimiBusy = true;
       processKimiReview(db).catch(error => console.error('Kimi worker:', error.message)).finally(() => { kimiBusy = false; });
-    }
-    if (sashikoConfigured() && !sashikoBusy) {
-      sashikoBusy = true;
-      processSashikoPatch(db, dataDir).catch(error => console.error('Sashiko worker:', error.message)).finally(() => { sashikoBusy = false; });
     }
   }, 2_000);
   timer.unref();

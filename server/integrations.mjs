@@ -1,24 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-
-const exec = promisify(execFile);
-
-function sashikoFailureReason(error, exitCode) {
-  if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'Sashiko review output exceeded the capture limit';
-  if (error.killed || error.code === 'ETIMEDOUT') return 'Sashiko review timed out';
-  const diagnostic = String(error.stderr || error.message || '');
-  if (/\b(?:401|unauthorized|unauthorised|authentication|not logged in|login required|invalid api key)\b/i.test(diagnostic)) {
-    return 'Sashiko AI authentication failed';
-  }
-  if (/\b(?:429|quota|rate.?limit|usage limit)\b/i.test(diagnostic)) return 'Sashiko AI rate limit or quota reached';
-  if (/SASHIKO_CONFIG|Settings\.toml|configuration/i.test(diagnostic)) return 'Sashiko configuration failed';
-  if (/Failed to start worker binary|No such file or directory/i.test(diagnostic)) return 'Sashiko worker executable is unavailable';
-  return 'Sashiko failed with exit code ' + exitCode + ' before producing a review';
-}
-
 export async function reviewFindingWithKimi({ title, filePath, codeRefs, impact, report }, options = {}) {
   const key = options.apiKey ?? process.env.KIMI_API_KEY;
   if (!key) throw new Error('Kimi API key is not configured');
@@ -47,59 +26,4 @@ export async function reviewFindingWithKimi({ title, filePath, codeRefs, impact,
   try { answer = JSON.parse(content); } catch { throw new Error('Kimi returned invalid JSON'); }
   if (!['likely', 'unlikely', 'uncertain'].includes(answer?.verdict) || typeof answer.summary !== 'string' || !answer.summary.trim()) throw new Error('Kimi returned an incomplete review');
   return { verdict: answer.verdict, summary: answer.summary.trim().slice(0, 3000), model };
-}
-
-export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliPath, dataDir, configDir = repoPath,
-  timeoutMs = 90 * 60_000 }) {
-  if (!/^[a-f0-9]{40,64}$/i.test(baseCommit)) throw new Error('Invalid base commit');
-  const jobsDir = path.join(dataDir, 'jobs');
-  fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
-  const jobDir = fs.mkdtempSync(path.join(jobsDir, 'sashiko-'));
-  const worktree = path.join(jobDir, 'tree');
-  const patchFile = path.join(jobDir, 'candidate.patch');
-  fs.writeFileSync(patchFile, patch, { mode: 0o600 });
-  let added = false;
-  try {
-    await exec('git', ['-C', repoPath, 'worktree', 'add', '--detach', worktree, baseCommit], { timeout: 120_000 });
-    added = true;
-    const changedPaths = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
-    if (!changedPaths.length) throw new Error('Patch has no Git diff paths');
-    for (const [, before, after] of changedPaths) {
-      const file = path.resolve(worktree, before);
-      if (before !== after || !file.startsWith(`${worktree}${path.sep}`) ||
-          !fs.lstatSync(file).isFile() || !fs.realpathSync(file).startsWith(`${worktree}${path.sep}`)) {
-        throw new Error('Patch must change regular files inside the kernel worktree');
-      }
-    }
-    await exec('git', ['-C', worktree, 'apply', '--check', patchFile], { timeout: 30_000 });
-    await exec('git', ['-C', worktree, 'apply', patchFile], { timeout: 30_000 });
-    await exec('git', ['-C', worktree, 'add', '--all'], { timeout: 30_000 });
-    await exec('git', ['-C', worktree, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Hivemind Review', '-c', 'user.email=review@localhost', 'commit', '-m', 'Review uploaded knfsd patch'], { timeout: 60_000 });
-    let stdout = '';
-    let exitCode = 0;
-    try {
-      ({ stdout } = await exec(cliPath, ['--format', 'json', 'local', 'HEAD', '--repo', worktree, '--baseline', baseCommit, '--force-local', '--agent'], {
-        cwd: worktree, timeout: timeoutMs, maxBuffer: 4_000_000,
-        env: { ...process.env, SASHIKO_CONFIG: path.join(configDir, 'Settings.toml') },
-      }));
-    } catch (error) {
-      if (error.killed || error.code === 'ETIMEDOUT' || error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-        throw new Error(sashikoFailureReason(error, 3));
-      }
-      stdout = error.stdout || '';
-      exitCode = typeof error.code === 'number' ? error.code : 3;
-      if (!stdout) throw new Error(sashikoFailureReason(error, exitCode));
-    }
-    let result;
-    try { result = JSON.parse(stdout); } catch { throw new Error('Sashiko returned invalid JSON'); }
-    const status = result?.error || result?.partial || result?.status === 'error' || exitCode === 3
-      ? 'error'
-      : result?.status === 'issues_found' || (result?.findings || []).length || (result?.concerns || []).length || exitCode === 1
-        ? 'findings'
-        : result?.status === 'clean' && exitCode === 0 ? 'reviewed' : 'error';
-    return { status, exit_code: exitCode, result };
-  } finally {
-    if (added) await exec('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktree], { timeout: 120_000 }).catch(() => {});
-    if (path.dirname(jobDir) === jobsDir) fs.rmSync(jobDir, { recursive: true, force: true });
-  }
 }

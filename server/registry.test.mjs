@@ -70,10 +70,6 @@ test('legacy static review remains advisory while admin edits stay intact', asyn
   assert.equal(result.findings[0].methodology, 'Manual');
   assert.equal(result.findings[0].found_date, '2026-09-07');
   assert.equal(result.findings[0].registration_status, 'pending');
-  assert.equal(result.findings[0].has_patch, 0);
-  db.prepare("INSERT INTO patches(id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, 'fix.patch', ?, 'diff', 'unconfigured', '2026-10-12T00:00:00Z')")
-    .run('b'.repeat(64), first, sha('diff'));
-  assert.equal((await registry()).findings[0].has_patch, 1);
   assert.equal(result.sequences[0].next_id, 'A-043');
 });
 

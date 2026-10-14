@@ -235,6 +235,7 @@ test('IPC client sends JSON only to the local Unix socket', async t => {
   await new Promise(resolve => server.listen(config.socketPath, resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   assert.deepEqual(await postJson(config.socketPath, '/claim', { target_commit: commit }), { job: null });
+  assert.throws(() => postJson(config.socketPath, '/patch/claim', {}), error => error.code === 'invalid_request');
 });
 
 test('duplicate worker IPC routes are available on the same local socket', async t => {

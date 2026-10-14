@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, patchReviews: null, patchError: null, patchRequestId: 0, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
@@ -29,7 +29,7 @@ const agentName = id => {
 const coverageAgentLabel = id => agentName(id) === id ? id : `${agentName(id)} · ${id}`;
 const activeView = () => {
   const view = new URLSearchParams(location.search).get('view');
-  return ['queue', 'coverage', 'registry', 'patch'].includes(view) ? view : 'findings';
+  return ['queue', 'coverage', 'registry'].includes(view) ? view : 'findings';
 };
 const setQuery = values => {
   const query = new URLSearchParams(location.search);
@@ -58,7 +58,7 @@ function showError(error) {
 
 function showView() {
   const view = activeView();
-  const title = { findings: '신규 취약점', queue: '검증 큐', coverage: '코드 커버리지', registry: '취약점 관리', patch: '패치' }[view];
+  const title = { findings: '신규 취약점', queue: '검증 큐', coverage: '코드 커버리지', registry: '취약점 관리' }[view];
   $('workspace-title').textContent = title;
   $('findings-title').textContent = title;
   $('track-control').hidden = view !== 'coverage';
@@ -67,14 +67,12 @@ function showView() {
   $('open-zip-submit').hidden = view !== 'findings';
   $('finding-export-csv').hidden = view !== 'registry';
   if (view !== 'findings' && $('zip-submit-dialog').open) $('zip-submit-dialog').close();
-  if (view !== 'patch' && $('patch-upload-dialog').open) $('patch-upload-dialog').close();
   if (view !== 'queue' && $('queue-detail').open) $('queue-detail').close();
   $('finding-status-stats').hidden = view !== 'registry';
   $('queue-view').hidden = view !== 'queue';
   $('coverage-view').hidden = view !== 'coverage' || !state.data?.selected;
-  $('patch-view').hidden = view !== 'patch';
   if (view === 'queue' && !state.queue && !state.queueError) $('queue-active').replaceChildren(element('div', 'table-empty', '검증 큐를 불러오는 중입니다.'));
-  for (const name of ['findings', 'queue', 'coverage', 'registry', 'patch']) {
+  for (const name of ['findings', 'queue', 'coverage', 'registry']) {
     const button = document.querySelector(`.tabs button[data-view="${name}"]`);
     if (view === name) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
@@ -202,7 +200,6 @@ function renderFindingStats(findings) {
     ]],
     ['finding-status-stats', [
       ['검증 대기', groups.filter(group => group.some(needsVerification)).length, ''],
-      ['패치 대기', groups.filter(group => group.some(item => isRegistered(item) && !item.has_patch && !['제보 완료', '중복', '철회'].includes(item.report_status))).length, ''],
       ['제보 완료', groups.filter(group => group.some(item => (isRegistered(item) || item.origin === 'history') && item.report_status === '제보 완료')).length, 'good'],
     ]],
   ];
@@ -1127,152 +1124,6 @@ async function loadVerificationQueue() {
   renderVerificationQueue();
 }
 
-const patchStatusLabels = {
-  pending: '검토 대기', processing: 'Sashiko 검토 중', reviewed: 'Sashiko 검토 완료',
-  findings: '검토 의견 있음', error: '검토 오류', unconfigured: 'Sashiko 미설정',
-};
-let patchFinding = null;
-let patchTargets = [];
-let patchSubmitting = false;
-
-function renderPatchView() {
-  const findings = (state.registry?.findings || []).filter(item => item.management_id && item.target === 'knfsd')
-    .sort((a, b) => a.management_id.localeCompare(b.management_id, 'ko', { numeric: true }));
-  const search = $('patch-search').value.trim().toLowerCase();
-  const filtered = findings.filter(item => !search || `${item.management_id} ${item.title} ${item.owner || ''}`.toLowerCase().includes(search));
-  $('patch-count').textContent = `${number(filtered.length)} / ${number(findings.length)}건`;
-  $('patch-error').hidden = !state.patchError;
-  $('patch-error').textContent = state.patchError ? `패치 검토 현황을 불러오지 못했습니다: ${state.patchError.message}` : '';
-  const latest = new Map();
-  for (const review of [...(state.patchReviews || [])].sort((a, b) => String(b.submitted_at).localeCompare(String(a.submitted_at)))) {
-    if (!latest.has(review.management_id)) latest.set(review.management_id, review);
-  }
-  const container = $('patch-list');
-  clear(container);
-  if (!filtered.length) {
-    container.append(element('div', 'table-empty', findings.length ? '조건에 맞는 취약점이 없습니다.' : '등록된 취약점이 없습니다.'));
-    return;
-  }
-  const table = element('table', 'queue-table patch-table');
-  const head = element('thead');
-  const heading = element('tr');
-  for (const label of ['관리 번호', '취약점 명', '최근 패치', 'Sashiko 결과', '제출 시각', '작업']) heading.append(element('th', '', label));
-  head.append(heading);
-  const body = element('tbody');
-  for (const finding of filtered) {
-    const review = latest.get(finding.management_id);
-    const row = element('tr');
-    row.append(element('td', 'patch-id', finding.management_id));
-    const titleCell = element('td', 'queue-title-cell');
-    const title = element('button', 'finding-title', finding.title);
-    title.type = 'button';
-    title.addEventListener('click', () => openFinding(finding));
-    titleCell.append(title);
-    row.append(titleCell);
-    row.append(element('td', 'path', review?.filename || '—'));
-    row.append(element('td', '', review ? patchStatusLabels[review.status] || review.status : '미제출'));
-    row.append(element('td', '', review ? when(review.submitted_at) : '—'));
-    const actions = element('td', 'patch-actions');
-    const upload = element('button', 'row-edit-button primary', '패치 업로드');
-    upload.type = 'button';
-    upload.setAttribute('aria-label', `${finding.management_id} 패치 업로드`);
-    upload.addEventListener('click', () => openPatchUpload(finding));
-    actions.append(upload);
-    if (review) {
-      const result = element('a', 'row-edit-button', '결과 보기');
-      result.href = `/patch-reviews/${encodeURIComponent(review.id)}`;
-      result.setAttribute('aria-label', `${finding.management_id} Sashiko 결과 보기`);
-      actions.append(result);
-    }
-    row.append(actions);
-    body.append(row);
-  }
-  table.append(head, body);
-  container.append(table);
-}
-
-async function loadPatchReviews() {
-  const id = ++state.patchRequestId;
-  try {
-    const { reviews } = await api('/api/patch-reviews').then(response => response.json());
-    if (!Array.isArray(reviews)) throw new Error('패치 검토 응답 형식이 올바르지 않습니다.');
-    if (id !== state.patchRequestId) return;
-    state.patchReviews = reviews;
-    state.patchError = null;
-  } catch (error) {
-    if (id !== state.patchRequestId) return;
-    state.patchError = error;
-  }
-  if (activeView() === 'patch') renderPatchView();
-}
-
-function patchUploadMessage(message, error = false) {
-  const result = $('patch-upload-result');
-  result.className = `zip-submit-result${error ? ' error' : ''}`;
-  result.textContent = message;
-  result.hidden = false;
-}
-
-async function openPatchUpload(finding) {
-  if (patchSubmitting || activeView() !== 'patch' || finding.target !== 'knfsd') return;
-  patchFinding = finding;
-  patchTargets = [];
-  $('patch-upload-finding').textContent = `${finding.management_id} · ${finding.title}`;
-  $('patch-upload-form').reset();
-  $('patch-upload-result').hidden = true;
-  $('patch-track').disabled = true;
-  $('patch-submit-button').disabled = true;
-  $('patch-upload-dialog').showModal();
-  try {
-    const { targets } = await api('/api/submissions/upload-targets').then(response => response.json());
-    if (!Array.isArray(targets)) throw new Error('대상 커널 목록 형식이 올바르지 않습니다.');
-    if (!$('patch-upload-dialog').open || patchFinding !== finding) return;
-    patchTargets = targets.filter(item => ['rc', 'mainline'].includes(item.track_id) && /^[a-f0-9]{40}$/i.test(item.repo_commit || ''));
-    const select = $('patch-track');
-    clear(select);
-    for (const target of patchTargets) {
-      const option = element('option', '', `${target.label || target.track_id} · ${target.version_id} · ${target.repo_commit.slice(0, 12)}`);
-      option.value = target.track_id;
-      select.append(option);
-    }
-    if (patchTargets.some(item => item.track_id === state.data?.selected?.track_id)) select.value = state.data.selected.track_id;
-    select.disabled = !patchTargets.length;
-    $('patch-submit-button').disabled = !patchTargets.length;
-    if (!patchTargets.length) patchUploadMessage('검토 가능한 커널 트랙이 없습니다.', true);
-  } catch (error) { patchUploadMessage(`대상 커널 조회 실패: ${error.message}`, true); }
-}
-
-async function submitPatch(event) {
-  event.preventDefault();
-  if (patchSubmitting || activeView() !== 'patch' || !$('patch-upload-dialog').open || !patchFinding || patchFinding.target !== 'knfsd') return;
-  const file = $('patch-file').files?.[0];
-  if (!file || !/\.(?:patch|diff)$/i.test(file.name)) return patchUploadMessage('.patch 또는 .diff 파일을 선택해 주세요.', true);
-  if (!file.size || file.size > 1_000_000) return patchUploadMessage('패치 파일은 1 MB 이하의 비어 있지 않은 파일이어야 합니다.', true);
-  const trackId = $('patch-track').value;
-  if (!patchTargets.some(item => item.track_id === trackId)) return patchUploadMessage('대상 커널을 선택해 주세요.', true);
-  const managementId = patchFinding.management_id;
-  patchSubmitting = true;
-  $('patch-submit-button').disabled = true;
-  $('patch-submit-button').textContent = '제출 중…';
-  try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let contentBase64 = '';
-    for (let i = 0; i < bytes.length; i += 24_576) contentBase64 += btoa(String.fromCharCode(...bytes.subarray(i, i + 24_576)));
-    const review = await api('/api/patch-reviews', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ management_id: managementId, track_id: trackId, filename: file.name, content_base64: contentBase64 }),
-    }).then(response => response.json());
-    $('patch-file').value = '';
-    patchUploadMessage(`패치 접수 · ${patchStatusLabels[review.status] || review.status || '검토 대기'}. 결과는 이 페이지에서 자동 갱신됩니다.`);
-    await loadPatchReviews();
-  } catch (error) { patchUploadMessage(error.message || String(error), true); }
-  finally {
-    patchSubmitting = false;
-    $('patch-submit-button').textContent = 'Sashiko 검토 요청';
-    $('patch-submit-button').disabled = !patchTargets.length;
-  }
-}
-
 const uploadStatusLabels = {
   pending: '검증 대기', processing: '검증 중', approved: '검증 완료', rejected: '반려',
   needs_evidence: '재현 자료 필요', needs_review: '추가 검토 필요', error: '검증 오류',
@@ -1381,7 +1232,6 @@ async function refresh() {
     renderHeader(data);
     showView();
     renderFindings();
-    if (activeView() === 'patch') renderPatchView();
     if (data.selected) {
       state.coverageAgent = data.coverage_agents?.some(item => item.agent_id === query.get('agent_id')) ? query.get('agent_id') : '';
       populateCoverageAgentFilter();
@@ -1389,7 +1239,6 @@ async function refresh() {
       if (activeView() === 'coverage') await loadCoverage();
     }
     if (activeView() === 'queue') await loadVerificationQueue();
-    if (activeView() === 'patch') await loadPatchReviews();
     if (activeView() === 'findings' && $('zip-submit-dialog').open) {
       loadUploadTargets().catch(error => uploadMessage(`대상 커널 조회 실패: ${error.message}`, true));
     }
@@ -1408,21 +1257,14 @@ $('zip-submit-dialog').addEventListener('click', event => {
   if (event.target === event.currentTarget && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) event.currentTarget.close();
 });
 $('zip-submit-form').addEventListener('submit', submitZip);
-$('close-patch-upload').addEventListener('click', () => $('patch-upload-dialog').close());
-$('patch-upload-dialog').addEventListener('click', event => {
-  const bounds = event.currentTarget.getBoundingClientRect();
-  if (event.target === event.currentTarget && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) event.currentTarget.close();
-});
-$('patch-upload-form').addEventListener('submit', submitPatch);
 $('finding-edit-mode').addEventListener('click', () => {
   if (state.editingFindingId) return;
   state.editMode = !state.editMode;
   renderFindings();
 });
 $('version').addEventListener('change', () => { setQuery({ track_id: $('version').value, version_id: '', repo_commit: '', agent_id: '' }); state.coveragePage = 1; state.coverageSortKey = 'unread'; state.coverageSortDir = 'desc'; refresh(); });
-for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); if (button.dataset.view === 'patch') { renderPatchView(); loadPatchReviews(); } });
+for (const button of document.querySelectorAll('.tabs button')) button.addEventListener('click', () => { if (state.editingFindingId) return; setQuery({ view: button.dataset.view === 'findings' ? '' : button.dataset.view }); state.findingPage = 1; renderHeader(state.data); showView(); renderFindings(); if (button.dataset.view === 'coverage') loadCoverage().catch(showError); if (button.dataset.view === 'queue') loadVerificationQueue(); });
 for (const id of ['finding-search', ...findingFilters.map(([id]) => id)]) $(id).addEventListener(id === 'finding-search' ? 'input' : 'change', () => { if (state.editingFindingId) return; state.findingPage = 1; renderFindings(); });
-$('patch-search').addEventListener('input', renderPatchView);
 $('coverage-search').addEventListener('input', () => { state.coveragePage = 1; renderCoverage(); });
 $('coverage-component').addEventListener('change', () => { state.coveragePage = 1; renderCoverage(); });
 $('coverage-agent').addEventListener('change', () => {
