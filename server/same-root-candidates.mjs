@@ -13,6 +13,22 @@ function pathFromRef(ref) {
   return path.length <= 300 && sourcePath.test(path) && !path.split('/').includes('..') ? path : null;
 }
 
+function reportMentionsPath(report, path) {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-zA-Z0-9_./+-])${escaped}(?=$|[^a-zA-Z0-9_./+-])`).test(report);
+}
+
+function functionFromRef(ref) {
+  const match = /^([^#:]+)[#:]([a-zA-Z_][a-zA-Z0-9_]{3,119})(?::\d+)?$/.exec(ref);
+  if (!match || !pathFromRef(match[1])) return null;
+  const name = match[2];
+  return /[_\d]/.test(name) ? name : null;
+}
+
+function reportMentionsFunction(report, name) {
+  return new RegExp(`(?:^|[^a-zA-Z0-9_])${name}(?=$|[^a-zA-Z0-9_])`).test(report);
+}
+
 function reportFromHistory(db, dataDir, id) {
   const artifact = listHistoryArtifacts(db, id).find(row => row.kind === 'report');
   if (!artifact) return null;
@@ -36,9 +52,12 @@ export function sameRootCandidates(db, { project, filePath, codeRefs = [], exist
     throw new TypeError('Invalid same-root candidate request');
   }
   const paths = new Set([filePath]);
+  const functions = new Set();
   for (const ref of codeRefs) {
     const path = pathFromRef(ref);
     if (path) paths.add(path);
+    const name = functionFromRef(ref);
+    if (name) functions.add(name);
   }
   const candidates = [];
   let truncated = false;
@@ -54,12 +73,16 @@ export function sameRootCandidates(db, { project, filePath, codeRefs = [], exist
     catch { truncated = true; continue; }
     const refs = Array.isArray(parsed.data.code_refs) ? parsed.data.code_refs : [];
     const candidatePath = typeof parsed.data.file_path === 'string' ? parsed.data.file_path : null;
-    const related = candidatePath && paths.has(candidatePath) || refs.some(ref => typeof ref === 'string' && paths.has(pathFromRef(ref)));
+    const related = candidatePath && paths.has(candidatePath) ||
+      refs.some(ref => typeof ref === 'string' && paths.has(pathFromRef(ref))) ||
+      [...paths].some(path => reportMentionsPath(parsed.body, path)) ||
+      [...functions].some(name => reportMentionsFunction(parsed.body, name));
     if (!related) continue;
     if (!parsed.body) { truncated = true; continue; }
+    if (Buffer.byteLength(parsed.body, 'utf8') > maxReport) { truncated = true; continue; }
     const score = Number(candidatePath === filePath) * 2 + Number(refs.some(ref => codeRefs.includes(ref)));
     candidates.push({ management_id: row.management_id, title: row.title,
-      file_path: candidatePath, report: parsed.body.slice(0, maxReport), score });
+      file_path: candidatePath, report: parsed.body, score });
   }
   const history = db.prepare(`SELECT management_id, title FROM registry_history
     WHERE target = 'knfsd' AND (? IS NULL OR management_id <> ?)
@@ -71,8 +94,8 @@ export function sameRootCandidates(db, { project, filePath, codeRefs = [], exist
     catch { truncated = true; continue; }
     if (!found) { truncated = true; continue; }
     if (!found.complete) truncated = true;
-    const matched = [...paths].filter(path => found.report.includes(path));
-    if (!matched.length) continue;
+    const matched = [...paths].filter(path => reportMentionsPath(found.report, path));
+    if (!matched.length && ![...functions].some(name => reportMentionsFunction(found.report, name))) continue;
     candidates.push({ management_id: row.management_id, title: row.title,
       file_path: null, report: found.report, score: matched.includes(filePath) ? 2 : 1 });
   }

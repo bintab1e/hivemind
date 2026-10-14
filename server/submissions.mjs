@@ -8,6 +8,7 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 2_000_000;
 const MAX_TOTAL_BYTES = 8_000_000;
 const MAX_REPORT_BYTES = 1_000_000;
+const MAX_SAME_ROOT_REPORT_BYTES = 90_000;
 const MAX_PENDING_PER_AGENT = 30;
 const MAX_PENDING_TOTAL = 300;
 const MAX_STORED_BYTES = 4_000_000_000;
@@ -78,8 +79,14 @@ function existingFindingContext(db, managementId, dataDir) {
       WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal = 1000
       ORDER BY s.submitted_at DESC, s.id DESC LIMIT 1`).get(found.finding_id);
     const parsed = readFrontMatter(found.markdown);
+    const bytes = Buffer.from(prior?.content ?? parsed.body);
+    let report = null;
+    if (bytes.length <= MAX_SAME_ROOT_REPORT_BYTES) {
+      try { report = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { /* An invalid canonical report cannot establish the same root cause. */ }
+    }
     return { management_id: managementId, title: found.title, file_path: parsed.data.file_path ?? null,
-      report: Buffer.from(prior?.content ?? parsed.body).toString('utf8').slice(0, 30_000) };
+      report };
   }
   let report = null;
   if (dataDir) {
@@ -88,11 +95,10 @@ function existingFindingContext(db, managementId, dataDir) {
       let opened;
       try {
         opened = openHistoryArtifact(db, dataDir, managementId, artifact.id);
-        const bytes = Buffer.alloc(Math.min(opened.size, 30_000));
-        const length = opened.content
-          ? opened.content.copy(bytes, 0, 0, bytes.length)
-          : fs.readSync(opened.fd, bytes, 0, bytes.length, 0);
-        report = new TextDecoder().decode(bytes.subarray(0, length));
+        if (opened.size <= MAX_SAME_ROOT_REPORT_BYTES) {
+          const bytes = opened.content ?? fs.readFileSync(opened.fd);
+          if (bytes.length === opened.size) report = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        }
       } catch { report = null; }
       finally { if (opened?.fd !== undefined) fs.closeSync(opened.fd); }
     }

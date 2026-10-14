@@ -86,13 +86,43 @@ test('same-root review compares the prior report and new grounded source, not th
   const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
   const existing = { management_id: 'A-005', title: 'Similar title', file_path: 'fs/nfsd/nfs4proc.c',
     report: 'The earlier flaw was a separate lifetime error in another operation.' };
-  const cliPath = fakeCli(t, { verdict: 'different', reason: 'Different violated invariant' },
+  const cliPath = fakeCli(t, { verdict: 'different', reason: 'Different violated invariant', comparison: null },
     { type: 'turn.completed' }, 0, '<existing>');
   const result = await reviewSameRootCauseWithCodex(existing, reviewed, { cliPath, trustedSource });
   assert.equal(result.verdict, 'different');
   assert.match(result.reason, /Different/);
   await assert.rejects(reviewSameRootCauseWithCodex({ ...existing, report: '' }, reviewed,
     { cliPath, trustedSource }), error => error.code === 'invalid_same_root_input');
+});
+
+test('same-root confirmation requires causal excerpts from both reports and the grounded flaw line', async t => {
+  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
+  const oldCause = 'The decode operation reads a client-controlled length before checking the XDR buffer boundary.';
+  const newCause = 'fs/nfsd/nfs4proc.c:1 코드에서 검사가 필요합니다.';
+  const existing = { management_id: 'A-005', title: 'Unrelated heading', file_path: 'fs/nfsd/nfs4proc.c',
+    report: `## Summary\nA prior request is affected.\n## Root cause\n${oldCause}\n` };
+  const comparison = { reachable_path: 'Client NFSv4 COMPOUND request reaches the same decoder.',
+    faulty_operation: 'Reads the request length before checking the XDR boundary.',
+    violated_invariant: 'The decode cursor must remain within the request buffer.',
+    defenses: 'The reported boundary check occurs after the unsafe length read.',
+    existing_quote: oldCause, new_quote: newCause,
+    source_path: 'fs/nfsd/nfs4proc.c', source_line: 2 };
+  const same = await reviewSameRootCauseWithCodex(existing, reviewed, { trustedSource,
+    cliPath: fakeCli(t, { verdict: 'same', reason: 'Matching operation and invariant', comparison },
+      { type: 'turn.completed' }, 0, ['<existing>', 'proof']) });
+  assert.equal(same.verdict, 'same');
+  assert.equal(same.comparison.source_line, 2);
+
+  for (const invalid of [
+    { ...comparison, existing_quote: 'This cause is not in the historical report at all.' },
+    { ...comparison, new_quote: 'This cause is not in the new Root cause section.' },
+    { ...comparison, source_line: 1 },
+  ]) {
+    const result = await reviewSameRootCauseWithCodex(existing, reviewed, { trustedSource,
+      cliPath: fakeCli(t, { verdict: 'same', reason: 'Matching title', comparison: invalid },
+        { type: 'turn.completed' }, 0, '<existing>') });
+    assert.equal(result.verdict, 'uncertain');
+  }
 });
 
 test('primitive review stays advisory and grounds each suggested direction in pinned source', async t => {

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openDatabase, setActiveTrack } from './server.mjs';
 import { hash, readFrontMatter } from './contract.mjs';
+import { importHistoryArtifacts } from './history-artifacts.mjs';
 import { claimPrimitiveReview, claimSubmission, completeSubmission, getVerifiedArtifact,
   heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
@@ -245,6 +246,52 @@ test('the same rooted enhancement retains one management ID and its earlier revi
   assert.equal(next.management_id, first.management_id);
   assert.equal(db.prepare("SELECT count(*) AS count FROM submissions WHERE management_id = ? AND status = 'approved'").get(first.management_id).count, 2);
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
+});
+
+test('same-root comparison receives the complete canonical live report or holds oversized evidence', t => {
+  const db = setup(t);
+  const firstReport = `${report}\n${'근거'.repeat(13_000)}\nLATE_ROOT_CAUSE_ANCHOR`;
+  assert.ok(Buffer.byteLength(firstReport) < 90_000);
+  const firstResult = verdict();
+  firstResult.review.normalized.report = firstReport;
+  firstResult.artifacts.report.content = firstReport;
+  const first = approve(db, submit(db, 'first'), firstResult);
+  submit(db, 'second', { existing_management_id: first.management_id });
+  const comparison = claimSubmission(db, commit);
+  assert.equal(comparison.existing_finding.report, firstReport);
+  assert.match(comparison.existing_finding.report, /LATE_ROOT_CAUSE_ANCHOR$/);
+
+  const oversized = `${report}\n${'근거'.repeat(16_000)}`;
+  assert.ok(oversized.length < 90_000 && Buffer.byteLength(oversized) > 90_000);
+  db.prepare('UPDATE submission_artifacts SET content = ?, size = ? WHERE submission_id = ? AND ordinal = 1000')
+    .run(Buffer.from(oversized), Buffer.byteLength(oversized), first.submission_id);
+  submit(db, 'third', { existing_management_id: first.management_id });
+  assert.equal(claimSubmission(db, commit).existing_finding.report, null);
+});
+
+test('historical same-root comparison never passes a truncated archive report', t => {
+  const db = setup(t);
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hv-existing-report-'));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const sourceDir = path.join(dataDir, 'source');
+  mkdirSync(sourceDir);
+  const complete = `${report}\n${'근거'.repeat(13_000)}\nHISTORICAL_TAIL_ANCHOR`;
+  const oversized = `${report}\n${'근거'.repeat(16_000)}`;
+  for (const [managementId, filename, content] of [
+    ['A-001', 'complete.md', complete], ['A-002', 'oversized.md', oversized],
+  ]) {
+    db.prepare('INSERT INTO registry_history(management_id, number, title, target, imported_at) VALUES (?, ?, ?, ?, ?)')
+      .run(managementId, Number(managementId.slice(2)), 'Historical issue', 'knfsd', new Date().toISOString());
+    writeFileSync(path.join(sourceDir, filename), content);
+  }
+  importHistoryArtifacts(db, dataDir, sourceDir, [
+    { management_id: 'A-001', kind: 'report', source_path: 'complete.md', display_name: 'report.md' },
+    { management_id: 'A-002', kind: 'report', source_path: 'oversized.md', display_name: 'report.md' },
+  ]);
+  submit(db, 'historical-complete', { existing_management_id: 'A-001' });
+  assert.equal(claimSubmission(db, commit, dataDir).existing_finding.report, complete);
+  submit(db, 'historical-oversized', { existing_management_id: 'A-002' });
+  assert.equal(claimSubmission(db, commit, dataDir).existing_finding.report, null);
 });
 
 test('historical revision reports static screening without fabricated 2VM observation', t => {

@@ -1,11 +1,24 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reason", "evidence_url", "shared_code_ref"],
+  "required": ["verdict", "reason", "evidence_url", "shared_code_ref", "comparison"],
   "properties": {
     "verdict": { "type": "string", "enum": ["duplicate", "no_match", "uncertain"] },
     "reason": { "type": "string" },
     "evidence_url": { "type": ["string", "null"] },
-    "shared_code_ref": { "type": ["string", "null"] }
+    "shared_code_ref": { "type": ["string", "null"] },
+    "comparison": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["candidate_cause_quote", "public_cause_quote", "reachability_path", "faulty_operation", "violated_invariant", "conditions_and_defenses"],
+      "properties": {
+        "candidate_cause_quote": { "type": "string" },
+        "public_cause_quote": { "type": "string" },
+        "reachability_path": { "type": "string" },
+        "faulty_operation": { "type": "string" },
+        "violated_invariant": { "type": "string" },
+        "conditions_and_defenses": { "type": "string" }
+      }
+    }
   }
 }

@@ -23,8 +23,9 @@ function fixture(t) {
   return { db, dataDir };
 }
 
-function live(db, id, filePath, { approved = true, superseded = false, title = 'Same title', codeRef = null } = {}) {
-  const report = `---\nfile_path: ${filePath}\ncode_refs:\n  - ${codeRef || `${filePath}#function`}\n---\n## Root cause\n${filePath}:42\n`;
+function live(db, id, filePath, { approved = true, superseded = false, title = 'Same title', codeRef = null,
+  body = `${filePath}:42` } = {}) {
+  const report = `---\nfile_path: ${filePath}\ncode_refs:\n  - ${codeRef || `${filePath}#function`}\n---\n## Root cause\n${body}\n`;
   db.prepare('INSERT INTO events VALUES (?, ?, ?)').run(id, title, report);
   db.prepare('INSERT INTO finding_registry VALUES (?, ?, ?, ?, ?, ?)').run(
     id, id, 'knfsd', null, approved ? '2026-10-14' : null, superseded ? 'later' : null);
@@ -48,6 +49,33 @@ test('shortlists only active approved source-path/code-ref matches, never title-
   assert.throws(() => sameRootCandidates(db, { ...input, filePath: '../etc/passwd' }), TypeError);
 });
 
+test('recalls a cross-file root-cause candidate from exact report paths or C function identifiers', t => {
+  const { db } = fixture(t);
+  const other = 'fs/nfsd/other.c';
+  const path = 'fs/nfsd/nfs4proc.c';
+  live(db, 'A-043', other, { body: `The faulty operation also reaches ${path}:42.` });
+  live(db, 'A-044', other, { body: `${path}.bak describes an unrelated test fixture.` });
+  live(db, 'A-045', other, { body: 'The nfsd4_proc_compound() boundary check is faulty.' });
+  live(db, 'A-046', other, { body: 'The nfsd4_proc_compound_extra() helper is unrelated.' });
+  live(db, 'A-047', other, { body: 'The my_nfsd4_proc_compound() wrapper is unrelated.' });
+  live(db, 'A-048', other, { body: `The X${path} mention is not a source path.` });
+  const result = sameRootCandidates(db, { project: 'knfsd', filePath: path,
+    codeRefs: [`${path}:nfsd4_proc_compound`] });
+  assert.deepEqual(result.candidates.map(item => item.management_id), ['A-043', 'A-045']);
+  assert.equal(result.truncated, false);
+  const fromRef = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/entry.c',
+    codeRefs: [`${path}:nfsd4_proc_compound`] });
+  assert.deepEqual(fromRef.candidates.map(item => item.management_id), ['A-043', 'A-045']);
+});
+
+test('does not shortlist a generic code-ref word merely because it appears in a report', t => {
+  const { db } = fixture(t);
+  live(db, 'A-043', 'fs/nfsd/other.c', { body: 'main() invokes a different code path.' });
+  const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c',
+    codeRefs: ['fs/nfsd/nfs4proc.c:main'] });
+  assert.deepEqual(result.candidates, []);
+});
+
 test('shortlists imported historical records from archived report source paths', t => {
   const { db, dataDir } = fixture(t);
   const sourceDir = path.join(dataDir, 'source');
@@ -63,6 +91,22 @@ test('shortlists imported historical records from archived report source paths',
   const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c', dataDir });
   assert.deepEqual(result.candidates.map(item => item.management_id), ['A-005']);
   assert.equal(result.candidates[0].file_path, null);
+  assert.equal(result.truncated, false);
+});
+
+test('recalls an archived cross-file cause by its exact C function name', t => {
+  const { db, dataDir } = fixture(t);
+  const sourceDir = path.join(dataDir, 'source');
+  fs.mkdirSync(sourceDir);
+  db.prepare('INSERT INTO registry_history VALUES (?, ?, ?)').run('A-005', 'Old imported report', 'knfsd');
+  fs.writeFileSync(path.join(sourceDir, 'matching.md'),
+    '## Root cause\nThe nfsd4_proc_compound() operation loses its bounds check in a helper.\n');
+  importHistoryArtifacts(db, dataDir, sourceDir, [
+    { management_id: 'A-005', kind: 'report', source_path: 'matching.md', display_name: 'report.md' },
+  ]);
+  const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c',
+    codeRefs: ['fs/nfsd/nfs4proc.c:nfsd4_proc_compound'], dataDir });
+  assert.deepEqual(result.candidates.map(item => item.management_id), ['A-005']);
   assert.equal(result.truncated, false);
 });
 
@@ -113,6 +157,16 @@ test('retains the incomplete-shortlist guard when a historical report exceeds th
     { management_id: 'A-037', kind: 'report', source_path: 'large.md', display_name: 'report.md' },
   ]);
   const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c', dataDir });
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.truncated, true);
+});
+
+test('holds an oversized live report instead of comparing a truncated cause', t => {
+  const { db } = fixture(t);
+  live(db, 'A-043', 'fs/nfsd/nfs4proc.c', {
+    body: `fs/nfsd/nfs4proc.c:42\n${'x'.repeat(90_001)}`,
+  });
+  const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c' });
   assert.deepEqual(result.candidates, []);
   assert.equal(result.truncated, true);
 });
