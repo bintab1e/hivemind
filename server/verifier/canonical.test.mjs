@@ -28,3 +28,18 @@ test('missing trusted source, original log, or clear integrity cannot produce ca
   assert.equal(canonicalArtifacts({ review, trustedSource: { ...source, files: [] }, poc, kernelCommit: commit }), null);
   assert.equal(canonicalArtifacts({ review: { ...review, normalized: { ...review.normalized, logs: [] } }, trustedSource: source, poc, kernelCommit: commit }), null);
 });
+
+test('uses a quoted grounded source line even when it is not the first primary-path anchor', () => {
+  const entry = 'int nfsd_dispatch(struct svc_rqst *rqstp)';
+  const withTwoLines = { commit, files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [
+    { number: 12, text: entry }, { number: 42, text: line },
+  ] }] };
+  const withTwoAnchors = { ...review, grounding: { source_commit: commit, evidence: [
+    { path: 'fs/nfsd/nfs4proc.c', line: 12, text: entry },
+    { path: 'fs/nfsd/nfs4proc.c', line: 42, text: line },
+  ] } };
+  assert.ok(canonicalArtifacts({ review: withTwoAnchors, trustedSource: withTwoLines, poc, kernelCommit: commit }));
+  const withoutQuote = { ...withTwoAnchors, normalized: { ...review.normalized,
+    report: report.replace(line, 'different ungrounded text') } };
+  assert.equal(canonicalArtifacts({ review: withoutQuote, trustedSource: withTwoLines, poc, kernelCommit: commit }), null);
+});

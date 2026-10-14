@@ -380,6 +380,17 @@ if (count === 1) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify
   assert.doesNotMatch(retryPrompt, /PRIVATE_EVIDENCE/);
 });
 
+test('likely reports must quote a grounded primary-path source line and retain code references', async t => {
+  const unquoted = structuredClone(answer);
+  unquoted.normalized.report = unquoted.normalized.report.replace('int nfsd4_proc_compound(void) {', 'int unrelated(void) {');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unquoted))),
+    error => error.code === 'ungrounded_output' && error.diagnostic?.validation_stage === 'report_source');
+  const noRefs = structuredClone(answer);
+  noRefs.normalized.code_refs = [];
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, noRefs))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'source_refs');
+});
+
 test('fails closed when CLI is missing or submitted paths are unsafe', async () => {
   await assert.rejects(reviewSubmissionWithCodex(submission, options('')), error => error instanceof VerifierUnavailableError && error.code === 'not_configured');
   await assert.rejects(reviewSubmissionWithCodex(submission, { cliPath: '/missing/codex' }), error => error instanceof CodexReviewError && error.code === 'trusted_source_missing');
@@ -662,7 +673,8 @@ test('loads pinned NFS and RDMA driver files across a multi-file call path', asy
   response.normalized.code_refs = [`${driver}:2`];
   response.normalized.source_evidence = [{ path: driver, line: 1 }, { path: driver, line: 2 }];
   for (const role of ['entry', 'flaw', 'impact', 'defenses']) response.proof[role].path = driver;
-  response.normalized.report = response.normalized.report.replaceAll('fs/nfsd/nfs4proc.c', driver);
+  response.normalized.report = response.normalized.report.replaceAll('fs/nfsd/nfs4proc.c', driver)
+    .replace('int nfsd4_proc_compound(void) { return 0; }', 'int entry(void) { return 0; }');
   const reviewed = await reviewSubmissionWithCodex(submission,
     { cliPath: fakeCli(t, response), trustedSource: source });
   assert.equal(reviewed.normalized.file_path, driver);

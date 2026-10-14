@@ -10,12 +10,14 @@ function sections(report) {
 
 export function canonicalArtifacts({ review, trustedSource, poc, kernelCommit }) {
   const normalized = review?.normalized;
+  const reportSections = sections(normalized?.report);
   if (review?.verdict !== 'likely' || review.integrity?.verdict !== 'clear' || poc?.language !== 'c' ||
       poc.filename !== 'poc.c' || !/^[a-f0-9]{40}$/.test(kernelCommit || '') ||
-      review.grounding?.source_commit !== kernelCommit || !normalized?.file_path || !sections(normalized.report)) return null;
+      review.grounding?.source_commit !== kernelCommit || !normalized?.file_path || !reportSections) return null;
   const source = trustedSource?.files?.find(file => file.path === normalized.file_path);
   const anchor = review.grounding.evidence?.find(item => item.path === normalized.file_path &&
-    source?.lines?.some(line => line.number === item.line && line.text === item.text && line.text.trim()));
+    source?.lines?.some(line => line.number === item.line && line.text === item.text && line.text.trim()) &&
+    reportSections[1].includes(item.text.trim()));
   const log = normalized.logs?.find(item => typeof item.content === 'string' && item.content.trim() &&
     Buffer.byteLength(item.content) <= 500_000);
   if (!anchor || !log || !poc.source?.trim() || !/\.c$/i.test(poc.original_name || '') ||

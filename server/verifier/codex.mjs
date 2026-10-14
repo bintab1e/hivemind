@@ -32,8 +32,9 @@ const staticRetryHints = {
   json_parse: 'Return one complete JSON object matching the required schema.',
   shape: 'Use exactly the required JSON keys. A likely verdict requires clear integrity and admin_action_required=false.',
   report_format: 'For a likely verdict, provide a substantive report with exactly the five required headings in order.',
-  source_refs: 'Use safe relative source paths and valid code_refs and source_evidence arrays.',
+  source_refs: 'Use safe relative source paths, at least one nonempty code_refs entry for likely, and valid source_evidence arrays.',
   source_evidence: 'Every source_evidence path and line must exactly match a nonempty line in the supplied trusted source.',
+  report_source: 'For likely, quote at least one exact nonempty trusted source_evidence line from the selected file_path in the Root cause report section. If no such source line supports the flaw, return uncertain.',
   metadata: 'Use only supported metadata values; set uncertain or unsupported fields to null.',
   poc: 'Select a valid original C PoC with main(), using its zero-based submission file index.',
   logs: 'Select valid original log indexes, and claim KASAN Read or Write only when the first selected log contains that observation.',
@@ -249,6 +250,7 @@ function validateResult(parsed, submission, trustedSource) {
   const rawTitle = field(answer.title, 300, false, 'metadata');
   const title = rawTitle?.replace(/[ \t]+/g, ' ') ?? null;
   const report = field(answer.report, 30_000, false, 'report_format');
+  let rootCause = null;
   if (title && /[\r\n]/.test(title)) throw invalidOutput('metadata');
   if (parsed.verdict === 'likely') {
     if (!report) throw invalidOutput('report_format');
@@ -258,6 +260,7 @@ function validateResult(parsed, submission, trustedSource) {
           !report.slice(heading.index + heading[0].length, headings[index + 1]?.index ?? report.length).trim())) {
       throw invalidOutput('report_format');
     }
+    rootCause = report.slice(headings[1].index + headings[1][0].length, headings[2].index);
   }
   const filePath = field(answer.file_path, 300, false, 'source_refs');
   if (filePath && (/^[/\\]|^[A-Za-z]:/.test(filePath) || filePath.includes('\\') || filePath.split('/').some(part => !part || part === '.' || part === '..'))) throw invalidOutput('source_refs');
@@ -301,6 +304,10 @@ function validateResult(parsed, submission, trustedSource) {
     throw invalidOutput('poc');
   }
   if (parsed.verdict === 'likely' && (!title || !report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output', { validation_stage: 'likely_grounding' });
+  if (parsed.verdict === 'likely' && !answer.code_refs.length) throw invalidOutput('source_refs');
+  if (parsed.verdict === 'likely' && !evidence.some(item => item.path === filePath && rootCause.includes(item.text.trim()))) {
+    throw new CodexReviewError('ungrounded_output', { validation_stage: 'report_source' });
+  }
   const preAuth = answer.pre_auth;
   if (preAuth !== null && (!exactKeys(preAuth, ['source_path', 'source_line', 'poc_line']) ||
       !Number.isInteger(preAuth.source_line) || !Number.isInteger(preAuth.poc_line) || preAuth.poc_line < 1 ||
