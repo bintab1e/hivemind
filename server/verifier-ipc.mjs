@@ -7,7 +7,8 @@ import { HttpError, invalid } from './contract.mjs';
 import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, completeSubmission,
   failPrimitiveReview, failSubmission, heartbeatPrimitiveWorker, heartbeatWorker,
   progressSubmission } from './submissions.mjs';
-import { listDuplicateCandidates, recordDuplicateResult } from './duplicate-registry.mjs';
+import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplicateResult,
+  recordInternalDuplicateResult } from './duplicate-registry.mjs';
 import { claimPatchReview, completePatchReview, failPatchReview } from './patch-reviews.mjs';
 
 function reply(res, status, value) {
@@ -74,6 +75,15 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null, data
       }
       if (req.method === 'POST' && req.url === '/duplicate/result') {
         return reply(res, 200, recordDuplicateResult(db, await inputJson(req)));
+      }
+      if (req.method === 'POST' && req.url === '/duplicate/internal-candidates') {
+        const body = await inputJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) invalid('Invalid internal duplicate candidates request');
+        return reply(res, 200, { candidates: listDuplicateCandidates(db, dataDir),
+          references: listInternalDuplicateReferences(db, dataDir) });
+      }
+      if (req.method === 'POST' && req.url === '/duplicate/internal-result') {
+        return reply(res, 200, recordInternalDuplicateResult(db, await inputJson(req), dataDir));
       }
       if (req.method === 'POST' && req.url === '/patch/claim') {
         const body = await inputJson(req);

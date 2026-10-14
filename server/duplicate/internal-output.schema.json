@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reason", "matched_management_id", "shared_code_ref"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["duplicate", "no_match", "uncertain"] },
+    "reason": { "type": "string" },
+    "matched_management_id": { "type": ["string", "null"] },
+    "shared_code_ref": { "type": ["string", "null"] }
+  }
+}

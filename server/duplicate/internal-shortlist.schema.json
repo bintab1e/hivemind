@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["management_ids"],
+  "properties": {
+    "management_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

@@ -28,6 +28,24 @@ export function initializeDuplicateRegistry(db) {
       BEFORE UPDATE ON duplicate_reviews BEGIN SELECT RAISE(ABORT, 'Duplicate reviews are append-only'); END;
     CREATE TRIGGER IF NOT EXISTS duplicate_reviews_no_delete
       BEFORE DELETE ON duplicate_reviews BEGIN SELECT RAISE(ABORT, 'Duplicate reviews are append-only'); END;
+    CREATE TABLE IF NOT EXISTS internal_duplicate_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      row_id TEXT NOT NULL,
+      revision_checked INTEGER NOT NULL,
+      verdict TEXT NOT NULL CHECK(verdict IN ('duplicate', 'no_match', 'uncertain', 'error')),
+      reason TEXT NOT NULL,
+      matched_management_id TEXT,
+      checked_at TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      status_before TEXT,
+      status_after TEXT,
+      outcome TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS internal_duplicate_reviews_row ON internal_duplicate_reviews(row_id, id DESC);
+    CREATE TRIGGER IF NOT EXISTS internal_duplicate_reviews_no_update
+      BEFORE UPDATE ON internal_duplicate_reviews BEGIN SELECT RAISE(ABORT, 'Internal duplicate reviews are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS internal_duplicate_reviews_no_delete
+      BEFORE DELETE ON internal_duplicate_reviews BEGIN SELECT RAISE(ABORT, 'Internal duplicate reviews are append-only'); END;
   `);
 }
 
@@ -75,10 +93,10 @@ function liveMetadata(markdown) {
   } catch { return { file_path: null, code_refs: [] }; }
 }
 
-export function listDuplicateCandidates(db, dataDir) {
+function duplicateRows(db, dataDir, all) {
   const common = 'management_id, title, target, report_status, option, privilege, nfs_version, vulnerability_type, found_date, cve, revision';
   const history = db.prepare(`SELECT ${common} FROM registry_history
-    WHERE report_status IN ('미제보', '제보 중') OR report_status IS NULL
+    ${all ? '' : "WHERE report_status IN ('미제보', '제보 중') OR report_status IS NULL"}
     ORDER BY management_id`).all().map(row => ({
     ...row, row_id: `history:${row.management_id}`, file_path: null, code_refs: [],
     report_excerpt: historicalReport(db, dataDir, row.management_id),
@@ -88,12 +106,20 @@ export function listDuplicateCandidates(db, dataDir) {
     r.found_date, r.cve, r.revision, r.finding_id, e.markdown
     FROM finding_registry r JOIN events e ON e.id = r.finding_id
     WHERE r.management_id IS NOT NULL AND r.superseded_by IS NULL
-      AND r.report_status IN ('미제보', '제보 중') ORDER BY r.management_id`).all().map(row => {
+      ${all ? '' : "AND r.report_status IN ('미제보', '제보 중')"} ORDER BY r.management_id`).all().map(row => {
     const { finding_id: findingId, markdown, ...record } = row;
     return { ...record, row_id: findingId, ...liveMetadata(markdown),
       report_excerpt: liveReport(db, findingId, markdown) };
   });
   return [...history, ...live];
+}
+
+export function listDuplicateCandidates(db, dataDir) {
+  return duplicateRows(db, dataDir, false);
+}
+
+export function listInternalDuplicateReferences(db, dataDir) {
+  return duplicateRows(db, dataDir, true);
 }
 
 function officialEvidenceUrl(value, kind, target) {
@@ -140,11 +166,42 @@ function validInput(input) {
   }
 }
 
+function validInternalInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      Object.keys(input).sort().join(',') !== 'checked_at,matched_management_id,reason,revision,row_id,verdict') invalid('Invalid internal duplicate result fields');
+  if (typeof input.row_id !== 'string' || !/^(?:history:[ABC]-\d{3}|[a-f0-9]{64})$/.test(input.row_id)) invalid('Invalid row_id');
+  if (!Number.isInteger(input.revision) || input.revision < 0) invalid('Invalid revision');
+  if (!verdicts.has(input.verdict)) invalid('Invalid duplicate verdict');
+  if (typeof input.reason !== 'string' || !input.reason.trim() || Buffer.byteLength(input.reason) > 2000 ||
+      /[\x00-\x08\x0b-\x1f\x7f]/.test(input.reason)) invalid('Invalid duplicate reason');
+  if (typeof input.checked_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(input.checked_at) ||
+      !Number.isFinite(Date.parse(input.checked_at))) invalid('Invalid checked_at');
+  if (input.verdict === 'duplicate' ? !/^[ABC]-\d{3,}$/.test(input.matched_management_id || '') : input.matched_management_id !== null) {
+    invalid('Invalid matched_management_id');
+  }
+}
+
 function currentRow(db, rowId) {
   if (rowId.startsWith('history:')) {
-    return { history: true, row: db.prepare('SELECT revision, report_status, target FROM registry_history WHERE management_id = ?').get(rowId.slice(8)) };
+    return { history: true, row: db.prepare('SELECT management_id, revision, report_status, target FROM registry_history WHERE management_id = ?').get(rowId.slice(8)) };
   }
-  return { history: false, row: db.prepare('SELECT revision, report_status, target FROM finding_registry WHERE finding_id = ? AND management_id IS NOT NULL AND superseded_by IS NULL').get(rowId) };
+  return { history: false, row: db.prepare('SELECT management_id, revision, report_status, target FROM finding_registry WHERE finding_id = ? AND management_id IS NOT NULL AND superseded_by IS NULL').get(rowId) };
+}
+
+function referenceRow(db, managementId) {
+  const matches = db.prepare(`SELECT management_id, report_status, 'history:' || management_id AS row_id
+    FROM registry_history WHERE management_id = ?
+    UNION ALL
+    SELECT management_id, report_status, finding_id AS row_id
+    FROM finding_registry WHERE management_id = ? AND superseded_by IS NULL`).all(managementId, managementId);
+  if (matches.length !== 1) invalid('Matched finding not found or ambiguous', 404);
+  return matches[0];
+}
+
+function reportForRow(db, dataDir, rowId) {
+  if (rowId.startsWith('history:')) return historicalReport(db, dataDir, rowId.slice(8));
+  const event = db.prepare('SELECT e.markdown FROM finding_registry r JOIN events e ON e.id = r.finding_id WHERE r.finding_id = ? AND r.superseded_by IS NULL').get(rowId);
+  return event ? liveReport(db, rowId, event.markdown) : '';
 }
 
 function manuallyRevertedDuplicate(db, rowId) {
@@ -208,6 +265,59 @@ export function recordDuplicateResult(db, input) {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       input.row_id, input.revision, input.verdict, input.reason.trim(), JSON.stringify(input.evidence),
       JSON.stringify(input.sources_checked), input.checked_at, receivedAt, row.report_status, statusAfter, outcome);
+    db.exec('COMMIT');
+    return { row_id: input.row_id, verdict: input.verdict, outcome, status_changed: outcome === 'changed',
+      report_status: statusAfter, revision: revisionAfter, audit_id: Number(audit.lastInsertRowid) };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function recordInternalDuplicateResult(db, input, dataDir) {
+  validInternalInput(input);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const { history, row } = currentRow(db, input.row_id);
+    if (!row) invalid('Finding not found', 404);
+    const reference = input.verdict === 'duplicate' ? referenceRow(db, input.matched_management_id) : null;
+    if (reference?.row_id === input.row_id || reference?.management_id === row.management_id) invalid('Finding cannot match itself');
+    const receivedAt = new Date().toISOString();
+    let outcome = 'checked';
+    let statusAfter = row.report_status;
+    let revisionAfter = row.revision;
+    if (row.revision !== input.revision) outcome = 'stale';
+    else if (input.verdict === 'duplicate') {
+      if (row.report_status === null) outcome = 'review_only';
+      else if (!eligibleStatuses.has(row.report_status)) outcome = 'ineligible';
+      else if (['중복', '철회'].includes(reference.report_status) ||
+          (reference.report_status !== '제보 완료' && reference.management_id >= row.management_id)) outcome = 'ineligible_reference';
+      else if (!reportForRow(db, dataDir, input.row_id) || !reportForRow(db, dataDir, reference.row_id)) outcome = 'insufficient_reports';
+      else if (manuallyRevertedDuplicate(db, input.row_id)) outcome = 'manual_override';
+      else {
+        const table = history ? 'registry_history' : 'finding_registry';
+        const key = history ? 'management_id' : 'finding_id';
+        const keyValue = history ? row.management_id : input.row_id;
+        const overrideColumn = history ? 'manual_overrides_json' : 'admin_overrides_json';
+        const overrides = JSON.stringify([...new Set([
+          ...JSON.parse(db.prepare(`SELECT ${overrideColumn} AS value FROM ${table} WHERE ${key} = ?`).get(keyValue).value),
+          'report_status',
+        ])]);
+        const changed = db.prepare(`UPDATE ${table} SET report_status = '중복', ${overrideColumn} = ?,
+          updated_at = ?, revision = revision + 1
+          WHERE ${key} = ? AND revision = ? AND report_status IN ('미제보', '제보 중')`)
+          .run(overrides, receivedAt, keyValue, input.revision).changes;
+        if (changed !== 1) invalid('Registry changed during internal duplicate review', 409);
+        db.prepare('INSERT INTO registry_edits(row_id, actor, edited_at, changes_json) VALUES (?, ?, ?, ?)')
+          .run(input.row_id, 'duplicate-agent', receivedAt, JSON.stringify({ report_status: { before: row.report_status, after: '중복' } }));
+        statusAfter = '중복';
+        revisionAfter++;
+        outcome = 'changed';
+      }
+    } else if (!eligibleStatuses.has(row.report_status) && row.report_status !== null) outcome = 'ineligible';
+    const audit = db.prepare(`INSERT INTO internal_duplicate_reviews
+      (row_id, revision_checked, verdict, reason, matched_management_id,
+       checked_at, received_at, status_before, status_after, outcome)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      input.row_id, input.revision, input.verdict, input.reason.trim(), input.matched_management_id,
+      input.checked_at, receivedAt, row.report_status, statusAfter, outcome);
     db.exec('COMMIT');
     return { row_id: input.row_id, verdict: input.verdict, outcome, status_changed: outcome === 'changed',
       report_status: statusAfter, revision: revisionAfter, audit_id: Number(audit.lastInsertRowid) };

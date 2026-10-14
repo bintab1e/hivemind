@@ -1,6 +1,8 @@
 # 매일 중복 검사
 
-`bintable` 사용자 서비스가 매일 **06:00 Asia/Seoul**에 한 번 실행됩니다. 웹 서버의 전용 Unix 소켓에서 `제보 완료`·`중복`·`철회`를 제외한 기존/신규 기록을 읽고, 공개 메일과 프로젝트 유지관리 브랜치의 패치 본문을 비교합니다. 확인된 동일 원인에만 `중복`을 적용합니다. 과거 기록의 상태가 비어 있으면 근거를 기록하되 상태는 변경하지 않습니다.
+`bintable` 사용자 서비스가 매일 **06:00 Asia/Seoul**에 한 번 실행됩니다. 먼저 기존/신규 기록 중 `미제보`·`제보 중`인 항목과 상태가 비어 있는 과거 기록을 A/B/C 전체 기록(제보 완료 포함)과 대조합니다. 그다음 공개 메일과 프로젝트 유지관리 브랜치의 패치 본문을 비교합니다. 두 검사의 감사 기록은 분리되어 상세 화면에서 각각 최신 검토 일자와 확정된 중복 근거를 볼 수 있습니다. 과거 기록의 상태가 비어 있으면 검토 결과만 기록합니다.
+
+내부 비교는 전 프로젝트의 선행 기록을 살피고, 보고서의 근본 원인과 정확한 코드 위치·함수가 일치하는 경우에만 같은 프로젝트의 후순위 미제보/제보 중 기록을 `중복`으로 변경합니다. 이미 제보 완료된 기록을 우선 기준으로 삼고, 그 밖에는 관리번호 순서를 사용합니다. 서로 다른 프로젝트의 비슷한 프로토콜 오류나 제목만으로 자동 중복 처리하지 않습니다. 보고서가 없거나 근거가 부족하면 확정하지 않으며, 사람이 중복 상태를 되돌린 기록도 다시 덮지 않습니다.
 
 공식 소스는 Linux NFSD의 [linux-nfs 메일](https://lore.kernel.org/linux-nfs/)·[Patchwork](https://patchwork.kernel.org/project/linux-nfs/list/)와 [NFSD maintainer tree](https://git.kernel.org/pub/scm/linux/kernel/git/cel/linux.git/), NFS-Ganesha의 [devel archive](https://lists.nfs-ganesha.org/archives/list/devel@lists.nfs-ganesha.org/)·[next branch](https://github.com/nfs-ganesha/nfs-ganesha/tree/next), libnfs의 [mail group](https://groups.google.com/g/libnfs)·[master branch](https://github.com/sahlberg/libnfs)입니다. 최근 자료와 공개 코드 식별자에 의한 과거 검색을 병행합니다. 아카이브의 검색 범위와 결과 수에는 한계가 있으므로 무매치는 전체 과거의 중복 부재를 확정하지 않습니다.
 
@@ -18,7 +20,7 @@ systemctl --user enable --now hivemind-duplicate-check.timer
 systemctl --user list-timers --all hivemind-duplicate-check.timer
 ```
 
-첫 동작을 확인하려면 `systemctl --user start hivemind-duplicate-check.service`를 실행하세요. 현황은 `systemctl --user status hivemind-duplicate-check.service`와 `journalctl --user -u hivemind-duplicate-check.service`에서 집계로 확인합니다. 외부 소스 장애가 있으면 oneshot 서비스가 실패하고 다음 날 타이머가 다시 시도합니다. 반복된 실패는 `/duplicate/result`의 검사 기록에서 원인을 확인해야 합니다.
+첫 동작을 확인하려면 `systemctl --user start hivemind-duplicate-check.service`를 실행하세요. 현황은 `systemctl --user status hivemind-duplicate-check.service`와 `journalctl --user -u hivemind-duplicate-check.service`에서 내부/공개 검사 집계로 확인합니다. 공개 소스 장애가 있어도 내부 비교는 독립적으로 완료됩니다. 실패한 검사는 다음 날 타이머가 다시 시도합니다.
 
 ```bash
 node --test server/duplicate/*.test.mjs

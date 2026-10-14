@@ -6,7 +6,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { openDatabase, startServer } from './server.mjs';
 import { importRegistryHistory, listRegistry, registerFinding, updateRegistryRow } from './registry.mjs';
-import { listDuplicateCandidates, recordDuplicateResult } from './duplicate-registry.mjs';
+import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplicateResult,
+  recordInternalDuplicateResult } from './duplicate-registry.mjs';
 
 const findingId = 'a'.repeat(64);
 const submissionId = 'b'.repeat(64);
@@ -67,6 +68,11 @@ function result(rowId, revision = 0, overrides = {}) {
   };
 }
 
+function internalResult(rowId, revision = 0, overrides = {}) {
+  return { row_id: rowId, revision, verdict: 'duplicate', reason: 'Same root cause and affected code path in both private reports.',
+    matched_management_id: 'A-001', checked_at: checkedAt, ...overrides };
+}
+
 test('daily candidates cover historical and registered findings without exposing raw PoC', t => {
   const { db, dataDir } = fixture(t);
   const candidates = listDuplicateCandidates(db, dataDir);
@@ -78,6 +84,71 @@ test('daily candidates cover historical and registered findings without exposing
   assert.deepEqual(candidates[3].code_refs, ['fs/nfsd/nfs4proc.c:123']);
   assert.match(candidates[3].report_excerpt, /Observed in 2 VM/);
   assert.doesNotMatch(JSON.stringify(candidates), /private PoC/);
+});
+
+test('internal references include all A/B/C registry rows, including reported findings', t => {
+  const { db, dataDir } = fixture(t);
+  const references = listInternalDuplicateReferences(db, dataDir);
+  assert.equal(references.length, 65);
+  assert.deepEqual(references.filter(row => ['A-001', 'B-021', 'C-001', 'A-043'].includes(row.management_id))
+    .map(row => [row.management_id, row.report_status]), [
+      ['A-001', '미제보'], ['B-021', '제보 완료'], ['C-001', '제보 완료'], ['A-043', '미제보'],
+    ]);
+  assert.doesNotMatch(JSON.stringify(references), /private PoC/);
+});
+
+test('confirmed internal duplicate changes only the later eligible row and records separate audit', t => {
+  const { db, dataDir } = fixture(t);
+  const result = recordInternalDuplicateResult(db, internalResult(findingId), dataDir);
+  assert.equal(result.outcome, 'changed');
+  assert.equal(db.prepare('SELECT report_status FROM finding_registry WHERE finding_id = ?').get(findingId).report_status, '중복');
+  assert.equal(db.prepare("SELECT report_status FROM registry_history WHERE management_id = 'A-001'").get().report_status, '미제보');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM duplicate_reviews').get().n, 0);
+  assert.deepEqual(listRegistry(db).find(row => row.management_id === 'A-043').internal_duplicate_review, {
+    verdict: 'duplicate', reason: 'Same root cause and affected code path in both private reports.',
+    matched_management_id: 'A-001', checked_at: checkedAt, outcome: 'changed',
+  });
+  assert.throws(() => db.prepare("DELETE FROM internal_duplicate_reviews WHERE row_id = ?").run(findingId), /append-only/);
+});
+
+test('internal duplicate never auto-tags self, later, missing-report, completed or manually restored rows', t => {
+  const { db, dataDir } = fixture(t);
+  assert.throws(() => recordInternalDuplicateResult(db, internalResult('history:A-001'), dataDir), /cannot match itself/);
+  assert.equal(recordInternalDuplicateResult(db, internalResult('history:A-001', 0,
+    { matched_management_id: 'A-043' }), dataDir).outcome, 'ineligible_reference');
+  assert.equal(recordInternalDuplicateResult(db, internalResult('history:B-001', 0,
+    { matched_management_id: 'A-001' }), dataDir).outcome, 'insufficient_reports');
+  assert.equal(recordInternalDuplicateResult(db, internalResult('history:A-001', 0,
+    { matched_management_id: 'C-001' }), dataDir).outcome, 'insufficient_reports');
+  assert.throws(() => recordInternalDuplicateResult(db, internalResult(findingId, 0,
+    { matched_management_id: 'A-999' }), dataDir), /Matched finding not found/);
+  updateRegistryRow(db, 'history:A-001', { revision: 0, report_status: '제보 완료' }, 'human');
+  assert.equal(recordInternalDuplicateResult(db, internalResult('history:A-001', 0,
+    { matched_management_id: 'A-043' }), dataDir).outcome, 'stale');
+  assert.equal(recordInternalDuplicateResult(db, internalResult('history:A-001', 1,
+    { matched_management_id: 'A-043' }), dataDir).outcome, 'ineligible');
+  assert.equal(recordInternalDuplicateResult(db, internalResult(findingId, 0), dataDir).outcome, 'changed');
+  updateRegistryRow(db, findingId, { revision: 1, report_status: '미제보' }, 'human');
+  assert.equal(recordInternalDuplicateResult(db, internalResult(findingId, 2), dataDir).outcome, 'manual_override');
+});
+
+test('internal no-match stores only a review date and cannot mutate status', t => {
+  const { db, dataDir } = fixture(t);
+  const output = recordInternalDuplicateResult(db, internalResult('history:B-001', 0,
+    { verdict: 'no_match', matched_management_id: null, reason: 'No matching private finding.' }), dataDir);
+  assert.equal(output.status_changed, false);
+  assert.equal(listRegistry(db).find(row => row.management_id === 'B-001').internal_duplicate_review.checked_at, checkedAt);
+  assert.throws(() => recordInternalDuplicateResult(db, internalResult(findingId, 0,
+    { verdict: 'no_match' }), dataDir), /matched_management_id/);
+});
+
+test('already duplicate or withdrawn references cannot cause another automatic duplicate', t => {
+  const { db, dataDir } = fixture(t);
+  updateRegistryRow(db, 'history:A-001', { revision: 0, report_status: '중복' }, 'human');
+  assert.equal(recordInternalDuplicateResult(db, internalResult(findingId), dataDir).outcome, 'ineligible_reference');
+  updateRegistryRow(db, 'history:A-001', { revision: 1, report_status: '철회' }, 'human');
+  assert.equal(recordInternalDuplicateResult(db, internalResult(findingId), dataDir).outcome, 'ineligible_reference');
+  assert.equal(db.prepare('SELECT report_status FROM finding_registry WHERE finding_id = ?').get(findingId).report_status, '미제보');
 });
 
 test('confirmed duplicates update both registry tables and leave immutable evidence and edit trail', t => {
@@ -195,4 +266,15 @@ test('duplicate review is available through verifier IPC and not through the pub
   assert.equal(recorded.body.status_changed, true);
   const publicResult = await fetch(`${running.url}/duplicate/candidates`, { method: 'POST' });
   assert.equal(publicResult.status, 404);
+  const internal = await postSocket(socketPath, '/duplicate/internal-candidates', {});
+  assert.equal(internal.status, 200);
+  assert.equal(internal.body.references.length, 64);
+  assert.equal(internal.body.references.some(row => row.management_id === 'C-001'), true);
+  const internalResult = await postSocket(socketPath, '/duplicate/internal-result', {
+    row_id: 'history:B-001', revision: 0, verdict: 'no_match', reason: 'No matching private finding.',
+    matched_management_id: null, checked_at: checkedAt,
+  });
+  assert.equal(internalResult.status, 200);
+  assert.equal(internalResult.body.status_changed, false);
+  assert.equal((await fetch(`${running.url}/duplicate/internal-candidates`, { method: 'POST' })).status, 404);
 });

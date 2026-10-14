@@ -11,10 +11,11 @@ test('finding detail appends only available primitive review under the existing 
 
   const elements = new Map();
   const makeElement = tagName => ({
-    tagName, className: '', textContent: '', children: [],
+    tagName, className: '', textContent: '', children: [], listeners: {},
     classList: { add(name) { this.owner.className += ` ${name}`; } },
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
+    addEventListener(name, listener) { this.listeners[name] = listener; },
   });
   for (const id of ['detail-title', 'detail-subtitle', 'detail-summary']) elements.set(id, makeElement('div'));
   elements.set('detail', { open: false, querySelector: () => ({ hidden: true }), showModal() { this.open = true; } });
@@ -92,4 +93,33 @@ test('finding detail appends only available primitive review under the existing 
   const reviewed = elements.get('detail-summary').children.find(item => item.className.includes('duplicate-review'));
   assert.equal(reviewed.children.length, 2);
   assert.equal(reviewed.children[1].textContent, '2026-10-13T01:00:00Z');
+
+  context.openFinding({ ...finding, internal_duplicate_review: {
+    verdict: 'no_match', checked_at: '2026-10-13T02:00:00Z', reason: '화면에 노출하지 않을 긴 내부 검토 의견',
+    matched_management_id: null,
+  } });
+  const internalChecked = elements.get('detail-summary').children.find(item => item.children[0]?.textContent === '내부 취약점 중복 검사');
+  assert.ok(internalChecked);
+  assert.equal(internalChecked.children.length, 2);
+  assert.equal(internalChecked.children[1].textContent, '2026-10-13T02:00:00Z');
+
+  context.testState.registry = { findings: [{ ...finding, title: 'Matched finding', management_id: 'B-021' }] };
+  context.openFinding({ ...finding, report_status: '중복', internal_duplicate_review: {
+    verdict: 'duplicate', checked_at: '2026-10-13T03:00:00Z', matched_management_id: 'B-021',
+  } });
+  const linkedMatch = elements.get('detail-summary').children.find(item => item.children[0]?.textContent === '내부 취약점 중복 검사');
+  assert.equal(linkedMatch.children[2].children[0].textContent, 'B-021');
+  linkedMatch.children[2].children[0].listeners.click();
+  assert.equal(elements.get('detail-title').textContent, 'Matched finding');
+
+  context.testState.registry = null;
+  context.openFinding({ ...finding, origin: 'history', report_status: '중복', internal_duplicate_review: {
+    verdict: 'duplicate', checked_at: '2026-10-13T03:00:00Z', reason: '화면에 노출하지 않을 긴 내부 검토 의견',
+    matched_management_id: 'B-021',
+  } });
+  const internalMatch = elements.get('detail-summary').children.find(item => item.children[0]?.textContent === '내부 취약점 중복 검사');
+  assert.ok(internalMatch);
+  assert.equal(internalMatch.children[1].textContent, '2026-10-13T03:00:00Z');
+  assert.equal(internalMatch.children[2].textContent, 'B-021');
+  assert.equal(elements.get('detail-summary').children.some(item => item.children[0]?.textContent === '공개 자료 중복 검사'), false);
 });

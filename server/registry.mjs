@@ -145,6 +145,12 @@ export function listRegistry(db) {
     verdict: row.verdict, reason: row.reason, evidence: JSON.parse(row.evidence_json),
     sources_checked: JSON.parse(row.sources_checked_json), checked_at: row.checked_at, outcome: row.outcome,
   }]));
+  const internalDuplicateReviews = new Map(db.prepare(`SELECT row_id, verdict, reason,
+    matched_management_id, checked_at, outcome FROM internal_duplicate_reviews
+    WHERE id IN (SELECT MAX(id) FROM internal_duplicate_reviews GROUP BY row_id)`).all().map(row => [row.row_id, {
+    verdict: row.verdict, reason: row.reason, matched_management_id: row.matched_management_id,
+    checked_at: row.checked_at, outcome: row.outcome,
+  }]));
   const live = db.prepare(`SELECT r.*, e.title, e.agent_id, e.created_at, e.markdown,
     e.corrects_event_id AS replaces_event_id, v.status AS review_status,
     v.verdict AS review_verdict, v.summary AS review_summary, v.provider AS review_provider,
@@ -160,6 +166,7 @@ export function listRegistry(db) {
     return {
       event_id: finding_id, origin: 'agent', ...record, title: title_override ?? row.title,
       duplicate_review: duplicateReviews.get(finding_id) ?? null,
+      internal_duplicate_review: internalDuplicateReviews.get(finding_id) ?? null,
       registration_status: row.management_id ? 'verified' : 'pending',
       verified_at: approved_at, updated_at,
       file_path: data.file_path || null, code_refs: data.code_refs || [],
@@ -173,6 +180,7 @@ export function listRegistry(db) {
     return {
     ...record, event_id: `history:${row.management_id}`, origin: 'history',
     duplicate_review: duplicateReviews.get(`history:${row.management_id}`) ?? null,
+    internal_duplicate_review: internalDuplicateReviews.get(`history:${row.management_id}`) ?? null,
     latest_verification: historyVerifications.get(row.management_id) ?? null,
     agent_id: null, created_at: null, review_status: null, review_verdict: null, review_provider: null,
     review_summary: null, primitive_review_status: null, primitive_review_summary: null,

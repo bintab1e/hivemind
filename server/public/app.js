@@ -756,23 +756,44 @@ function detailFact(label, value) {
   return fact;
 }
 
-function appendDuplicateReview(finding) {
+function appendDuplicateReviews(finding) {
   const review = finding.duplicate_review;
-  if (!review) return;
-  const fact = detailFact('공개 자료 중복 검사', when(review.checked_at));
-  fact.classList.add('duplicate-review');
-  const sources = finding.report_status === '중복' && review.verdict === 'duplicate'
-    ? (review.evidence || []).filter(item => item?.url) : [];
-  if (sources.length) {
-    const links = element('div', 'duplicate-evidence');
-    for (const source of sources) {
-      const link = element('a', 'detail-link', source.url);
-      link.href = source.url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      links.append(link);
+  if (review) {
+    const fact = detailFact('공개 자료 중복 검사', when(review.checked_at));
+    fact.classList.add('duplicate-review');
+    const sources = finding.report_status === '중복' && review.verdict === 'duplicate'
+      ? (review.evidence || []).filter(item => item?.url) : [];
+    if (sources.length) {
+      const links = element('div', 'duplicate-evidence');
+      for (const source of sources) {
+        const link = element('a', 'detail-link', source.url);
+        link.href = source.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        links.append(link);
+      }
+      fact.append(links);
     }
-    fact.append(links);
+    $('detail-summary').append(fact);
+  }
+
+  const internal = finding.internal_duplicate_review;
+  if (!internal) return;
+  const fact = detailFact('내부 취약점 중복 검사', when(internal.checked_at));
+  fact.classList.add('duplicate-review');
+  if (finding.report_status === '중복' && internal.verdict === 'duplicate' &&
+      internal.matched_management_id) {
+    const match = state.registry?.findings?.find(item => item.management_id === internal.matched_management_id);
+    if (match) {
+      const button = element('button', 'detail-link', internal.matched_management_id);
+      button.type = 'button';
+      button.addEventListener('click', () => openFinding(match));
+      const links = element('div', 'duplicate-evidence');
+      links.append(button);
+      fact.append(links);
+    } else {
+      fact.append(element('strong', '', internal.matched_management_id));
+    }
   }
   $('detail-summary').append(fact);
 }
@@ -805,7 +826,7 @@ function openFinding(finding, tab = 'report') {
         detailFact('재검증 사유', verification.reason),
       );
     }
-    appendDuplicateReview(finding);
+    appendDuplicateReviews(finding);
     if (!$('detail').open) $('detail').showModal();
     showDetailTab();
     return;
@@ -838,7 +859,7 @@ function openFinding(finding, tab = 'report') {
     review.classList.add('review-summary');
     $('detail-summary').append(review);
   }
-  appendDuplicateReview(finding);
+  appendDuplicateReviews(finding);
   if (!$('detail').open) $('detail').showModal();
   showDetailTab();
 }

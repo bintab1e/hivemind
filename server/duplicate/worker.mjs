@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { postJson } from '../verifier/worker.mjs';
 import { reviewDuplicateWithCodex } from './codex-review.mjs';
+import { reviewInternalDuplicatesWithCodex } from './internal-review.mjs';
 import { fetchProjectSources, hydrateEvidence, publicCodeQuery, publicCodeReferences, rankEvidence,
   searchHistoricalBranch, searchHistoricalMail } from './sources.mjs';
 
@@ -24,11 +25,73 @@ function checkedCandidate(row) {
       typeof row.title !== 'string' || !row.title.trim() || row.title.length > 300 ||
       ![null, '미제보', '제보 중'].includes(row.report_status) ||
       typeof row.report_excerpt !== 'string' || Buffer.byteLength(row.report_excerpt) > 24_000 ||
-      !Array.isArray(row.code_refs) || row.code_refs.length > 30 ||
+      !Array.isArray(row.code_refs) || row.code_refs.length > 40 ||
       row.code_refs.some(ref => typeof ref !== 'string' || ref.length > 300)) {
     throw new Error('invalid_duplicate_candidate');
   }
   return row;
+}
+
+function checkedReference(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row) ||
+      !ids.test(row.row_id || '') || !/^[ABC]-\d{3,}$/.test(row.management_id || '') ||
+      !Number.isInteger(row.revision) || row.revision < 0 || !targets.has(row.target) ||
+      typeof row.title !== 'string' || !row.title.trim() || row.title.length > 300 ||
+      ![null, '미제보', '제보 중', '제보 완료', '중복', '철회'].includes(row.report_status) ||
+      typeof row.report_excerpt !== 'string' || Buffer.byteLength(row.report_excerpt) > 24_000 ||
+      !Array.isArray(row.code_refs) || row.code_refs.length > 40 ||
+      row.code_refs.some(ref => typeof ref !== 'string' || ref.length > 300)) {
+    throw new Error('invalid_internal_duplicate_reference');
+  }
+  return row;
+}
+
+export async function runInternalDuplicateOnce({ config = duplicateConfiguration(), transport = postJson,
+  internalReviewer = reviewInternalDuplicatesWithCodex } = {}) {
+  const response = await transport(config.socketPath, '/duplicate/internal-candidates', {});
+  if (!response || !Array.isArray(response.candidates) || response.candidates.length > 2000 ||
+      !Array.isArray(response.references) || response.references.length > 2000) {
+    throw new Error('invalid_internal_duplicate_response');
+  }
+  const candidates = response.candidates.map(checkedCandidate);
+  const references = response.references.map(checkedReference);
+  const counts = { checked: 0, duplicates: 0, uncertain: 0, errors: 0 };
+  for (const row of candidates) {
+    let outcome;
+    try {
+      outcome = await internalReviewer(row, references, { cliPath: config.cliPath, workRoot: config.workRoot });
+      if (!outcome || !['duplicate', 'no_match', 'uncertain'].includes(outcome.verdict) ||
+          typeof outcome.reason !== 'string' ||
+          (outcome.verdict === 'duplicate' && !/^[ABC]-\d{3,}$/.test(outcome.matched_management_id || ''))) {
+        throw new Error('invalid_internal_duplicate_review');
+      }
+    } catch {
+      outcome = { verdict: 'error', reason: '헤드리스 내부 중복 검토가 완료되지 않았습니다.',
+        matched_management_id: null };
+    }
+    let receipt;
+    try {
+      receipt = await transport(config.socketPath, '/duplicate/internal-result', {
+        row_id: row.row_id, revision: row.revision, verdict: outcome.verdict,
+        reason: outcome.reason, matched_management_id: outcome.verdict === 'duplicate'
+          ? outcome.matched_management_id : null,
+        checked_at: new Date().toISOString(),
+      });
+    } catch {
+      counts.checked++;
+      counts.errors++;
+      continue;
+    }
+    counts.checked++;
+    if (receipt?.status_changed === true) {
+      counts.duplicates++;
+      const updatedReference = references.find(ref => ref.row_id === row.row_id);
+      if (updatedReference) updatedReference.report_status = '중복';
+    }
+    else if (outcome.verdict === 'error') counts.errors++;
+    else if (outcome.verdict === 'uncertain' || receipt?.outcome === 'ineligible_reference') counts.uncertain++;
+  }
+  return counts;
 }
 
 const sourceFailure = '공식 메일링 리스트 또는 유지관리 브랜치의 자료를 완전히 조회하지 못했습니다.';
@@ -129,14 +192,24 @@ export async function runDuplicateOnce({ config = duplicateConfiguration(), tran
   return counts;
 }
 
+export async function runDailyDuplicateOnce(options = {}) {
+  let internal;
+  let publicSources;
+  try { internal = await runInternalDuplicateOnce(options); }
+  catch { internal = { checked: 0, duplicates: 0, uncertain: 0, errors: 1 }; }
+  try { publicSources = await runDuplicateOnce(options); }
+  catch { publicSources = { checked: 0, duplicates: 0, uncertain: 0, errors: 1 }; }
+  return { internal, public: publicSources };
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const config = duplicateConfiguration();
     fs.mkdirSync(config.workRoot, { recursive: true, mode: 0o700 });
     if (fs.statSync(config.workRoot).mode & 0o077) throw new Error('work_root_permissions');
-    const counts = await runDuplicateOnce({ config });
+    const counts = await runDailyDuplicateOnce({ config });
     console.log(JSON.stringify(counts));
-    if (counts.errors) process.exitCode = 1;
+    if (counts.internal.errors || counts.public.errors) process.exitCode = 1;
   } catch {
     console.error('Duplicate checker: run_failed');
     process.exitCode = 1;

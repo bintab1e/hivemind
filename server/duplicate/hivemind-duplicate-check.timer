@@ -1,5 +1,5 @@
 [Unit]
-Description=Check Hivemind registry against public mail and maintainer branches at 06:00 KST
+Description=Check Hivemind registry against internal and public records at 06:00 KST
 
 [Timer]
 OnCalendar=*-*-* 06:00:00 Asia/Seoul

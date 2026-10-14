@@ -227,13 +227,15 @@ test('duplicate worker IPC routes are available on the same local socket', async
     for await (const chunk of request) body += chunk;
     assert.deepEqual(JSON.parse(body), {});
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify(request.url === '/duplicate/candidates' ? { candidates: [] } : { status_changed: false }));
+    response.end(JSON.stringify(request.url.endsWith('candidates') ? { candidates: [] } : { status_changed: false }));
   });
   await new Promise(resolve => server.listen(config.socketPath, resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   assert.deepEqual(await postJson(config.socketPath, '/duplicate/candidates', {}), { candidates: [] });
   assert.deepEqual(await postJson(config.socketPath, '/duplicate/result', {}), { status_changed: false });
-  assert.deepEqual(routes, ['/duplicate/candidates', '/duplicate/result']);
+  assert.deepEqual(await postJson(config.socketPath, '/duplicate/internal-candidates', {}), { candidates: [] });
+  assert.deepEqual(await postJson(config.socketPath, '/duplicate/internal-result', {}), { status_changed: false });
+  assert.deepEqual(routes, ['/duplicate/candidates', '/duplicate/result', '/duplicate/internal-candidates', '/duplicate/internal-result']);
 });
 
 test('worker does not claim a job without a pinned full kernel commit', async t => {
