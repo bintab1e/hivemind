@@ -18,6 +18,33 @@ test('strengthened submission carries a validated existing management ID', async
   await assert.rejects(buildSubmission(config, { ...args, metadata: { existing_management_id: 'A-999' } }, 'a'.repeat(40)), /top level/);
 });
 
+test('result_dir includes nested evidence and keeps an existing management ID', async t => {
+  const base = await mkdtemp(path.join(tmpdir(), 'hivemind-result-dir-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const repo = path.join(base, 'linux');
+  const resultRoot = path.join(base, 'result');
+  const resultDir = path.join(resultRoot, 'knfsd_example_2026-10-14');
+  await mkdir(repo);
+  await mkdir(path.join(resultDir, 'evidence'), { recursive: true });
+  await writeFile(path.join(resultDir, 'report.md'), '# analysis\n');
+  await writeFile(path.join(resultDir, 'poc.c'), 'int main(void) { return 0; }\n');
+  await writeFile(path.join(resultDir, 'evidence', 'kasan.log'), 'BUG: KASAN: read\n');
+  const config = { repo_root: repo, home: path.join(base, 'runtime'), result_root: resultRoot, version_id: '7.3-rc7', track_id: 'rc' };
+  const args = { result_dir: path.basename(resultDir), existing_management_id: 'A-005' };
+  const body = await buildSubmission(config, args, 'a'.repeat(40));
+  assert.equal(body.metadata.existing_management_id, 'A-005');
+  assert.deepEqual(body.files.map(file => [file.name, file.kind]), [
+    ['evidence__kasan.log', 'log'], ['poc.c', 'poc'], ['report.md', 'report'],
+  ]);
+  assert.equal(Buffer.from(body.files[0].content_base64, 'base64').toString(), 'BUG: KASAN: read\n');
+  assert(!JSON.stringify(body).includes(resultRoot));
+  await assert.rejects(buildSubmission(config, { ...args, files: [] }, 'a'.repeat(40)), /result_dir or files/);
+  await assert.rejects(buildSubmission(config, { result_dir: '../outside' }, 'a'.repeat(40)), /direct child/);
+  await assert.rejects(buildSubmission({ ...config, result_root: undefined }, args, 'a'.repeat(40)), /result_root is not configured/);
+  await symlink(path.join(resultDir, 'poc.c'), path.join(resultDir, 'link.c'));
+  await assert.rejects(buildSubmission(config, args, 'a'.repeat(40)), /symlinks are not allowed/);
+});
+
 test('raw MCP submission accepts varied files without KASAN and retries with one ID', async t => {
   const base = await mkdtemp(path.join(tmpdir(), 'hivemind-submission-'));
   const root = path.join(base, 'linux');

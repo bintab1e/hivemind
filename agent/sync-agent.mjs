@@ -109,6 +109,7 @@ export function validateConfig(config) {
   if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(config.version_id || '')) throw new Error('Invalid version_id');
   if (config.track_id != null && !['rc', 'mainline'].includes(config.track_id)) throw new Error('track_id must be rc or mainline');
   if (!path.isAbsolute(config.repo_root || '') || !path.isAbsolute(config.home || '')) throw new Error('repo_root and home must be absolute paths');
+  if (config.result_root != null && !path.isAbsolute(config.result_root)) throw new Error('result_root must be an absolute path');
   const server = validateServerUrl(config.server_url, config.allow_insecure_lan_http);
   if (!Number.isInteger(config.telemetry_interval_seconds) || config.telemetry_interval_seconds < 60) throw new Error('telemetry_interval_seconds must be at least 60');
   const prefixes = config.coverage_prefixes || defaultCoveragePrefixes;

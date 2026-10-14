@@ -88,8 +88,10 @@ test('reinstall removes obsolete analysis instructions and keeps project guidanc
 test('token configures the matching kernel checkout and project hooks', { skip: process.platform === 'win32' }, async t => {
   const temp = await mkdtemp(path.join(tmpdir(), 'hivemind-install-'));
   const root = path.join(temp, 'linux');
+  const resultRoot = path.join(temp, 'result');
   const agent = path.join(root, '.hivemind', 'agent');
   await mkdir(root, { recursive: true });
+  await mkdir(resultRoot);
   await writeFile(path.join(root, '.mcp.json'), JSON.stringify({ mcpServers: { existing: { command: 'existing-tool' } } }));
   const source = path.dirname(fileURLToPath(import.meta.url));
   const localOnly = new Set(['.git', '.local', '.venv', '__pycache__', 'runtime']);
@@ -118,11 +120,18 @@ test('token configures the matching kernel checkout and project hooks', { skip: 
   }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); });
+  const previousResultRoot = process.env.HIVEMIND_RESULT_ROOT;
+  process.env.HIVEMIND_RESULT_ROOT = resultRoot;
+  t.after(() => {
+    if (previousResultRoot === undefined) delete process.env.HIVEMIND_RESULT_ROOT;
+    else process.env.HIVEMIND_RESULT_ROOT = previousResultRoot;
+  });
   const { configure } = await import(pathToFileURL(path.join(agent, 'setup.mjs')).href);
   const result = await configure(root, tokenFile, `http://127.0.0.1:${server.address().port}`);
   assert.equal(result.id, 'jinpyo');
   const config = JSON.parse(await readFile(result.configPath, 'utf8'));
   assert.equal(config.repo_root, root);
+  assert.equal(config.result_root, resultRoot);
   assert.equal(config.version_id, '7.3-rc4');
   const codexConfig = await readFile(path.join(root, '.codex', 'config.toml'), 'utf8');
   assert.match(codexConfig, /mcp_servers\.knfsd_hivemind/);

@@ -30,8 +30,9 @@ const localTools = [
         access_requirements: { type: 'array', items: { type: 'string', enum: ['auth_null', 'auth_unix', 'rpcsec_gss', 'authenticated_client', 'malicious_server', 'local_user', 'local_privileged'] } },
         claimed_impacts: { type: 'array', items: { type: 'string', enum: ['kasan_read', 'kasan_write', 'controlled_read', 'controlled_write', 'lpe', 'rce', 'info_leak'] }, description: '분석 PC가 직접 관찰했다고 주장하는 항목만. 서버가 독립 검증하여 최종 체크한다.' },
       } },
+      result_dir: { type: 'string', description: '설정된 result_root 바로 아래 취약점 디렉터리의 이름 또는 절대 경로. 내부 파일을 모두 첨부하며 files와 함께 사용할 수 없다.' },
       files: { type: 'array', maxItems: 20, items: { type: 'object', additionalProperties: false, properties: {
-        path: { type: 'string', description: 'repo_root 또는 에이전트 home/evidence 아래의 파일 경로. 원문이 전송된다.' },
+        path: { type: 'string', description: 'repo_root, 에이전트 home/evidence 또는 설정된 result_root 아래의 파일 경로. 원문이 전송된다.' },
         name: { type: 'string', description: '선택: 서버에 보일 파일 이름.' },
         kind: { type: 'string', enum: ['report', 'poc', 'log', 'other'], description: 'report.md=report, poc.c=poc, KASAN/KCSAN .log=log, reproduction.md/reproduce.sh=other.' },
       }, required: ['path'] } },

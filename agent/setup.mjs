@@ -170,6 +170,7 @@ export async function configure(root, tokenFile, serverUrl = process.env.HIVEMIN
   fs.chmodSync(tokenPath, 0o600);
   const config = validateConfig({ agent_id: id, track_id: target.track_id, version_id: target.version_id,
     repo_root: root, coverage_prefixes: defaultCoveragePrefixes, home: path.join(agentDir, 'runtime'),
+    ...(process.env.HIVEMIND_RESULT_ROOT ? { result_root: process.env.HIVEMIND_RESULT_ROOT } : {}),
     server_url: serverOrigin, allow_insecure_lan_http: allowInsecureLanHttp,
     telemetry_interval_seconds: 300, agentcov_bin: agentcovBin });
   delete config.server;

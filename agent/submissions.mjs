@@ -33,9 +33,10 @@ function inferKind(name) {
 async function readAttachment(config, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.path !== 'string' || !input.path.trim()) throw new Error('Invalid attachment path');
   const target = path.resolve(path.isAbsolute(input.path) ? input.path : path.join(config.repo_root, input.path));
-  const roots = [path.resolve(config.home, 'evidence'), path.resolve(config.repo_root)];
+  const roots = [path.resolve(config.home, 'evidence'), path.resolve(config.repo_root),
+    ...(config.result_root ? [path.resolve(config.result_root)] : [])];
   const root = roots.find(candidate => inside(candidate, target));
-  if (!root) throw new Error('Attachment must be inside repo_root or home/evidence');
+  if (!root) throw new Error('Attachment must be inside repo_root, home/evidence or configured result_root');
   if ((await fs.lstat(root)).isSymbolicLink()) throw new Error('Attachment symlinks are not allowed');
   const resolvedRoot = await fs.realpath(root);
   const resolvedTarget = await fs.realpath(target);
@@ -64,12 +65,49 @@ async function readAttachment(config, input) {
   } finally { await handle.close(); }
 }
 
+async function filesInResultDirectory(config, value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('Invalid result_dir');
+  if (!config.result_root) throw new Error('result_root is not configured');
+  const root = path.resolve(config.result_root);
+  const directory = path.resolve(path.isAbsolute(value) ? value : path.join(root, value));
+  if (path.dirname(directory) !== root || path.basename(directory).startsWith('.')) {
+    throw new Error('result_dir must be a direct child of result_root');
+  }
+  if ((await fs.lstat(root)).isSymbolicLink() || (await fs.lstat(directory)).isSymbolicLink()) {
+    throw new Error('Result directory symlinks are not allowed');
+  }
+  if (!(await fs.lstat(directory)).isDirectory() ||
+      !inside(await fs.realpath(root), await fs.realpath(directory))) {
+    throw new Error('Invalid result_dir');
+  }
+  const files = [];
+  async function walk(current, parts) {
+    const entries = (await fs.readdir(current, { withFileTypes: true }))
+      .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) throw new Error('Hidden result files are not allowed');
+      const file = path.join(current, entry.name);
+      const info = await fs.lstat(file);
+      if (info.isSymbolicLink()) throw new Error('Result file symlinks are not allowed');
+      if (info.isDirectory()) await walk(file, [...parts, entry.name]);
+      else if (info.isFile()) {
+        files.push({ path: file, name: attachmentName([...parts, entry.name].join('__')) });
+        if (files.length > maxFiles) throw new Error('Result directory exceeds 20 files');
+      } else throw new Error('Result directory contains a non-file entry');
+    }
+  }
+  await walk(directory, []);
+  if (!files.length) throw new Error('Result directory is empty');
+  return files;
+}
+
 export async function buildSubmission(config, args, repoCommit) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid submission');
   if (args.project != null && args.project !== 'knfsd') throw new Error('Only knfsd submissions are supported');
   if (args.title != null && (typeof args.title !== 'string' || !args.title.trim() || Buffer.byteLength(args.title) > 300)) throw new Error('Invalid title');
   if (args.report != null && (typeof args.report !== 'string' || Buffer.byteLength(args.report) > maxReportBytes)) throw new Error('Invalid report');
-  const files = args.files ?? [];
+  if (args.result_dir != null && args.files != null) throw new Error('Use result_dir or files, not both');
+  const files = args.result_dir == null ? (args.files ?? []) : await filesInResultDirectory(config, args.result_dir);
   if (!Array.isArray(files) || files.length > maxFiles) throw new Error('Invalid files');
   if (!args.report?.trim() && !files.length) throw new Error('Add a report or at least one file');
   if (args.client_submission_id != null && (typeof args.client_submission_id !== 'string' || !submissionIdPattern.test(args.client_submission_id))) throw new Error('Invalid client_submission_id');
