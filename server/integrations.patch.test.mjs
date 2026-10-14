@@ -48,6 +48,24 @@ test('Sashiko findings remain findings when CLI exits zero', async t => {
   assert.equal(answer.result.findings[0].title, 'Race condition');
 });
 
+test('Sashiko stderr-only failure keeps an actionable reason without exposing raw output', async t => {
+  const item = setup(t, { status: 'clean' });
+  writeFileSync(item.cliPath, '#!/bin/sh\necho "Authentication failed: private-marker" >&2\nexit 3\n', { mode: 0o700 });
+  await assert.rejects(reviewPatchWithSashiko(item), error => {
+    assert.match(error.message, /Sashiko AI authentication failed/);
+    assert.doesNotMatch(error.message, /private-marker/);
+    return true;
+  });
+  assert.deepEqual(readdirSync(path.join(item.dataDir, 'jobs')), []);
+});
+
+test('Sashiko timeout is reported even when the process emits partial output', async t => {
+  const item = setup(t, { status: 'clean' });
+  writeFileSync(item.cliPath, '#!/bin/sh\necho partial\nexec sleep 2\n', { mode: 0o700 });
+  await assert.rejects(reviewPatchWithSashiko({ ...item, timeoutMs: 50 }), /Sashiko review timed out/);
+  assert.deepEqual(readdirSync(path.join(item.dataDir, 'jobs')), []);
+});
+
 test('a patch cannot make Sashiko read a symlink outside the kernel worktree', async t => {
   const item = setup(t, { status: 'clean', findings: [], concerns: [] });
   symlinkSync('/etc/passwd', path.join(item.repoPath, 'linked'));

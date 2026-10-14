@@ -6,6 +6,19 @@ import path from 'node:path';
 
 const exec = promisify(execFile);
 
+function sashikoFailureReason(error, exitCode) {
+  if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'Sashiko review output exceeded the capture limit';
+  if (error.killed || error.code === 'ETIMEDOUT') return 'Sashiko review timed out';
+  const diagnostic = String(error.stderr || error.message || '');
+  if (/\b(?:401|unauthorized|unauthorised|authentication|not logged in|login required|invalid api key)\b/i.test(diagnostic)) {
+    return 'Sashiko AI authentication failed';
+  }
+  if (/\b(?:429|quota|rate.?limit|usage limit)\b/i.test(diagnostic)) return 'Sashiko AI rate limit or quota reached';
+  if (/SASHIKO_CONFIG|Settings\.toml|configuration/i.test(diagnostic)) return 'Sashiko configuration failed';
+  if (/Failed to start worker binary|No such file or directory/i.test(diagnostic)) return 'Sashiko worker executable is unavailable';
+  return 'Sashiko failed with exit code ' + exitCode + ' before producing a review';
+}
+
 export async function reviewFindingWithKimi({ title, filePath, codeRefs, impact, report }, options = {}) {
   const key = options.apiKey ?? process.env.KIMI_API_KEY;
   if (!key) throw new Error('Kimi API key is not configured');
@@ -36,7 +49,8 @@ export async function reviewFindingWithKimi({ title, filePath, codeRefs, impact,
   return { verdict: answer.verdict, summary: answer.summary.trim().slice(0, 3000), model };
 }
 
-export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliPath, dataDir, configDir = repoPath }) {
+export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliPath, dataDir, configDir = repoPath,
+  timeoutMs = 90 * 60_000 }) {
   if (!/^[a-f0-9]{40,64}$/i.test(baseCommit)) throw new Error('Invalid base commit');
   const jobsDir = path.join(dataDir, 'jobs');
   fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
@@ -65,13 +79,16 @@ export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliP
     let exitCode = 0;
     try {
       ({ stdout } = await exec(cliPath, ['--format', 'json', 'local', 'HEAD', '--repo', worktree, '--baseline', baseCommit, '--force-local', '--agent'], {
-        cwd: worktree, timeout: 1_800_000, maxBuffer: 4_000_000,
+        cwd: worktree, timeout: timeoutMs, maxBuffer: 4_000_000,
         env: { ...process.env, SASHIKO_CONFIG: path.join(configDir, 'Settings.toml') },
       }));
     } catch (error) {
+      if (error.killed || error.code === 'ETIMEDOUT' || error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        throw new Error(sashikoFailureReason(error, 3));
+      }
       stdout = error.stdout || '';
       exitCode = typeof error.code === 'number' ? error.code : 3;
-      if (!stdout) throw new Error(`Sashiko failed with exit code ${exitCode}`);
+      if (!stdout) throw new Error(sashikoFailureReason(error, exitCode));
     }
     let result;
     try { result = JSON.parse(stdout); } catch { throw new Error('Sashiko returned invalid JSON'); }
