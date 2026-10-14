@@ -1,0 +1,11 @@
+[Unit]
+Description=Clear completed Hivemind verification queue entries at 06:00 KST
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+Unit=hivemind-queue-cleanup.service
+
+[Install]
+WantedBy=timers.target

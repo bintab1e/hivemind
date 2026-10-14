@@ -1,0 +1,11 @@
+[Unit]
+Description=Clear completed Hivemind verification queue entries
+
+[Service]
+Type=oneshot
+WorkingDirectory=/absolute/hivemind/server
+ExecStart=/usr/bin/node /absolute/hivemind/server/manage-local.mjs queue cleanup
+Environment=HIVEMIND_DATA_DIR=/absolute/private/data-directory
+UMask=0077
+NoNewPrivileges=true
+TimeoutStartSec=5min

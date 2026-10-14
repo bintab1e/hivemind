@@ -303,6 +303,22 @@ export function listSubmissions(db, agentId = null) {
     : db.prepare(`${sql} ORDER BY submitted_at DESC LIMIT 200`).all();
 }
 
+export function purgeFinishedSubmissions(db, cutoff = new Date().toISOString()) {
+  if (typeof cutoff !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(cutoff) ||
+      !Number.isFinite(Date.parse(cutoff)) || new Date(cutoff).toISOString() !== cutoff ||
+      db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1) throw new TypeError('Invalid queue cleanup configuration');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const { changes } = db.prepare(`DELETE FROM submissions
+      WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')
+        AND (completed_at IS NULL OR completed_at <= ?)
+        AND finding_id IS NULL AND management_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM finding_revision_audit a WHERE a.submission_id = submissions.id)`).run(cutoff);
+    db.exec('COMMIT');
+    return { deleted: changes };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
 export function getSubmission(db, id, agentId = null) {
   const row = db.prepare('SELECT id AS submission_id, agent_id, project, title, status, reason, submitted_at, completed_at, management_id, finding_id FROM submissions WHERE id = ?').get(id);
   if (!row || agentId && row.agent_id !== agentId) invalid('Submission not found', 404);

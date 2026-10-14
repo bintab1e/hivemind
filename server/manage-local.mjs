@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase, issueAgentToken, setActiveTrack } from './server.mjs';
 import { importRegistryHistory, reconcileRegistryHistory } from './registry.mjs';
 import { importHistoryArtifacts, curateHistoryArtifacts } from './history-artifacts.mjs';
+import { purgeFinishedSubmissions } from './submissions.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.HIVEMIND_DATA_DIR || path.join(root, 'runtime', 'server');
@@ -33,6 +34,8 @@ try {
   } else if (area === 'registry' && action === 'curate-artifacts' && first && !second) {
     const plan = JSON.parse(fs.readFileSync(first === '-' ? 0 : first, 'utf8'));
     console.log(JSON.stringify(curateHistoryArtifacts(db, plan)));
+  } else if (area === 'queue' && action === 'cleanup' && !first) {
+    console.log(JSON.stringify(purgeFinishedSubmissions(db)));
   } else if (area === 'status' && !action) {
     console.log(JSON.stringify({
       tracks: db.prepare('SELECT track_id, version_id, repo_commit, activated_at FROM track_targets WHERE active = 1 ORDER BY track_id').all(),
@@ -45,7 +48,7 @@ try {
     fs.writeFileSync(path.join(dataDir, 'dashboard-auth.env'), `HIVEMIND_DASHBOARD_USER=viewer\nHIVEMIND_DASHBOARD_PASSWORD_SALT=${salt}\nHIVEMIND_DASHBOARD_PASSWORD_HASH=${passwordHash}\n`, { mode: 0o600 });
     console.log(`dashboard_user: viewer\none_time_password: ${password}\nRestart the server to apply the new hash.`);
   } else {
-    throw new Error('Usage: manage-local.mjs agent add <id> [client model] | agent rotate <id> | track set <rc|mainline> <version> <commit> | registry import-history <sanitized-json|-> | registry reconcile-history <sanitized-json|-> | registry import-artifacts <manifest-json|-> <staging-directory> | registry curate-artifacts <plan-json|-> | dashboard reset | status');
+    throw new Error('Usage: manage-local.mjs agent add <id> [client model] | agent rotate <id> | track set <rc|mainline> <version> <commit> | registry import-history <sanitized-json|-> | registry reconcile-history <sanitized-json|-> | registry import-artifacts <manifest-json|-> <staging-directory> | registry curate-artifacts <plan-json|-> | queue cleanup | dashboard reset | status');
   }
 } catch (error) {
   console.error(error.message);

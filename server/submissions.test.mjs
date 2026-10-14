@@ -6,7 +6,7 @@ import test from 'node:test';
 import { openDatabase, setActiveTrack } from './server.mjs';
 import { hash, readFrontMatter } from './contract.mjs';
 import { claimPrimitiveReview, claimSubmission, completeSubmission, getVerifiedArtifact,
-  heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, submitSubmission } from './submissions.mjs';
+  heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
 
 const commit = 'a'.repeat(40);
@@ -82,6 +82,38 @@ test('static-screened submission receives a number without fabricated dynamic im
   assert.equal(data.evidence_sha256, hash(log));
   assert.equal(data.kasan_sha256, undefined);
   assert.deepEqual(data.code_refs, ['fs/nfsd/nfs4proc.c:42']);
+});
+
+test('daily cleanup removes finished blocked submissions and blobs but preserves active work and approved evidence', t => {
+  const db = setup(t);
+  const approvedId = submit(db, 'approved');
+  const approved = approve(db, approvedId);
+  const old = ['needs_evidence', 'needs_review', 'error', 'rejected'].map(status => {
+    const id = submit(db, `old-${status}`);
+    db.prepare('UPDATE submissions SET status = ?, completed_at = ? WHERE id = ?')
+      .run(status, status === 'error' ? null : '2026-10-14T20:00:00.000Z', id);
+    return id;
+  });
+  const future = submit(db, 'future');
+  db.prepare('UPDATE submissions SET status = ?, completed_at = ? WHERE id = ?')
+    .run('rejected', '2026-10-14T21:00:01.000Z', future);
+  const pending = submit(db, 'pending');
+  const processing = submit(db, 'processing');
+  db.prepare('UPDATE submissions SET status = ? WHERE id = ?').run('processing', processing);
+  const cutoff = '2026-10-14T21:00:00.000Z';
+  assert.deepEqual(purgeFinishedSubmissions(db, cutoff), { deleted: 4 });
+  for (const id of old) {
+    assert.equal(db.prepare('SELECT 1 FROM submissions WHERE id = ?').get(id), undefined);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM submission_artifacts WHERE submission_id = ?').get(id).n, 0);
+  }
+  for (const id of [approvedId, future, pending, processing]) {
+    assert.ok(db.prepare('SELECT 1 FROM submissions WHERE id = ?').get(id));
+  }
+  assert.equal(getVerifiedArtifact(db, approved.finding_id, 'report.md').toString(), report);
+  assert.equal(listRegistry(db).find(row => row.management_id === 'A-043').title, 'NFS request length error');
+  assert.equal(listVerificationQueue(db).counts.blocked, 1);
+  assert.deepEqual(purgeFinishedSubmissions(db, cutoff), { deleted: 0 });
+  assert.throws(() => purgeFinishedSubmissions(db, '2099-99-99T00:00:00.000Z'), TypeError);
 });
 
 test('NFS/RDMA findings can be anchored in the InfiniBand source they traverse', t => {
