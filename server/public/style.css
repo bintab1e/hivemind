@@ -206,6 +206,11 @@ footer a{color:#b9a8fb}
 .detail-dialog::backdrop,.zip-submit-dialog::backdrop,.option-dialog::backdrop{background:#050710d9}
 .detail-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 #queue-detail[open]{overflow:auto}
+#detail .dialog-top{flex:none;max-height:22vh;overflow-y:auto}
+#detail .detail-summary{flex:none;max-height:36vh;overflow-y:auto}
+#detail .detail-revision-controls,#detail .detail-tabs{flex:none}
+#detail .detail-tabs{overflow-x:auto;overflow-y:hidden}
+#detail .detail-content{flex:1 1 auto;min-height:0}
 .dialog-top{display:flex;justify-content:space-between;gap:15px;padding:22px 24px 16px}
 .dialog-top h2{font-size:20px;line-height:1.35;margin-bottom:7px}
 .dialog-top .icon-button{flex:none}

@@ -819,6 +819,7 @@ function openFinding(finding, tab = 'report') {
   const displayDate = finding.origin === 'history' ? finding.found_date || '—' : when(finding.created_at || finding.found_date);
   $('detail-subtitle').textContent = `${finding.management_id || '관리번호 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
   clear($('detail-summary'));
+  $('detail-summary').scrollTop = 0;
   $('detail').querySelector('.detail-tabs').hidden = false;
   if (finding.origin === 'history') {
     const verification = finding.latest_verification;
@@ -930,6 +931,7 @@ async function showDetailTab() {
     else button.removeAttribute('aria-current');
   }
   const content = $('detail-content');
+  content.scrollTop = 0;
   clear(content);
   content.append(element('p', '', '자료를 불러오는 중…'));
   try {
