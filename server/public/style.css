@@ -158,7 +158,6 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .finding-table .impact-th{text-align:center;white-space:normal;line-height:1.35;width:76px}
 .finding-title{border:0;background:transparent;color:#e8ecf5;font-size:12px;font-weight:700;text-align:left;padding:0;line-height:1.45}
 .finding-title:hover{color:#c5b4ff;text-decoration:underline}
-.finding-id{display:block;margin-top:5px;color:#788399;font:10px Consolas,"Cascadia Code",monospace}
 .report-status{display:inline-block;border:1px solid #3a4252;border-radius:4px;background:#212635;color:#c7cfdb;padding:3px 6px;font-size:10px}
 .report-status.done{border-color:#35785e;background:#1d3b32;color:#9be7bf}
 .report-status.duplicate{border-color:#796347;background:#3b3026;color:#e9ca92}

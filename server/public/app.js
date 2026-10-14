@@ -441,11 +441,6 @@ function findingCell(finding, key) {
     button.type = 'button';
     button.addEventListener('click', () => openFinding(finding));
     cell.append(button);
-    if (finding.origin !== 'history') {
-      const prior = previousFinding(finding);
-      const revision = finding.replaces_event_id ? `이전 ${prior?.management_id || finding.replaces_event_id.slice(0, 12)} 수정본 · ` : '';
-      cell.append(element('span', 'finding-id', revision + agentName(finding.agent_id)));
-    }
     return cell;
   }
   if (key === 'report_status') {
