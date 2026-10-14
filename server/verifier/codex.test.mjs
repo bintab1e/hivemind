@@ -31,6 +31,7 @@ const submission = {
 const answer = {
   verdict: 'likely',
   reason: 'The code path is plausible but requires reproduction.',
+  integrity: { verdict: 'clear', reason: 'Original C PoC, source and submitted log agree without test-only modifications.' },
   normalized: {
     title: 'NFSv4 COMPOUND boundary out-of-bounds read',
     report: '## Summary\n경계 검사가 의심됩니다.\n\n## Root cause\nfs/nfsd/nfs4proc.c:1 코드에서 검사가 필요합니다.\n```c\nint nfsd4_proc_compound(void) { return 0; }\n```\n\n## Reproduction environment\n제출 환경만 확인했고 2VM 실행 전입니다.\n\n## PoC\nC 프로그램이 경계를 검사합니다.\n\n## Impact analysis\n제출 로그는 KASAN 읽기를 주장하지만 재현 전입니다.',
@@ -131,7 +132,7 @@ test('fills omitted C PoC command hints and requires a C PoC for a likely verdic
   const cReview = await reviewSubmissionWithCodex({ ...submission, metadata: { reproduction_command: 'cc candidate.c && ./a.out' } }, options(fakeCli(t, cAnswer)));
   assert.equal(cReview.verdict, 'likely');
   assert.deepEqual([cReview.normalized.poc.source_index, cReview.normalized.poc.source, cReview.normalized.poc.build_command, cReview.normalized.poc.run_command],
-    [1, submission.files[1].content, 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c', '/tmp/hivemind-poc 10.77.0.1 /mnt/nfs']);
+    [1, submission.files[1].content, 'cc -o poc poc.c', null]);
 
   const pythonOnly = { ...submission, files: [submission.files[0], submission.files[2]] };
   const pythonAnswer = structuredClone(answer);
@@ -261,7 +262,8 @@ test('classifies CLI execution failures without exposing diagnostics', async t =
   t.after(() => fs.rmSync(path.dirname(nonExecutable), { recursive: true, force: true }));
   fs.writeFileSync(nonExecutable, '#!/bin/sh\nexit 0\n', { mode: 0o600 });
   await assert.rejects(reviewSubmissionWithCodex(submission, options(nonExecutable)),
-    error => error instanceof CodexReviewError && error.code === 'spawn_failed');
+    error => process.platform === 'win32' ? error instanceof VerifierUnavailableError :
+      error instanceof CodexReviewError && error.code === 'spawn_failed');
   const overflowing = fakeCli(t, answer);
   fs.appendFileSync(overflowing, "process.stdout.write('x'.repeat(4_100_000));\n");
   await assert.rejects(reviewSubmissionWithCodex(submission, options(overflowing)),
@@ -311,7 +313,8 @@ test('nonzero-exit diagnostics summarize only fixed enums and structured error c
   const killed = fakeCli(t, answer);
   fs.appendFileSync(killed, "process.kill(process.pid, 'SIGTERM');\n");
   await assert.rejects(reviewSubmissionWithCodex(submission, options(killed)), error =>
-    error.code === 'cli_nonzero_exit' && error.diagnostic.exit_code === 'signal' && error.diagnostic.signal === 'term');
+    error.code === 'cli_nonzero_exit' && (process.platform === 'win32' ||
+      error.diagnostic.exit_code === 'signal' && error.diagnostic.signal === 'term'));
   const truncated = fakeCli(t, answer);
   fs.appendFileSync(truncated, "process.stderr.write('x'.repeat(70_000) + ' Rate limit exceeded'); process.exit(1);\n");
   await assert.rejects(reviewSubmissionWithCodex(submission, options(truncated)), error =>

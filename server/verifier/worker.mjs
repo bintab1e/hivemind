@@ -1,21 +1,18 @@
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 import { canonicalArtifacts } from './canonical.mjs';
-import { symbolizeKasanFrames } from './symbolize.mjs';
-import { runTwoVmReproduction } from './qemu/run.mjs';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const MAX_RESPONSE = 12_000_000;
 const MAX_FILE = 2_000_000;
 const MAX_REVIEW_FILE = 600_000;
-const MAX_SERIAL = 600_000;
-const NFS_VERSIONS = new Set(['3', '4', '4.1', '4.2']);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class WorkerError extends Error {
@@ -26,31 +23,43 @@ function configuration(env) {
   const config = {
     socketPath: env.HIVEMIND_VERIFIER_SOCKET,
     cliPath: env.HIVEMIND_CODEX_CLI,
-    kernelImage: env.HIVEMIND_QEMU_KERNEL,
-    vmlinuxImage: env.HIVEMIND_QEMU_VMLINUX,
-    kernelInfoPath: env.HIVEMIND_QEMU_KERNEL_INFO,
     kernelSource: env.HIVEMIND_KERNEL_SOURCE,
-    rootfsImage: env.HIVEMIND_QEMU_ROOTFS,
+    kernelStableSource: env.HIVEMIND_KERNEL_STABLE_SOURCE,
     workRoot: env.HIVEMIND_VERIFIER_WORK_ROOT || os.tmpdir(),
   };
-  if (Object.values(config).some(value => typeof value !== 'string' || !path.isAbsolute(value))) throw new WorkerError('not_configured');
+  if ([config.socketPath, config.cliPath, config.kernelSource, config.workRoot]
+    .some(value => typeof value !== 'string' || !path.isAbsolute(value))
+    || (config.kernelStableSource !== undefined && !path.isAbsolute(config.kernelStableSource))) {
+    throw new WorkerError('not_configured');
+  }
   return config;
 }
 
 export function stableWorkerId(config, hostname = os.hostname()) {
-  let targetCommit;
-  try { targetCommit = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8')).sourceCommit; }
-  catch { throw new WorkerError('kernel_commit_unavailable'); }
-  if (!/^[a-f0-9]{40}$/.test(targetCommit || '')) throw new WorkerError('kernel_commit_unavailable');
   return createHash('sha256')
-    .update(JSON.stringify([hostname, config.workRoot, config.kernelInfoPath, targetCommit]))
+    .update(JSON.stringify([hostname, config.workRoot]))
     .digest('hex').slice(0, 32);
+}
+
+function sourceTargets(config) {
+  if (config.sourceTargets) return new Map(Object.entries(config.sourceTargets));
+  const targets = new Map();
+  for (const source of [config.kernelSource, config.kernelStableSource].filter(Boolean)) {
+    let commit;
+    try { commit = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 }).trim(); }
+    catch { throw new WorkerError('source_commit_unavailable'); }
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new WorkerError('source_commit_unavailable');
+    targets.set(commit, source);
+  }
+  if (!targets.size) throw new WorkerError('source_commit_unavailable');
+  return targets;
 }
 
 export function postJson(socketPath, endpoint, body) {
   if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail', '/progress', '/heartbeat',
     '/primitive/claim', '/primitive/complete', '/primitive/fail', '/primitive/heartbeat',
-    '/duplicate/candidates', '/duplicate/result', '/duplicate/internal-candidates', '/duplicate/internal-result'].includes(endpoint)) throw new WorkerError('invalid_request');
+    '/duplicate/candidates', '/duplicate/result', '/duplicate/internal-candidates', '/duplicate/internal-result',
+    '/same-root-candidates'].includes(endpoint)) throw new WorkerError('invalid_request');
   const encoded = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({ socketPath, path: endpoint, method: 'POST', timeout: 30_000,
@@ -103,12 +112,6 @@ function decodeJob(job) {
     existing_finding: existing ?? null };
 }
 
-function version(value) {
-  const match = /^(?:NFS\s*v)?(3|4(?:\.0|\.1|\.2)?)$/i.exec(String(value || '').trim());
-  const normalized = match?.[1] === '4.0' ? '4' : match?.[1];
-  return NFS_VERSIONS.has(normalized) ? normalized : null;
-}
-
 function selectedPoc(review, files) {
   const poc = review.normalized?.poc;
   if (!poc || !Number.isInteger(poc.source_index) || poc.source_index < 0 || poc.source_index >= files.length) return null;
@@ -119,18 +122,7 @@ function selectedPoc(review, files) {
   return poc;
 }
 
-function serialExcerpt(file, startOffset) {
-  const bytes = fs.readFileSync(file);
-  if (bytes.length > 8_000_000) throw new WorkerError('serial_too_large');
-  if (!Number.isInteger(startOffset) || startOffset < 0 || startOffset > bytes.length) throw new WorkerError('invalid_serial_offset');
-  const afterPoc = bytes.subarray(startOffset);
-  if (afterPoc.length <= MAX_SERIAL) return afterPoc.toString('utf8');
-  const signature = afterPoc.indexOf('BUG: KASAN:');
-  const start = signature < 0 ? afterPoc.length - MAX_SERIAL : Math.max(0, signature - 1024);
-  return afterPoc.subarray(start, start + MAX_SERIAL).toString('utf8');
-}
-
-const inconclusive = reason => ({ status: 'inconclusive', reason });
+const notRun = { status: 'not_run', reason: 'Static screening only; no server PoC or VM run' };
 
 function safeCodexDiagnostic(value) {
   if (!value || typeof value !== 'object') return '';
@@ -156,112 +148,63 @@ function safeCodexDiagnostic(value) {
 }
 
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
-  relevanceReviewer = reviewReproductionWithCodex, sameRootReviewer = reviewSameRootCauseWithCodex,
-  symbolizer = symbolizeKasanFrames, runner = runTwoVmReproduction,
+  sameRootReviewer = reviewSameRootCauseWithCodex, candidateLookup = async () => ({ candidates: [], truncated: false }),
   onPhase = async () => {} } = {}) {
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
-  let reproduction = inconclusive('Reproduction was not run');
-  let serverSerial = '';
   let artifacts;
-  let privateDir;
   let infrastructureError;
   let infrastructureDiagnostic;
   try {
     const submission = decodeJob(job);
-    const kernelInfo = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8'));
-    const targetCommit = kernelInfo.sourceCommit;
-    if (!/^[a-f0-9]{40}$/.test(targetCommit || '') || submission.metadata?.repo_commit && submission.metadata.repo_commit !== targetCommit) {
-      return { review, reproduction: inconclusive('Submitted commit does not match the configured kernel'), server_serial: '' };
-    }
-    if (!/^[a-f0-9]{64}$/.test(kernelInfo.vmlinuxSha256 || '')) {
-      return { review, reproduction: inconclusive('Built vmlinux is missing SHA-pinned debug information'), server_serial: '' };
-    }
+    const targetCommit = submission.metadata?.repo_commit;
+    const source = sourceTargets(config).get(targetCommit);
+    if (!source || !/^[a-f0-9]{40}$/.test(targetCommit)) return { review, reproduction: notRun };
     await onPhase('static_review');
-    const trustedSource = await sourceLoader(config.kernelSource, targetCommit, submission);
+    const trustedSource = await sourceLoader(source, targetCommit, submission);
     review = await reviewer(submission, { cliPath: config.cliPath, trustedSource });
-    review.relevance = { verdict: 'uncertain', reason: 'Reproduction was not observed', trace_line: null,
-      source_path: null, source_line: null, poc_line: null, symbolized_path: null, symbolized_line: null };
-    if (review.verdict !== 'likely') return { review, reproduction: inconclusive('Static review did not support reproduction'), server_serial: '' };
+    if (review.verdict !== 'likely' || review.integrity?.verdict !== 'clear') return { review, reproduction: notRun };
     if (review.grounding?.source_commit !== targetCommit || !Array.isArray(review.grounding.evidence) ||
         !review.grounding.evidence.some(item => item.path === review.normalized?.file_path &&
           trustedSource.files.some(file => file.path === item.path && file.lines.some(line => line.number === item.line && line.text === item.text)))) {
-      return { review, reproduction: inconclusive('Static review lacks trusted source evidence'), server_serial: '' };
+      review.verdict = 'uncertain';
+      review.reason = 'Static review lacks trusted source evidence';
+      return { review, reproduction: notRun };
     }
     if (submission.metadata.existing_management_id) {
       if (!submission.existing_finding?.report) {
         review.same_root_cause = { verdict: 'uncertain', reason: 'Existing finding report is unavailable' };
-        return { review, reproduction: inconclusive('Existing root cause cannot be compared'), server_serial: '' };
+        return { review, reproduction: notRun };
       }
       review.same_root_cause = await sameRootReviewer(submission.existing_finding, review,
         { cliPath: config.cliPath, trustedSource });
       if (review.same_root_cause.verdict !== 'same') {
-        return { review, reproduction: inconclusive('New submission does not establish the same root cause'), server_serial: '' };
+        return { review, reproduction: notRun };
       }
     }
     const poc = selectedPoc(review, submission.files);
-    if (!poc) return { review, reproduction: inconclusive('No original userspace PoC was selected'), server_serial: '' };
-    const submittedVersion = submission.metadata?.nfs_version;
-    const reviewedVersion = review.normalized?.nfs_version;
-    const preAuth = review.normalized?.pre_auth;
-    const preAuthMode = preAuth && reviewedVersion == null && review.normalized.permission === 'Pre-auth' &&
-      !version(submittedVersion) &&
-      review.grounding.evidence.some(item => item.path === preAuth.source_path && item.line === preAuth.source_line) &&
-      Number.isInteger(preAuth.poc_line) && preAuth.poc_line > 0 && poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim();
-    const nfsVersion = preAuthMode ? null : version(submittedVersion) || version(reviewedVersion);
-    if (!preAuthMode && (!nfsVersion || preAuth || submittedVersion && version(submittedVersion) !== nfsVersion ||
-        reviewedVersion && version(reviewedVersion) !== nfsVersion)) {
-      return { review, reproduction: inconclusive('NFS version is missing, ambiguous, or disagrees with static review'), server_serial: '' };
-    }
-    privateDir = fs.mkdtempSync(path.join(config.workRoot, 'hv-'));
-    fs.chmodSync(privateDir, 0o700);
-    const bundleDir = path.join(privateDir, 'bundle');
-    fs.mkdirSync(bundleDir, { mode: 0o700 });
-    fs.writeFileSync(path.join(bundleDir, poc.filename), poc.source, { mode: 0o600 });
-    fs.writeFileSync(path.join(bundleDir, 'manifest.json'), JSON.stringify({
-      schemaVersion: 1, project: 'knfsd', targetCommit, poc: poc.filename, files: [],
-      ...(preAuthMode ? { mount: false, run: ['@BINARY@', '@SERVER@'] } : { nfsVersion, mount: true }),
-      expected: { stream: 'server', contains: 'BUG: KASAN:' },
-    }), { mode: 0o600 });
-    const outputDir = path.join(privateDir, 'output');
-    await onPhase('qemu_reproduction');
-    const result = await runner({ bundleDir, kernelImage: config.kernelImage, kernelInfoPath: config.kernelInfoPath,
-      rootfsImage: config.rootfsImage, outputDir });
-    serverSerial = serialExcerpt(result.evidence.serverSerialPath, result.observation?.serverEvidenceStartOffset);
-    const { evidence, ...portable } = result;
-    reproduction = { ...portable, nfsVersion, mount: !preAuthMode };
-    if (result.status === 'observed' && (result.kernelCommit !== targetCommit || result.observation?.guestCompleted !== true ||
-        result.observation?.targetCommitMatch !== true || result.observation?.pocStarted !== true ||
-        result.observation?.baselineClean !== true || result.observation?.serverEvidenceAfterPoc !== true)) {
-      reproduction = inconclusive('Server KASAN evidence did not follow a clean PoC baseline on the expected kernel');
-    }
-    if (reproduction.status === 'observed' && !serverSerial.includes('BUG: KASAN:')) reproduction = inconclusive('Server KASAN trace is missing');
-    if (reproduction.status === 'observed' && serverSerial.includes('BUG: KASAN:')) {
-      await onPhase('trace_review');
-      const symbolizedFrames = await symbolizer({ serverSerial, vmlinuxPath: config.vmlinuxImage, kernelInfo, sourceDir: config.kernelSource });
-      review.relevance = await relevanceReviewer({ review, serverSerial, pocSource: poc.source, trustedSource, symbolizedFrames }, { cliPath: config.cliPath });
-      if (review.relevance.verdict === 'supports') {
-        const selected = symbolizedFrames.filter(frame => frame.trace_line === review.relevance.trace_line)
-          .flatMap(frame => frame.locations).filter(location => location.path === review.normalized.file_path);
-        const unique = [...new Map(selected.map(location => [`${location.path}:${location.line}`, location])).values()];
-        if (unique.length === 1 && review.relevance.source_path === review.normalized.file_path) {
-          review.relevance.symbolized_path = unique[0].path;
-          review.relevance.symbolized_line = unique[0].line;
-        } else {
-          review.relevance = { verdict: 'uncertain', reason: 'Raw KASAN frame does not uniquely resolve to the reviewed source file',
-            trace_line: null, source_path: null, source_line: null, poc_line: null, symbolized_path: null, symbolized_line: null };
-        }
+    if (!poc) return { review, reproduction: notRun };
+    if (!submission.metadata.existing_management_id) {
+      const candidates = await candidateLookup({ project: submission.project, file_path: review.normalized.file_path,
+        code_refs: review.normalized.code_refs });
+      const matches = [];
+      let uncertain = false;
+      for (const candidate of candidates.candidates || []) {
+        if (!candidate.report) { uncertain = true; continue; }
+        const comparison = await sameRootReviewer(candidate, review, { cliPath: config.cliPath, trustedSource });
+        if (comparison.verdict === 'same') matches.push(candidate.management_id);
+        else if (comparison.verdict !== 'different') uncertain = true;
       }
-      if (review.relevance.verdict !== 'supports') reproduction = inconclusive('KASAN trace relevance was not confirmed');
-      else if (reproduction.status === 'observed') {
-        artifacts = canonicalArtifacts({ review, trustedSource, poc, serverSerial, kernelCommit: targetCommit, nfsVersion,
-          preAuth: Boolean(preAuthMode) });
-        if (!artifacts) reproduction = inconclusive('Canonical report lacks grounded source, PoC, or relevant server KASAN evidence');
-        else {
-          review.normalized.title = artifacts.title;
-          review.normalized.report = artifacts.report.content;
-          review.normalized.nfs_version = nfsVersion;
-        }
+      if (candidates.truncated || uncertain || matches.length > 1) {
+        review.same_root_cause = { verdict: 'uncertain', reason: 'Multiple or incomplete same-root candidates require manual review' };
+        review.verdict = 'uncertain';
+        return { review, reproduction: notRun };
       }
+      if (matches.length === 1) review.same_root_cause = { verdict: 'same', management_id: matches[0], reason: 'Grounded same-root comparison' };
+    }
+    artifacts = canonicalArtifacts({ review, trustedSource, poc, kernelCommit: targetCommit });
+    if (!artifacts) {
+      review.verdict = 'uncertain';
+      review.reason = 'Static review lacks a grounded canonical report, original C PoC, or submitted log';
     }
   } catch (error) {
     const known = error instanceof WorkerError || error instanceof CodexReviewError || error instanceof VerifierUnavailableError;
@@ -269,29 +212,25 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       infrastructureError = error.code;
       if (error instanceof CodexReviewError) infrastructureDiagnostic = error.diagnostic;
     }
-    reproduction = inconclusive(known ? error.code : 'Verifier environment unavailable');
-    if (review.verdict !== 'likely') review = { verdict: 'uncertain',
+    review = { verdict: 'uncertain', integrity: { verdict: 'uncertain', reason: 'Static review unavailable' },
       reason: known ? `${error.code}${error instanceof CodexReviewError ? safeCodexDiagnostic(error.diagnostic) : ''}`
         : 'Static review unavailable', normalized: null, model: 'codex' };
-  } finally {
-    if (privateDir) fs.rmSync(privateDir, { recursive: true, force: true });
   }
-  return { review, reproduction, server_serial: serverSerial, ...(artifacts ? { artifacts } : {}),
+  return { review, reproduction: notRun, ...(artifacts ? { artifacts } : {}),
     ...(infrastructureError ? { infrastructure_error: infrastructureError,
       ...(infrastructureDiagnostic ? { infrastructure_diagnostic: infrastructureDiagnostic } : {}) } : {}) };
 }
 
-export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer,
-  sameRootReviewer, symbolizer, runner, workerId = null } = {}) {
-  let targetCommit;
-  try {
-    targetCommit = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8')).sourceCommit;
-  } catch { throw new WorkerError('kernel_commit_unavailable'); }
-  if (!/^[a-f0-9]{40}$/.test(targetCommit || '')) throw new WorkerError('kernel_commit_unavailable');
-  const claimed = await transport(config.socketPath, '/claim', { target_commit: targetCommit });
+export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader,
+  sameRootReviewer, workerId = null } = {}) {
+  const targets = sourceTargets(config);
+  const supportedCommits = [...targets.keys()];
+  const claimed = await transport(config.socketPath, '/claim', { supported_commits: supportedCommits });
   if (!claimed || !Object.hasOwn(claimed, 'job')) throw new WorkerError('invalid_response');
+  const targetCommit = claimed.job?.metadata?.repo_commit ?? null;
+  if (claimed.job && !targets.has(targetCommit)) throw new WorkerError('invalid_response');
   const heartbeat = (submissionId = null, leaseToken = null) => workerId
-    ? transport(config.socketPath, '/heartbeat', { worker_id: workerId, target_commit: targetCommit,
+    ? transport(config.socketPath, '/heartbeat', { worker_id: workerId, target_commit: submissionId ? targetCommit : null,
       submission_id: submissionId, ...(leaseToken ? { lease_token: leaseToken } : {}) }).catch(() => {})
     : Promise.resolve();
   if (!claimed.job) { await heartbeat(); return false; }
@@ -306,7 +245,8 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     : Promise.resolve();
   try {
     const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader,
-      relevanceReviewer, sameRootReviewer, symbolizer, runner, onPhase });
+      sameRootReviewer, candidateLookup: async request =>
+        transport(config.socketPath, '/same-root-candidates', request), onPhase });
     if (!result.infrastructure_error) await onPhase('finalizing');
     if (Array.isArray(result.review?.normalized?.logs)) {
       result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);

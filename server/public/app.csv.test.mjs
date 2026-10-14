@@ -90,6 +90,11 @@ test('registry CSV preserves spreadsheet columns, Korean text, quoted data, and 
       target: 'knfsd', registration_status: 'verified',
       verified_impacts: ['kasan_read', 'kasan_write', 'lpe'],
     },
+    {
+      event_id: 'static', origin: 'agent', management_id: 'A-044', title: '정적 검토 후보',
+      target: 'knfsd', registration_status: 'verified', dynamic_status: 'not_run',
+      verified_impacts: [], claimed_impacts: ['kasan_read'],
+    },
   ]));
   assert.deepEqual(rows[0], [
     'No.', '관리 번호', '취약점 명', '대상', '옵션', '권한', '제보 프로젝트',
@@ -108,6 +113,8 @@ test('registry CSV preserves spreadsheet columns, Korean text, quoted data, and 
   assert.equal(rows[2][index('KASAN Write')], '✓');
   assert.equal(rows[2][index('LPE')], '✓');
   assert.equal(rows[2][index('RCE')], '—');
+  assert.equal(rows[3][index('KASAN Read')], '◇', 'submitted evidence is distinct from server reproduction');
+  assert.equal(rows[3][index('LPE')], '—');
 });
 
 test('registry CSV escapes spreadsheet formulas from finding data', () => {

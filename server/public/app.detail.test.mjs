@@ -6,7 +6,7 @@ import vm from 'node:vm';
 test('finding detail appends only available primitive review under the existing opinion', () => {
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const start = source.indexOf('function detailFact(');
-  const end = source.indexOf('async function showDetailTab()', start);
+  const end = source.indexOf('async function loadFindingRevisions(', start);
   assert.ok(start > 0 && end > start);
 
   const elements = new Map();
@@ -17,7 +17,7 @@ test('finding detail appends only available primitive review under the existing 
     replaceChildren(...children) { this.children = children; },
     addEventListener(name, listener) { this.listeners[name] = listener; },
   });
-  for (const id of ['detail-title', 'detail-subtitle', 'detail-summary']) elements.set(id, makeElement('div'));
+  for (const id of ['detail-title', 'detail-subtitle', 'detail-summary', 'detail-revision-controls']) elements.set(id, makeElement('div'));
   elements.set('detail', { open: false, querySelector: () => ({ hidden: true }), showModal() { this.open = true; } });
   const originalCreateElement = makeElement;
   const createElement = tagName => {
@@ -46,6 +46,7 @@ test('finding detail appends only available primitive review under the existing 
     const accessLabels = {};
     const previousFinding = () => null;
     const showDetailTab = () => {};
+    const loadFindingRevisions = () => {};
     ${source.slice(start, end)}
     globalThis.openFinding = openFinding;
   `, context);
@@ -122,4 +123,61 @@ test('finding detail appends only available primitive review under the existing 
   assert.equal(internalMatch.children[1].textContent, '2026-10-13T03:00:00Z');
   assert.equal(internalMatch.children[2].textContent, 'B-021');
   assert.equal(elements.get('detail-summary').children.some(item => item.children[0]?.textContent === '공개 자료 중복 검사'), false);
+});
+
+test('finding detail can select an earlier approved report without changing the current record', async () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('async function loadFindingRevisions(');
+  const end = source.indexOf('const queuePhaseLabels =', start);
+  const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(html, /id="detail-revision"/);
+  const elements = new Map();
+  const makeElement = tagName => ({ tagName, children: [], textContent: '', dataset: {},
+    append(...items) { this.children.push(...items); },
+    replaceChildren() { this.children = []; },
+    setAttribute() {}, removeAttribute() {},
+  });
+  for (const id of ['detail-revision-controls', 'detail-revision', 'detail-content']) elements.set(id, makeElement('div'));
+  const requests = [];
+  const newer = 'a'.repeat(64), older = 'b'.repeat(64);
+  const responses = new Map([
+    ['/api/registry/A-005/revisions', { revisions: [
+      { submission_id: newer, completed_at: '2026-10-14', title: 'latest' },
+      { submission_id: older, completed_at: '2026-10-13', title: 'earlier' },
+    ] }],
+    [`/api/registry/A-005/revisions/${older}/artifacts`, { artifacts: [{ name: 'report.md', size: 14 }] }],
+    [`/api/registry/A-005/revisions/${older}/artifacts/report.md`, 'earlier report'],
+  ]);
+  const finding = { management_id: 'A-005', origin: 'history' };
+  const state = { finding, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, detailId: 0 };
+  const context = { testState: state, document: {
+    getElementById: id => elements.get(id), createElement: makeElement, querySelectorAll: () => [],
+  }, testApi: async url => {
+    requests.push(url);
+    assert.ok(responses.has(url), `Unexpected request: ${url}`);
+    const response = responses.get(url);
+    return { json: async () => response, text: async () => response };
+  } };
+  vm.runInNewContext(`
+    const state = globalThis.testState;
+    const $ = id => document.getElementById(id);
+    const element = (tag, className = '', text) => { const item = document.createElement(tag); item.className = className; if (text !== undefined) item.textContent = String(text); return item; };
+    const clear = item => item.replaceChildren();
+    const when = value => value || '—';
+    const number = value => String(value);
+    const api = globalThis.testApi;
+    ${source.slice(start, end)}
+    globalThis.loadRevisions = loadFindingRevisions;
+    globalThis.showTab = showDetailTab;
+  `, context);
+  await context.loadRevisions(finding);
+  assert.equal(elements.get('detail-revision-controls').hidden, false);
+  assert.equal(elements.get('detail-revision').children.length, 3);
+  state.detailRevision = older;
+  await context.showTab();
+  assert.equal(elements.get('detail-content').children[0].children[0].children[0].textContent, 'report.md');
+  assert.equal(elements.get('detail-content').children[0].children[1].textContent, 'earlier report');
+  assert.deepEqual(requests, ['/api/registry/A-005/revisions',
+    `/api/registry/A-005/revisions/${older}/artifacts`, `/api/registry/A-005/revisions/${older}/artifacts/report.md`]);
+  assert.equal(state.finding, finding);
 });

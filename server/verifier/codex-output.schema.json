@@ -2,10 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reason", "normalized"],
+  "required": ["verdict", "reason", "integrity", "normalized"],
   "properties": {
     "verdict": { "type": "string", "enum": ["likely", "unlikely", "uncertain"] },
     "reason": { "type": "string" },
+    "integrity": { "type": "object", "additionalProperties": false,
+      "required": ["verdict", "reason"], "properties": {
+        "verdict": { "type": "string", "enum": ["clear", "suspect", "uncertain"] },
+        "reason": { "type": "string" }
+      }
+    },
     "normalized": {
       "type": "object",
       "additionalProperties": false,

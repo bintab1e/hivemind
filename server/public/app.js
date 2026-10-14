@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
@@ -179,13 +179,11 @@ const reviewLabel = finding => {
   if (finding.review_verdict === 'uncertain') return revision ? '수정본 추가 검토' : '추가 검토';
   return revision ? '수정본 검증 대기' : '검증 대기';
 };
-const impactEvidence = (finding, present) => {
-  if (!present) return '기록 없음';
-  if (!isRegistered(finding)) return '제출 주장, 정적 검증 대기';
-  if (finding.origin === 'history' && finding.latest_verification?.result === 'verified') return '서버 2VM 재현으로 확인';
-  return finding.review_provider === 'codex_qemu'
-    ? '서버 2VM 재현으로 확인'
-    : '제출 증빙 포함, Kimi likely 정적 판정. 서버 독립 재현 아님';
+const impactEvidence = (finding, key) => {
+  if ((finding.verified_impacts || []).includes(key)) return isRegistered(finding)
+    ? '서버 재현으로 확인된 기록' : '기존 기록에 기재됨 · 서버 독립 재현 없음';
+  if ((finding.claimed_impacts || []).includes(key)) return '제출 자료에 나타남 · 서버 독립 재현 없음';
+  return '기록 없음';
 };
 
 function renderFindingStats(findings) {
@@ -246,8 +244,7 @@ const findingRowNumber = (finding, index) => finding.origin === 'history' && Num
   ? historicalNoOffset[finding.target] + finding.number
   : index + 1;
 const registryImpactMark = (finding, key) => (finding.verified_impacts || []).includes(key)
-  ? (isRegistered(finding) ? '✓' : '◇')
-  : '—';
+  ? (isRegistered(finding) ? '✓' : '◇') : (finding.claimed_impacts || []).includes(key) ? '◇' : '—';
 const registryCsvCell = value => {
   const text = String(value ?? '');
   const safe = /^[\s\uFEFF]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text) ? `'${text}` : text;
@@ -522,10 +519,10 @@ function renderFindings() {
     row.append(element('td', 'registry-row-number', number(serial)));
     for (const [key] of findingColumns) row.append(findingCell(finding, key));
     const verified = new Set(finding.verified_impacts || []);
+    const claimed = new Set(finding.claimed_impacts || []);
     for (const [key, label] of impacts) {
-      const present = verified.has(key);
-      const cell = element('td', `impact-td ${present && isRegistered(finding) ? 'verified' : present ? 'claimed' : ''}`, registryImpactMark(finding, key));
-      const evidence = impactEvidence(finding, present);
+      const cell = element('td', `impact-td ${verified.has(key) && isRegistered(finding) ? 'verified' : verified.has(key) || claimed.has(key) ? 'claimed' : ''}`, registryImpactMark(finding, key));
+      const evidence = impactEvidence(finding, key);
       cell.setAttribute('aria-label', `${label}: ${evidence}`);
       cell.title = `${label}: ${evidence}`;
       row.append(cell);
@@ -800,6 +797,9 @@ function appendDuplicateReviews(finding) {
 function openFinding(finding, tab = 'report') {
   state.finding = finding;
   state.detailTab = tab;
+  state.detailRevision = '';
+  $('detail-revision-controls').hidden = true;
+  loadFindingRevisions(finding);
   $('detail-title').textContent = finding.title;
   const displayDate = finding.origin === 'history' ? finding.found_date || '—' : when(finding.created_at || finding.found_date);
   $('detail-subtitle').textContent = `${finding.management_id || '관리번호 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
@@ -863,6 +863,49 @@ function openFinding(finding, tab = 'report') {
   showDetailTab();
 }
 
+async function loadFindingRevisions(finding) {
+  const id = ++state.detailRevisionRequestId;
+  if (!finding.management_id) return;
+  try {
+    const { revisions } = await api(`/api/registry/${encodeURIComponent(finding.management_id)}/revisions`).then(response => response.json());
+    if (id !== state.detailRevisionRequestId || state.finding !== finding || !Array.isArray(revisions)) return;
+    const select = $('detail-revision');
+    clear(select);
+    const current = element('option', '', finding.origin === 'history' ? '현재 자료 · 원본 기록 포함' : '현재 자료');
+    current.value = '';
+    select.append(current);
+    for (const revision of revisions) {
+      const option = element('option', '', `${when(revision.completed_at)} · ${revision.submission_id.slice(0, 8)}`);
+      option.value = revision.submission_id;
+      select.append(option);
+    }
+    select.value = '';
+    $('detail-revision-controls').hidden = revisions.length <= 1;
+  } catch { if (id === state.detailRevisionRequestId) $('detail-revision-controls').hidden = true; }
+}
+
+async function renderCanonicalArtifacts(content, base, artifacts, tab, id) {
+  clear(content);
+  const names = tab === 'report' ? ['report.md'] : tab === 'poc' ? ['poc.c', 'reproduction.md'] : ['kasan.log', 'evidence.log'];
+  for (const name of names) {
+    const file = artifacts.find(item => item.name === name);
+    if (!file) continue;
+    const url = `${base}/${name}`;
+    const section = element('section', 'detail-section artifact-section');
+    const header = element('div', 'artifact-head');
+    const link = element('a', 'detail-link', '다운로드');
+    link.href = url;
+    link.download = name;
+    header.append(element('h3', '', name), element('span', 'muted', `${number(file.size)} B`), link);
+    section.append(header);
+    const preview = element('pre', '', await (await api(url)).text());
+    if (id !== state.detailId) return;
+    section.append(preview);
+    content.append(section);
+  }
+  if (!content.children.length) content.append(element('p', '', '선택한 검증 자료가 없습니다.'));
+}
+
 async function showDetailTab() {
   const finding = state.finding;
   const tab = state.detailTab;
@@ -875,6 +918,13 @@ async function showDetailTab() {
   clear(content);
   content.append(element('p', '', '자료를 불러오는 중…'));
   try {
+    if (state.detailRevision) {
+      const base = `/api/registry/${encodeURIComponent(finding.management_id)}/revisions/${encodeURIComponent(state.detailRevision)}/artifacts`;
+      const { artifacts } = await api(base).then(response => response.json());
+      if (id !== state.detailId) return;
+      await renderCanonicalArtifacts(content, base, artifacts || [], tab, id);
+      return;
+    }
     if (finding.origin === 'history') {
       const base = `/api/registry/history/${encodeURIComponent(finding.management_id)}/artifacts`;
       const { artifacts } = await (await api(base)).json();
@@ -925,24 +975,7 @@ async function showDetailTab() {
     });
     if (id !== state.detailId) return;
     if (canonical.artifacts?.length) {
-      clear(content);
-      const names = tab === 'report' ? ['report.md'] : tab === 'poc' ? ['poc.c', 'reproduction.md'] : ['kasan.log'];
-      for (const name of names) {
-        const file = canonical.artifacts.find(item => item.name === name);
-        if (!file) continue;
-        const url = `${canonicalBase}/${name}`;
-        const section = element('section', 'detail-section artifact-section');
-        const header = element('div', 'artifact-head');
-        const link = element('a', 'detail-link', '다운로드');
-        link.href = url;
-        link.download = name;
-        header.append(element('h3', '', name), element('span', 'muted', `${number(file.size)} B`), link);
-        section.append(header);
-        const preview = element('pre', '', await (await api(url)).text());
-        if (id !== state.detailId) return;
-        section.append(preview);
-        content.append(section);
-      }
+      await renderCanonicalArtifacts(content, canonicalBase, canonical.artifacts, tab, id);
       return;
     }
     const endpoint = tab === 'report' ? `/api/events/${encodeURIComponent(finding.event_id)}` : `/api/events/${encodeURIComponent(finding.event_id)}/${tab === 'verification' ? 'kasan' : tab}`;
@@ -1010,9 +1043,12 @@ function openQueueDetail(row) {
 
 function renderQueueList(id, rows, emptyMessage) {
   const container = $(id);
+  const key = id.slice('queue-'.length);
+  const pages = Math.max(1, Math.ceil(rows.length / 5));
+  const page = state.queuePages[key] = Math.min(state.queuePages[key], pages);
   clear(container);
-  if (!rows.length) { container.append(element('div', 'table-empty', emptyMessage)); return; }
-  for (const row of rows) {
+  if (!rows.length) container.append(element('div', 'table-empty', emptyMessage));
+  for (const row of rows.slice((page - 1) * 5, page * 5)) {
     const item = element('button', 'queue-entry');
     item.type = 'button';
     item.dataset.submissionId = row.submission_id;
@@ -1021,11 +1057,16 @@ function renderQueueList(id, rows, emptyMessage) {
     item.addEventListener('click', () => openQueueDetail(row));
     container.append(item);
   }
+  renderPagination(`${id}-pagination`, page, pages, next => {
+    state.queuePages[key] = next;
+    renderQueueList(id, rows, emptyMessage);
+  });
 }
 
 function renderVerificationQueue() {
   for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked']) clear($(id));
   if (state.queueError) {
+    for (const id of ['queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination']) $(id).hidden = true;
     if ($('queue-detail').open) $('queue-detail').close();
     $('queue-updated').textContent = '조회 실패';
     $('queue-worker-count').textContent = '';
@@ -1055,14 +1096,15 @@ function renderVerificationQueue() {
     const card = element('div', 'queue-worker-card');
     const head = element('div', 'queue-worker-heading');
     const primitive = worker.role === 'primitive';
-    const track = (state.data?.tracks || []).find(item => item.repo_commit === worker.target_commit);
+    const current = queue.active.find(row => row.submission_id === worker.current_submission_id);
+    const targetCommit = current?.target_commit || worker.target_commit;
+    const track = (state.data?.tracks || []).find(item => item.repo_commit === targetCommit);
     const target = primitive ? '프리미티브 검토'
       : track ? `${track.label || track.track_id} · ${track.version_id}`
-        : worker.target_commit ? `커밋 ${worker.target_commit.slice(0, 12)}` : '대상 커밋 없음';
+        : targetCommit ? `커밋 ${targetCommit.slice(0, 12)}` : '공용 검증 에이전트';
     head.append(element('strong', 'queue-worker-target', target));
     head.append(element('span', `queue-badge ${worker.status || ''}`, queueWorkerLabels[worker.status] || worker.status || '상태 알 수 없음'));
     card.append(head);
-    const current = queue.active.find(row => row.submission_id === worker.current_submission_id);
     const currentId = primitive ? worker.current_finding_id : worker.current_submission_id;
     const currentTitle = primitive
       ? [worker.current_management_id, worker.current_title].filter(Boolean).join(' · ') || currentId
@@ -1070,7 +1112,7 @@ function renderVerificationQueue() {
     if (currentId) card.append(element('div', 'queue-worker-current', `${worker.status === 'offline' ? '마지막 담당' : '담당'} · ${currentTitle}`));
     if (primitive) card.append(element('div', 'queue-worker-meta', `대기 ${number(worker.pending_count)}건`));
     card.append(element('div', 'queue-worker-meta', `워커 ${worker.worker_id ? worker.worker_id.slice(0, 12) : '—'}`));
-    if (!primitive) card.append(element('div', 'queue-worker-meta', `커널 ${worker.target_commit || '—'}`));
+    if (!primitive && targetCommit) card.append(element('div', 'queue-worker-meta', `커널 ${targetCommit}`));
     card.append(element('div', 'queue-worker-meta', `마지막 응답 ${when(worker.last_seen_at)}`));
     $('queue-workers').append(card);
   }
@@ -1284,6 +1326,7 @@ function selectCoverageAgent(id) {
   loadCoverage().catch(showError);
 }
 for (const button of document.querySelectorAll('[data-detail-tab]')) button.addEventListener('click', () => { state.detailTab = button.dataset.detailTab; showDetailTab(); });
+$('detail-revision').addEventListener('change', event => { state.detailRevision = event.target.value; showDetailTab(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
 $('close-queue-detail').addEventListener('click', () => $('queue-detail').close());
 $('queue-detail').addEventListener('close', () => {

@@ -83,8 +83,7 @@ export function initializeRegistry(db) {
   for (const correction of db.prepare("SELECT c.corrects_event_id, c.received_at FROM events c JOIN events f ON f.id = c.corrects_event_id WHERE c.kind = 'correction' AND f.kind = 'finding'").all()) {
     withdrawFinding(db, correction.corrects_event_id, correction.received_at);
   }
-  // A static review is advisory. The submission verifier assigns a number only
-  // after an independently observed two-VM reproduction.
+  // Submission screening may assign a number without claiming dynamic reproduction.
 }
 
 export function registerFinding(db, id, data, createdAt) {
@@ -181,6 +180,7 @@ export function listRegistry(db) {
       file_path: data.file_path || null, code_refs: data.code_refs || [],
       access_requirements: data.access_requirements || [], verified_impacts:
         [...new Set([...(data.verified_impacts || []), ...(approvedVersions.get(row.management_id)?.impacts || [])])],
+      claimed_impacts: data.claimed_impacts || [], dynamic_status: data.dynamic_status ?? null,
       vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command || null,
       kasan_summary: data.kasan_log?.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || null,
     };
@@ -198,13 +198,16 @@ export function listRegistry(db) {
     duplicate_review: duplicateReviews.get(`history:${row.management_id}`) ?? null,
     internal_duplicate_review: internalDuplicateReviews.get(`history:${row.management_id}`) ?? null,
     latest_verification: version ? {
-      result: 'verified', static_verdict: 'likely', reproduction_status: 'observed',
-      kernel_commit: verification?.kernel_commit, observed_impacts: [...impacts],
+      result: verification?.dynamic_status === 'not_run' ? 'static_screened' : 'verified',
+      static_verdict: 'likely', reproduction_status: verification?.dynamic_status ?? 'observed',
+      kernel_commit: verification?.kernel_commit,
+      observed_impacts: verification?.dynamic_status === 'not_run' ? [] : [...impacts],
       reason: version.latest.reason, completed_at: version.latest.completed_at,
     } : earlier ?? null,
     agent_id: version?.latest.agent_id ?? null, created_at: null,
     review_status: version ? 'complete' : null, review_verdict: version ? 'likely' : null,
-    review_provider: version ? 'codex_qemu' : null, review_summary: version?.latest.reason ?? null,
+    review_provider: version ? verification?.dynamic_status === 'not_run' ? 'codex_static' : 'codex_qemu' : null,
+    review_summary: version?.latest.reason ?? null,
     primitive_review_status: null, primitive_review_summary: null,
     primitive_review_completed_at: null,
     registration_status: version || earlier?.result === 'verified' ? 'verified' : 'history',
@@ -212,6 +215,7 @@ export function listRegistry(db) {
     updated_at: row.updated_at ?? row.imported_at, replaces_event_id: null,
     file_path: accepted?.file_path ?? null, code_refs: accepted?.code_refs ?? [],
     access_requirements: [], verified_impacts: [...impacts],
+    claimed_impacts: accepted?.claimed_impacts ?? [], dynamic_status: accepted?.dynamic_status ?? null,
     vm_environment: accepted?.vm_environment ?? null,
     reproduction_command: accepted?.reproduction_command ?? null,
     kasan_summary: accepted?.kasan_summary ?? null,

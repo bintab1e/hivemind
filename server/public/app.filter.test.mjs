@@ -67,8 +67,8 @@ test('new findings include only numbered verified rows and show the right verifi
     { event_id: 'old-ganesha', origin: 'agent', management_id: 'B-021', registration_status: 'verified' },
     { event_id: 'old-libnfs', origin: 'agent', management_id: 'C-001', registration_status: 'verified' },
     { event_id: 'old-history', origin: 'history', management_id: 'B-022', registration_status: 'history' },
-    { event_id: 'knfsd', origin: 'agent', management_id: 'A-043', registration_status: 'verified', review_provider: 'codex_qemu' },
-    { event_id: 'ganesha', origin: 'agent', management_id: 'B-022', registration_status: 'verified' },
+    { event_id: 'knfsd', origin: 'agent', management_id: 'A-043', registration_status: 'verified', review_provider: 'codex_qemu', verified_impacts: ['kasan_read'] },
+    { event_id: 'ganesha', origin: 'agent', management_id: 'B-022', registration_status: 'verified', claimed_impacts: ['kasan_read'] },
     { event_id: 'libnfs', origin: 'agent', management_id: 'C-002', registration_status: 'verified' },
   ];
   const context = { testState: { registry: { findings: rows } }, testView: 'findings' };
@@ -87,15 +87,15 @@ test('new findings include only numbered verified rows and show the right verifi
   assert.equal(isNewFinding(rows[4]), false);
   assert.equal(isNewFinding(rows[5]), false);
   assert.equal(reviewLabel(rows[6]), '2VM 검증 완료');
-  assert.equal(impactEvidence(rows[6], true), '서버 2VM 재현으로 확인');
+  assert.equal(impactEvidence(rows[6], 'kasan_read'), '서버 재현으로 확인된 기록');
   assert.equal(reviewLabel(rows[7]), '정적 검증 통과');
-  assert.match(impactEvidence(rows[7], true), /서버 독립 재현 아님/);
+  assert.match(impactEvidence(rows[7], 'kasan_read'), /서버 독립 재현 없음/);
   const verifiedHistory = { origin: 'history', management_id: 'A-005', registration_status: 'verified',
-    review_provider: null, latest_verification: { result: 'verified' } };
-  assert.equal(impactEvidence(verifiedHistory, true), '서버 2VM 재현으로 확인');
-  assert.match(impactEvidence({ ...verifiedHistory, latest_verification: { result: 'inconclusive' } }, true), /서버 독립 재현 아님/);
-  assert.equal(impactEvidence(rows[0], true), '제출 주장, 정적 검증 대기');
-  assert.equal(impactEvidence(rows[6], false), '기록 없음');
+    review_provider: null, latest_verification: { result: 'verified' }, verified_impacts: ['kasan_read'] };
+  assert.equal(impactEvidence(verifiedHistory, 'kasan_read'), '서버 재현으로 확인된 기록');
+  assert.match(impactEvidence({ ...verifiedHistory, registration_status: 'history' }, 'kasan_read'), /기존 기록에 기재됨/);
+  assert.equal(impactEvidence(rows[0], 'kasan_read'), '기록 없음');
+  assert.equal(impactEvidence(rows[6], 'kasan_write'), '기록 없음');
   context.testView = 'registry';
   assert.equal(visibleFindings().length, rows.length);
 });

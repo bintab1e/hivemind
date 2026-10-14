@@ -49,14 +49,17 @@
           <section class="queue-column" aria-label="검증 대기">
             <div class="coverage-section-heading"><strong>검증 대기</strong><span id="queue-pending-count"></span></div>
             <div id="queue-pending" class="queue-list" role="region" aria-label="검증 대기 중인 신규 취약점" tabindex="0"></div>
+            <nav id="queue-pending-pagination" class="pagination" aria-label="검증 대기 페이지" hidden></nav>
           </section>
           <section class="queue-column" aria-label="검증 중">
             <div class="coverage-section-heading"><strong>검증 중</strong><span id="queue-active-count"></span></div>
             <div id="queue-active" class="queue-list" role="region" aria-label="진행 중인 신규 취약점 검증" tabindex="0"></div>
+            <nav id="queue-active-pagination" class="pagination" aria-label="검증 중 페이지" hidden></nav>
           </section>
           <section class="queue-column" aria-label="반려 · 보완 · 오류">
             <div class="coverage-section-heading"><strong>반려 · 보완 · 오류</strong><span id="queue-blocked-count"></span></div>
             <div id="queue-blocked" class="queue-list" role="region" aria-label="반려되었거나 보완 또는 재시도가 필요한 신규 취약점" tabindex="0"></div>
+            <nav id="queue-blocked-pagination" class="pagination" aria-label="반려 · 보완 · 오류 페이지" hidden></nav>
           </section>
         </div>
       </section>
@@ -101,6 +104,7 @@
   <dialog id="detail" class="detail-dialog" aria-labelledby="detail-title">
     <div class="dialog-top"><div><p class="eyebrow" id="detail-kind">FINDING DETAIL</p><h2 id="detail-title"></h2><p id="detail-subtitle" class="muted"></p></div><button id="close-detail" class="icon-button" type="button" aria-label="닫기">×</button></div>
     <div id="detail-summary" class="detail-summary"></div>
+    <div id="detail-revision-controls" class="detail-revision-controls" hidden><label class="select-field">검증 자료 <select id="detail-revision"><option value="">현재 자료</option></select></label></div>
     <nav class="detail-tabs" aria-label="취약점 자료"><button type="button" data-detail-tab="report">분석 보고서</button><button type="button" data-detail-tab="poc">PoC · 첨부자료</button><button type="button" data-detail-tab="verification">KASAN · 검증 로그</button></nav>
     <div id="detail-content" class="detail-content" role="region" aria-label="선택한 취약점 자료"></div>
   </dialog>

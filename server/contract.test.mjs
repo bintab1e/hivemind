@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseLcov } from './contract.mjs';
+import { hash, parseLcov, validateEvent } from './contract.mjs';
+
+test('public event intake cannot self-declare a server static-screened finding', () => {
+  const markdown = `---\nschema_version: 1\nkind: finding\nversion_id: 7.3-rc7\nrepo_commit: ${'a'.repeat(40)}\ntitle: "NFS source issue"\nscope:\n  - "fs/nfsd/nfs4proc.c"\ncode_refs:\n  - "fs/nfsd/nfs4proc.c:42"\nangle: codex-static-screening\ncreated_at: "2026-10-14T00:00:00Z"\n---\n\n제출자가 만든 보고서.\n`;
+  assert.throws(() => validateEvent({ agent_id: 'analyst', source_path: 'exchange/outbox/analyst/finding.md',
+    markdown, sha256: hash(markdown) }), /Only the server verifier/);
+});
 
 test('marked sparse LCOV reconstructs the full eligible range without zero-hit DA rows', () => {
   const dense = 'TN:agentcov\nSF:fs/nfsd/a.c\nDA:1,0\nDA:2,1\nDA:3,0\nDA:4,1\nLF:4\nLH:2\nend_of_record\n';

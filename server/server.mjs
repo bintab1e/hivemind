@@ -16,6 +16,7 @@ import { getSubmission, getVerifiedArtifact, initializeSubmissions, listSubmissi
 import { startVerifierIpc } from './verifier-ipc.mjs';
 import { initializeDuplicateRegistry } from './duplicate-registry.mjs';
 import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
+import { getRevisionArtifact, listApprovedRevisions, listRevisionArtifacts } from './revisions.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -455,12 +456,16 @@ function dashboard(db, requested = {}) {
   const verifications = attempts.filter(item => item.repo_commit === commit).map(item => ({ event_id: item.id, title: item.title, agent_id: item.agent_id, hypothesis_id: item.verification_of, hypothesis_title: titles.get(item.verification_of) || item.verification_of, verdict: item.verdict, method: item.method, code_refs: readFrontMatter(item.markdown).data.code_refs || [], created_at: item.created_at }));
   const byHypothesis = new Map(hypotheses.map(item => [item.id, item]));
   const activeVerification = new Map(verifications.map(item => [item.event_id, item]));
-  const findings = allEvents.filter(item => item.kind === 'finding' && item.repo_commit === commit && !corrected.has(item.id) && readFrontMatter(item.markdown).data.poc_sha256 && readFrontMatter(item.markdown).data.kasan_sha256).map(item => {
+  const findings = allEvents.filter(item => {
+    if (item.kind !== 'finding' || item.repo_commit !== commit || corrected.has(item.id)) return false;
+    const data = readFrontMatter(item.markdown).data;
+    return data.poc_sha256 && (data.kasan_sha256 || data.evidence_sha256);
+  }).map(item => {
     const data = readFrontMatter(item.markdown).data;
     const hypothesis = byHypothesis.get(item.related_hypothesis_id);
     const evidenceIds = JSON.parse(item.based_on_json);
     const staticReview = db.prepare('SELECT provider, status, verdict, summary, completed_at FROM finding_reviews WHERE finding_id = ?').get(item.id) || null;
-    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || null, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || null, file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || 'KASAN 기록', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), static_review: staticReview, created_at: item.created_at };
+    return { event_id: item.id, title: item.title, verified_impacts: findingImpacts(data), access_requirements: findingAccessWithHistory(allEvents, item, data), agent_id: item.agent_id, hypothesis_id: item.related_hypothesis_id, hypothesis_title: hypothesis?.title || null, hypothesis_agent_id: hypothesis?.agent_id || null, hypothesis_status: hypothesis?.status || null, file_path: data.file_path, code_refs: data.code_refs || [], impact: data.impact, vm_environment: data.vm_environment || null, reproduction_command: data.reproduction_command, kasan_summary: data.kasan_log?.match(/^.*BUG:\s*KASAN:.*$/im)?.[0].trim() || '제출 증거 로그', evidence_event_ids: evidenceIds, evidence_agents: [...new Set(evidenceIds.map(id => activeVerification.get(id)?.agent_id).filter(Boolean))], evidence_active: evidenceIds.every(id => activeVerification.has(id)), static_review: staticReview, created_at: item.created_at };
   });
   const taskMap = new Map();
   for (const row of [...observedLatest].sort((a, b) => a.generated_at.localeCompare(b.generated_at))) for (const task of progressRows(row.progress_md)) taskMap.set(task.id, task.status);
@@ -861,6 +866,21 @@ export async function startServer(options = {}) {
         return send(res, 200, updateRegistryRow(db, id, await readJson(req), dashboardUser));
       }
       const historicalArtifactsMatch = /^\/api\/registry\/history\/([ABC]-\d{3})\/artifacts$/.exec(url.pathname);
+      const revisionsMatch = /^\/api\/registry\/([ABC]-\d{3,})\/revisions$/.exec(url.pathname);
+      if (req.method === 'GET' && revisionsMatch) return send(res, 200, { revisions: listApprovedRevisions(db, revisionsMatch[1]) });
+      const revisionArtifactsMatch = /^\/api\/registry\/([ABC]-\d{3,})\/revisions\/([a-f0-9]{64})\/artifacts$/.exec(url.pathname);
+      if (req.method === 'GET' && revisionArtifactsMatch) return send(res, 200, { artifacts: listRevisionArtifacts(db, revisionArtifactsMatch[1], revisionArtifactsMatch[2]) });
+      const revisionArtifactMatch = /^\/api\/registry\/([ABC]-\d{3,})\/revisions\/([a-f0-9]{64})\/artifacts\/(report\.md|poc\.c|reproduction\.md|kasan\.log|evidence\.log)$/.exec(url.pathname);
+      if (req.method === 'GET' && revisionArtifactMatch) {
+        const content = getRevisionArtifact(db, revisionArtifactMatch[1], revisionArtifactMatch[2], revisionArtifactMatch[3]);
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': content.length,
+          'Content-Disposition': `attachment; filename="${revisionArtifactMatch[3]}"`,
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'Cross-Origin-Resource-Policy': 'same-origin', 'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; sandbox" });
+        res.end(content);
+        return;
+      }
       if (req.method === 'GET' && historicalArtifactsMatch) {
         if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for historical artifacts' });
         return send(res, 200, { artifacts: listHistoryArtifacts(db, historicalArtifactsMatch[1]) });
@@ -893,7 +913,7 @@ export async function startServer(options = {}) {
       const evidenceMatch = /^\/api\/events\/([a-f0-9]{64})\/(poc|kasan)$/.exec(url.pathname);
       const verifiedArtifactsMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts$/.exec(url.pathname);
       if (req.method === 'GET' && verifiedArtifactsMatch) return send(res, 200, { artifacts: listVerifiedArtifacts(db, verifiedArtifactsMatch[1]) });
-      const verifiedArtifactMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts\/(report\.md|poc\.c|reproduction\.md|kasan\.log)$/.exec(url.pathname);
+      const verifiedArtifactMatch = /^\/api\/events\/([a-f0-9]{64})\/artifacts\/(report\.md|poc\.c|reproduction\.md|kasan\.log|evidence\.log)$/.exec(url.pathname);
       if (req.method === 'GET' && verifiedArtifactMatch) {
         const content = getVerifiedArtifact(db, verifiedArtifactMatch[1], verifiedArtifactMatch[2]);
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': content.length,

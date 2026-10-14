@@ -8,7 +8,6 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 2_000_000;
 const MAX_TOTAL_BYTES = 8_000_000;
 const MAX_REPORT_BYTES = 1_000_000;
-const MAX_SERIAL_BYTES = 600_000;
 const MAX_PENDING_PER_AGENT = 30;
 const MAX_PENDING_TOTAL = 300;
 const MAX_STORED_BYTES = 4_000_000_000;
@@ -16,7 +15,7 @@ const LEASE_MS = 60 * 60_000;
 const WORKER_ONLINE_MS = 60_000;
 const PRIMITIVE_LEASE_MS = 10 * 60_000;
 const MAX_PRIMITIVE_SUMMARY_BYTES = 6000;
-const verificationPhases = new Set(['preparing', 'static_review', 'qemu_reproduction', 'trace_review', 'finalizing']);
+const verificationPhases = new Set(['preparing', 'static_review', 'finalizing']);
 const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
 const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+$/;
@@ -166,17 +165,18 @@ export function listVerificationQueue(db) {
     else if (row.status === 'pending') { item.position = pending.length + 1; pending.push(item); }
   }
   const blocked = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')
-    ORDER BY completed_at DESC, id DESC LIMIT 50`).all().map(row => ({ ...row, stale: false, position: null }));
+    ORDER BY completed_at DESC, id DESC`).all().map(row => ({ ...row, stale: false, position: null }));
   const blockedCount = db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')").get().count;
   const onlineCutoff = Date.now() - WORKER_ONLINE_MS;
   const processingIds = new Set(active.map(row => row.submission_id));
   const recent = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-  const workerRows = db.prepare('SELECT worker_id, target_commit, current_submission_id, started_at, last_seen_at FROM verifier_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC, worker_id LIMIT 30').all(recent);
+  const workerRows = db.prepare("SELECT worker_id, NULLIF(target_commit, 'pool') AS target_commit, current_submission_id, started_at, last_seen_at FROM verifier_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC, worker_id LIMIT 30").all(recent);
   const onlineTargets = new Set(workerRows.filter(row => Date.parse(row.last_seen_at) >= onlineCutoff).map(row => row.target_commit));
   const offlineTargets = new Set();
   const workers = workerRows
     .filter(row => {
       if (Date.parse(row.last_seen_at) >= onlineCutoff) return true;
+      if (row.target_commit === null) return true;
       if (onlineTargets.has(row.target_commit) || offlineTargets.has(row.target_commit)) return false;
       offlineTargets.add(row.target_commit);
       return true;
@@ -222,7 +222,7 @@ export function listVerificationQueue(db) {
       status: online ? current ? 'busy' : 'idle' : 'offline' });
   }
   return { counts: { processing: active.length, pending: pending.length, blocked: blockedCount },
-    active, pending, blocked, blocked_has_more: blockedCount > blocked.length, workers,
+    active, pending, blocked, blocked_has_more: false, workers,
     primitive: { pending: primitivePending, active: primitiveActive, errors: primitiveErrors,
       counts: { pending: primitiveCounts.pending || 0, processing: primitiveCounts.processing || 0,
         complete: primitiveCounts.complete || 0, error: primitiveCounts.error || 0 } } };
@@ -310,7 +310,7 @@ export function listVerifiedArtifacts(db, findingId) {
 }
 
 export function getVerifiedArtifact(db, findingId, filename) {
-  if (!Object.values(artifactFiles).includes(filename)) invalid('Unknown artifact', 404);
+  if (![...Object.values(artifactFiles), 'kasan.log'].includes(filename)) invalid('Unknown artifact', 404);
   const row = db.prepare(`SELECT a.content FROM submission_artifacts a WHERE a.submission_id = (
       SELECT id FROM submissions WHERE finding_id = ? AND status = 'approved'
       ORDER BY submitted_at DESC, id DESC LIMIT 1)
@@ -328,7 +328,9 @@ export function retrySubmission(db, id) {
 }
 
 export function claimSubmission(db, targetCommit = null, dataDir = null) {
-  if (targetCommit !== null && (typeof targetCommit !== 'string' || !/^[a-f0-9]{40}$/.test(targetCommit))) invalid('Invalid target_commit');
+  if (targetCommit !== null && !(typeof targetCommit === 'string' && /^[a-f0-9]{40}$/.test(targetCommit) ||
+      Array.isArray(targetCommit) && targetCommit.length >= 1 && targetCommit.length <= 8 &&
+      new Set(targetCommit).size === targetCommit.length && targetCommit.every(commit => typeof commit === 'string' && /^[a-f0-9]{40}$/.test(commit)))) invalid('Invalid target_commit');
   db.exec('BEGIN IMMEDIATE');
   try {
     const stale = new Date(Date.now() - LEASE_MS).toISOString();
@@ -336,6 +338,8 @@ export function claimSubmission(db, targetCommit = null, dataDir = null) {
     db.prepare("UPDATE submissions SET status = 'error', reason = 'worker lease expired after retries', completed_at = ?, lease_token = NULL, phase = NULL WHERE status = 'processing' AND COALESCE(last_activity_at, claimed_at) < ? AND attempts >= 3").run(now(), stale);
     const row = targetCommit === null
       ? db.prepare("SELECT * FROM submissions WHERE status = 'pending' ORDER BY submitted_at, id LIMIT 1").get()
+      : Array.isArray(targetCommit)
+        ? db.prepare(`SELECT * FROM submissions WHERE status = 'pending' AND json_extract(metadata_json, '$.repo_commit') IN (${targetCommit.map(() => '?').join(',')}) ORDER BY submitted_at, id LIMIT 1`).get(...targetCommit)
       : db.prepare("SELECT * FROM submissions WHERE status = 'pending' AND json_extract(metadata_json, '$.repo_commit') = ? ORDER BY submitted_at, id LIMIT 1").get(targetCommit);
     if (!row) { db.exec('COMMIT'); return null; }
     const leaseToken = randomBytes(32).toString('hex');
@@ -373,45 +377,6 @@ function checkedPoc(db, submissionId, normalized) {
   return { source, language: 'c', filename: 'poc.c' };
 }
 
-function kasanEvidence(serial, filePath, codeRefs, relevance) {
-  if (typeof serial !== 'string' || Buffer.byteLength(serial) > MAX_SERIAL_BYTES) invalid('Invalid server VM evidence', 413);
-  const headers = [...serial.matchAll(/^[^\r\n]*BUG:\s*KASAN:\s*[^\r\n]+/gim)];
-  const symbols = (Array.isArray(codeRefs) ? codeRefs : []).flatMap(ref => {
-    if (typeof ref !== 'string' || !ref.startsWith(filePath)) return [];
-    const symbol = /[#:]([A-Za-z_][A-Za-z0-9_]{5,})\b/.exec(ref)?.[1];
-    return symbol ? [symbol] : [];
-  });
-  for (let index = 0; index < headers.length; index += 1) {
-    const log = serial.slice(headers[index].index, headers[index + 1]?.index ?? serial.length).slice(0, 500_000).trim();
-    const impacts = [];
-    if (/\bRead of size\s+\d+\b/i.test(log)) impacts.push('kasan_read');
-    if (/\bWrite of size\s+\d+\b/i.test(log)) impacts.push('kasan_write');
-    if (!impacts.length) continue;
-    const matchesPath = log.includes(filePath);
-    const matchesSymbol = symbols.some(symbol => new RegExp(`\\b${symbol}\\b`).test(log));
-    const traceLine = relevance?.trace_line;
-    const matchesSymbolizedFrame = typeof traceLine === 'string' && traceLine.trim() &&
-      !/BUG:\s*KASAN:/.test(traceLine) && log.split(/\r?\n/).some(line => line.trim() === traceLine.trim());
-    if (matchesSymbolizedFrame && (matchesPath || matchesSymbol || relevance?.symbolized_path === filePath)) return { log, impacts };
-  }
-  return null;
-}
-
-function groundedRelevance(review, commit, filePath, evidence, poc) {
-  const grounding = review.grounding;
-  const relevance = review.relevance;
-  if (!grounding || grounding.source_commit !== commit || !Array.isArray(grounding.evidence) ||
-      relevance?.verdict !== 'supports' || relevance.source_path !== filePath ||
-      relevance.symbolized_path !== filePath || !Number.isInteger(relevance.symbolized_line) || relevance.symbolized_line < 1 ||
-      !Number.isInteger(relevance.source_line) || relevance.source_line < 1 ||
-      !Number.isInteger(relevance.poc_line) || relevance.poc_line < 1) return false;
-  const sourceLine = grounding.evidence.find(item => item?.path === filePath && item.line === relevance.source_line &&
-    typeof item.text === 'string' && item.text.trim());
-  if (!sourceLine || typeof relevance.trace_line !== 'string' || !relevance.trace_line.trim() ||
-      !evidence.log.split(/\r?\n/).some(line => line.trim() === relevance.trace_line.trim())) return false;
-  return Boolean(poc.source.split(/\r?\n/)[relevance.poc_line - 1]?.trim());
-}
-
 function frontMatter(data, report) {
   const lines = ['---'];
   for (const [key, item] of Object.entries(data)) {
@@ -435,7 +400,7 @@ function checkLease(row, token) {
 }
 
 const reportSections = ['Summary', 'Root cause', 'Reproduction environment', 'PoC', 'Impact analysis'];
-const artifactFiles = { report: 'report.md', poc: 'poc.c', reproduction: 'reproduction.md', log: 'kasan.log' };
+const artifactFiles = { report: 'report.md', poc: 'poc.c', reproduction: 'reproduction.md', log: 'evidence.log' };
 
 function canonicalTitle(input) {
   if (typeof input !== 'string') return null;
@@ -474,7 +439,7 @@ function canonicalVulnerabilityType(input) {
     ? [...new Set(parts)].sort((left, right) => order.indexOf(left) - order.indexOf(right)).join(', ') : null;
 }
 
-function checkedArtifacts(result, review, poc, evidence) {
+function checkedArtifacts(db, submissionId, result, review, poc) {
   const bundle = result.artifacts;
   if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return null;
   const limits = { report: MAX_REPORT_BYTES, poc: 250_000, reproduction: 100_000, log: 500_000 };
@@ -484,8 +449,12 @@ function checkedArtifacts(result, review, poc, evidence) {
     if (!item || typeof item !== 'object' || Array.isArray(item) || item.filename !== filename ||
         typeof content !== 'string' || !content.trim() || Buffer.byteLength(content) > limits[role] || content.includes('\0')) return null;
   }
-  if (bundle.poc.source !== poc.source ||
-      bundle.poc.source_index !== review.normalized?.poc?.source_index || bundle.log.content.trim() !== evidence.log) return null;
+  const submittedLog = db.prepare('SELECT name, content FROM submission_artifacts WHERE submission_id = ? AND ordinal = ?').get(
+    submissionId, review.normalized?.logs?.[0]?.source_index);
+  if (!submittedLog || bundle.poc.source !== poc.source ||
+      bundle.poc.source_index !== review.normalized?.poc?.source_index ||
+      submittedLog?.name !== review.normalized?.logs?.[0]?.original_name ||
+      utf8(submittedLog.content) !== bundle.log.content) return null;
   const headings = [...bundle.report.content.matchAll(/^##\s+(.+?)\s*$/gm)].map(match => match[1]);
   if (headings.length !== reportSections.length || headings.some((heading, index) => heading !== reportSections[index])) return null;
   const sections = bundle.report.content.split(/^##\s+.+?\s*$/gm).slice(1);
@@ -511,7 +480,7 @@ export function heartbeatWorker(db, input) {
   const targetCommit = input?.target_commit;
   const submissionId = input?.submission_id ?? null;
   if (typeof workerId !== 'string' || !/^[a-f0-9]{32}$/.test(workerId) ||
-      typeof targetCommit !== 'string' || !/^[a-f0-9]{40}$/.test(targetCommit) ||
+      !(targetCommit === null && submissionId === null || typeof targetCommit === 'string' && /^[a-f0-9]{40}$/.test(targetCommit)) ||
       submissionId !== null && (typeof submissionId !== 'string' || !/^[a-f0-9]{64}$/.test(submissionId))) invalid('Invalid worker heartbeat');
   if (submissionId !== null) {
     const row = db.prepare("SELECT status, lease_token, json_extract(metadata_json, '$.repo_commit') AS target_commit FROM submissions WHERE id = ?").get(submissionId);
@@ -526,7 +495,7 @@ export function heartbeatWorker(db, input) {
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(worker_id) DO UPDATE SET target_commit = excluded.target_commit,
       current_submission_id = excluded.current_submission_id, last_seen_at = excluded.last_seen_at`)
-      .run(workerId, targetCommit, submissionId, at, at);
+      .run(workerId, targetCommit ?? 'pool', submissionId, at, at);
     db.prepare('DELETE FROM verifier_workers WHERE last_seen_at < ?').run(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -601,6 +570,7 @@ export function claimPrimitiveReview(db, workerId, supportedCommits) {
       code_refs: Array.isArray(data.code_refs) ? data.code_refs : [],
       nfs_version: row.nfs_version, privilege: row.privilege,
       verified_impacts: Array.isArray(data.verified_impacts) ? data.verified_impacts : [],
+      evidence_status: data.dynamic_status === 'not_run' ? 'submitted_static' : 'server_observed',
       report: Buffer.from(artifacts[0].content).toString('utf8'),
       poc_source: Buffer.from(artifacts[1].content).toString('utf8'),
       kasan_log: Buffer.from(artifacts[2].content).toString('utf8'), lease_token: leaseToken };
@@ -695,66 +665,59 @@ export function completeSubmission(db, id, result, leaseToken) {
     const review = object(result.review, 'review');
     const run = object(result.reproduction, 'reproduction');
     const metadata = JSON.parse(row.metadata_json);
-    const existingManagementId = metadata.existing_management_id ?? null;
+    const existingManagementId = metadata.existing_management_id ?? review.same_root_cause?.management_id ?? null;
     if (!['likely', 'unlikely', 'uncertain'].includes(review.verdict)) invalid('Invalid static verdict');
-    if (!['observed', 'not_observed', 'inconclusive'].includes(run.status)) invalid('Invalid reproduction status');
-    const summary = { static_verdict: review.verdict, dynamic_status: run.status,
-      kernel_commit: run.kernelCommit ?? null, observation: run.observation ?? null,
+    if (run.status !== 'not_run' || result.server_serial || run.observation || run.kernelCommit) invalid('Dynamic evidence is not accepted by the static screening route');
+    const summary = { static_verdict: review.verdict, dynamic_status: 'not_run',
+      integrity: review.integrity?.verdict ?? 'uncertain',
       ...(existingManagementId ? { same_root_cause: {
         verdict: ['same', 'different', 'uncertain'].includes(review.same_root_cause?.verdict)
           ? review.same_root_cause.verdict : 'uncertain',
         reason: typeof review.same_root_cause?.reason === 'string'
           ? review.same_root_cause.reason.slice(0, 1000) : null,
       } } : {}) };
-    const reason = value(review.reason, 'review reason', 1000) || value(run.reason, 'reproduction reason', 1000) || 'Verification completed';
+    const reason = value(review.reason, 'review reason', 1000) || 'Static screening completed';
+    if (review.integrity?.verdict === 'suspect') {
+      const out = mark(db, id, 'rejected', value(review.integrity.reason, 'integrity reason', 1000) || reason, summary);
+      db.exec('COMMIT'); return out;
+    }
+    if (review.integrity?.verdict !== 'clear') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
+    if (review.same_root_cause && review.same_root_cause.verdict !== 'same') {
+      const out = mark(db, id, 'needs_review', 'Same-root comparison is unresolved', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (review.verdict === 'unlikely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (review.verdict !== 'likely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (existingManagementId && review.same_root_cause?.verdict !== 'same') {
       const out = mark(db, id, 'needs_review', 'Same root cause as the existing finding was not established', summary);
       db.exec('COMMIT'); return out;
     }
-    if (run.status === 'not_observed' && run.observation?.guestCompleted && run.observation?.targetCommitMatch) {
-      const out = mark(db, id, 'rejected', value(run.reason, 'reproduction reason', 1000) || 'PoC did not reproduce in two VMs', summary);
-      db.exec('COMMIT'); return out;
-    }
-    if (run.status !== 'observed' || !run.observation?.guestCompleted || !run.observation?.targetCommitMatch ||
-        !run.observation?.baselineClean || !run.observation?.pocStarted || !run.observation?.serverEvidenceAfterPoc) {
-      const out = mark(db, id, 'needs_evidence', value(run.reason, 'reproduction reason', 1000) || 'Two-VM reproduction was inconclusive', summary);
-      db.exec('COMMIT'); return out;
-    }
     const commit = value(metadata.repo_commit, 'repo_commit', 64);
     const version = value(metadata.version_id, 'version_id', 64);
-    if (!commitPattern.test(commit || '') || !version || !/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(version) || run.kernelCommit !== commit) {
-      const out = mark(db, id, 'needs_evidence', 'VM kernel commit does not match the submitted source commit', summary);
+    if (!commitPattern.test(commit || '') || !version || !/^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(version) ||
+        review.grounding?.source_commit !== commit) {
+      const out = mark(db, id, 'needs_evidence', 'Reviewed source commit does not match the submission', summary);
       db.exec('COMMIT'); return out;
     }
     const target = db.prepare('SELECT active FROM track_targets WHERE version_id = ? AND repo_commit = ?').get(version, commit);
     if (!target?.active) {
-      const out = mark(db, id, 'needs_evidence', 'VM kernel is not the active registered track target', summary);
+      const out = mark(db, id, 'needs_evidence', 'Source commit is not the active registered track target', summary);
       db.exec('COMMIT'); return out;
     }
     const normalized = object(review.normalized, 'normalized finding');
     const title = canonicalTitle(normalized.title);
     const filePath = value(normalized.file_path, 'file_path', 300);
     const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
-    const testedVersion = canonicalNfsVersion(run.nfsVersion);
     const submittedVersion = metadata.nfs_version == null ? null : canonicalNfsVersion(metadata.nfs_version);
     const preAuth = normalized.pre_auth;
-    const preAuthMode = preAuth != null && normalized.nfs_version == null && run.nfsVersion == null &&
-      run.mount === false && submittedVersion === null;
-    const versionedMode = preAuth == null && run.mount !== false && nfsVersion && testedVersion === nfsVersion &&
-      (metadata.nfs_version == null || submittedVersion === nfsVersion);
+    const preAuthMode = preAuth != null && normalized.nfs_version == null && submittedVersion === null;
+    const versionedMode = preAuth == null && nfsVersion && (metadata.nfs_version == null || submittedVersion === nfsVersion);
     const privilege = canonicalPermission(normalized.permission);
     const vulnerabilityType = canonicalVulnerabilityType(normalized.vulnerability_type);
     if (!title || !filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..') ||
         !preAuthMode && !versionedMode || !privilege || !vulnerabilityType ||
         preAuthMode && privilege !== 'Pre-auth' || versionedMode && privilege === 'Pre-auth') {
-      const out = mark(db, id, 'needs_review', 'Verified finding lacks consistent title, source path, tested NFS version, permission or vulnerability type', summary);
-      db.exec('COMMIT'); return out;
-    }
-    const evidence = kasanEvidence(result.server_serial, filePath, normalized.code_refs, review.relevance);
-    if (!evidence) {
-      const out = mark(db, id, 'needs_evidence', 'Server KASAN trace does not identify the reviewed NFS source location', summary);
+      const out = mark(db, id, 'needs_review', 'Static finding lacks consistent title, source path, NFS version, permission or vulnerability type', summary);
       db.exec('COMMIT'); return out;
     }
     let poc;
@@ -771,17 +734,18 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', 'Pre-auth reachability lacks grounded source and original PoC lines', summary);
       db.exec('COMMIT'); return out;
     }
-    if (!groundedRelevance(review, commit, filePath, evidence, poc)) {
-      const out = mark(db, id, 'needs_review', 'Codex could not link the trusted source, original PoC and post-run KASAN trace', summary);
+    if (!review.grounding?.evidence?.some(item => item.path === filePath &&
+        Number.isInteger(item.line) && typeof item.text === 'string' && item.text.trim())) {
+      const out = mark(db, id, 'needs_review', 'Static review lacks a trusted source anchor', summary);
       db.exec('COMMIT'); return out;
     }
-    const artifacts = checkedArtifacts(result, review, poc, evidence);
+    const artifacts = checkedArtifacts(db, id, result, review, poc);
     if (!artifacts) {
-      const out = mark(db, id, 'needs_review', 'Verifier did not produce a grounded report.md, poc.c, reproduction.md and KASAN log', summary);
+      const out = mark(db, id, 'needs_evidence', 'Static review needs a grounded report.md, original poc.c, reproduction.md and submitted diagnostic log', summary);
       db.exec('COMMIT'); return out;
     }
-    const kasanHeader = evidence.log.split(/\r?\n/, 1)[0].replace(/\+0x[0-9a-f]+\/[0-9a-f]+/gi, '').trim();
-    const fingerprint = hash(`${commit}\0${filePath}\0${kasanHeader}`);
+    const anchor = review.grounding.evidence.find(item => item.path === filePath && item.text?.trim());
+    const fingerprint = hash(`${commit}\0${filePath}\0${anchor.line}\0${anchor.text}`);
     const existing = existingManagementId ? findExistingManagementId(db, existingManagementId) : null;
     if (existingManagementId && !existing) {
       const out = mark(db, id, 'needs_review', 'Existing managed finding is no longer available', summary);
@@ -794,19 +758,30 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', `Possible duplicate of ${duplicate.management_id}; compare root cause before assigning another number`, summary);
       db.exec('COMMIT'); return out;
     }
+    if (!existing && db.prepare(`SELECT 1 FROM finding_registry r JOIN events e ON e.id = r.finding_id
+      WHERE e.repo_commit = ? AND e.scope_json = ? AND r.approved_at >= ? LIMIT 1`)
+      .get(commit, JSON.stringify([filePath]), row.claimed_at)) {
+      const out = mark(db, id, 'needs_review', 'Another finding in this source path was registered during screening; compare root causes before numbering', summary);
+      db.exec('COMMIT'); return out;
+    }
     const at = now();
     const access = privilege === 'Pre-auth' ? ['pre_auth'] : privilege === 'RPCSEC_GSS' ? ['rpcsec_gss'] :
       /AUTH_NONE|AUTH_NULL/i.test(privilege || '') ? ['auth_null'] : /AUTH_SYS|AUTH_UNIX/i.test(privilege || '') ? ['auth_unix'] : [];
     const foundDate = /^\d{4}-\d{2}-\d{2}$/.test(normalized.found_date || '') ? normalized.found_date : row.submitted_at.slice(0, 10);
+    const codeRefs = Array.isArray(normalized.code_refs)
+      ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.trim() && ref.length <= 300).slice(0, 30) : [];
+    if (!codeRefs.length) codeRefs.push(`${filePath}:${anchor.line}`);
     const data = {
       schema_version: 1, kind: 'finding', version_id: version, repo_commit: commit, title,
-      file_path: filePath, scope: [filePath], code_refs: Array.isArray(normalized.code_refs) ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.length <= 300).slice(0, 30) : [],
-      angle: 'qemu-two-vm-reproduction', created_at: at,
-      vm_environment: `QEMU server/client, ${preAuthMode ? 'direct pre-auth request without NFS mount' : `NFS ${nfsVersion}`}, kernel ${commit}`,
-      verified_impacts: evidence.impacts, access_requirements: access,
-      impact: vulnerabilityType,
-      reproduction_command: `gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c && /tmp/hivemind-poc 10.77.0.1${preAuthMode ? '' : ' /mnt/nfs'}`,
-      poc_source: poc.source, poc_sha256: hash(poc.source), kasan_log: evidence.log, kasan_sha256: hash(evidence.log),
+      file_path: filePath, scope: [filePath], code_refs: codeRefs,
+      angle: 'codex-static-screening', created_at: at, dynamic_status: 'not_run',
+      vm_environment: `Submitted environment only; no server VM execution, kernel ${commit}`,
+      verified_impacts: [], claimed_impacts: Array.isArray(normalized.claimed_impacts) ? normalized.claimed_impacts : [],
+      access_requirements: access,
+      impact: `제출 자료의 정적 검토 결과: ${vulnerabilityType}. 서버 재현은 수행하지 않았습니다.`,
+      reproduction_command: 'cc -o poc poc.c',
+      poc_source: poc.source, poc_sha256: hash(poc.source), evidence_log: artifacts.log.content,
+      evidence_sha256: hash(artifacts.log.content),
       registry_target: 'knfsd', registry_option: value(normalized.options, 'options', 200),
       registry_privilege: privilege, registry_nfs_version: nfsVersion,
       registry_vulnerability_type: vulnerabilityType,
@@ -820,8 +795,9 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', error.message, summary); db.exec('COMMIT'); return out;
     }
     const accepted = { title, file_path: filePath, code_refs: data.code_refs,
-      verified_impacts: evidence.impacts, vm_environment: data.vm_environment,
-      reproduction_command: data.reproduction_command, kasan_summary: evidence.log.split(/\r?\n/, 1)[0],
+      verified_impacts: [], claimed_impacts: data.claimed_impacts, dynamic_status: 'not_run',
+      vm_environment: data.vm_environment, reproduction_command: data.reproduction_command,
+      kasan_summary: null,
       option: data.registry_option, privilege, nfs_version: nfsVersion,
       vulnerability_type: vulnerabilityType };
     let findingId;
@@ -843,18 +819,7 @@ export function completeSubmission(db, id, result, leaseToken) {
           (submission_id, management_id, previous_event_json, previous_registry_json, recorded_at)
           VALUES (?, ?, ?, ?, ?)`).run(id, managementId,
           previousEvent ? JSON.stringify(previousEvent) : null, JSON.stringify(previousRegistry), at);
-        const priorImpacts = findingId ? readFrontMatter(previousEvent.markdown).data.verified_impacts :
-          db.prepare(`SELECT observed_impacts_json FROM history_verification_runs
-            WHERE management_id = ? AND result = 'verified' ORDER BY id DESC LIMIT 1`).get(managementId)?.observed_impacts_json;
-        const earlier = db.prepare(`SELECT accepted_json FROM submissions
-          WHERE management_id = ? AND status = 'approved' AND accepted_json IS NOT NULL`).all(managementId);
-        const verified = new Set(evidence.impacts);
-        for (const impact of Array.isArray(priorImpacts) ? priorImpacts :
-          typeof priorImpacts === 'string' ? JSON.parse(priorImpacts) : []) verified.add(impact);
-        for (const item of earlier) {
-          for (const impact of JSON.parse(item.accepted_json).verified_impacts || []) verified.add(impact);
-        }
-        data.verified_impacts = [...verified];
+        // Previous dynamic proof stays in its original approved submission or history run.
         const fields = { title, option: data.registry_option, privilege,
           nfs_version: nfsVersion, vulnerability_type: vulnerabilityType };
         const overrides = new Set(JSON.parse(previousRegistry[existing.kind === 'live'
@@ -865,7 +830,7 @@ export function completeSubmission(db, id, result, leaseToken) {
           db.prepare(`UPDATE events SET version_id = ?, repo_commit = ?, title = ?, scope_json = ?,
             sha256 = ?, markdown = ? WHERE id = ?`).run(version, commit, title,
             JSON.stringify([filePath]), hash(markdown), markdown, findingId);
-          db.prepare(`UPDATE finding_reviews SET provider = 'codex_qemu', status = 'complete',
+          db.prepare(`UPDATE finding_reviews SET provider = 'codex_static', status = 'complete',
             verdict = 'likely', summary = ?, requested_at = ?, completed_at = ? WHERE finding_id = ?`)
             .run(reason, row.submitted_at, at, findingId);
           const updates = Object.entries(fields).filter(([field]) => field !== 'title' && !overrides.has(field));
@@ -893,7 +858,7 @@ export function completeSubmission(db, id, result, leaseToken) {
         JSON.stringify([filePath]), at, at, markdown);
       db.prepare(`INSERT INTO finding_reviews
         (finding_id, provider, status, verdict, summary, requested_at, completed_at)
-        VALUES (?, 'codex_qemu', 'complete', 'likely', ?, ?, ?)`).run(findingId, reason, row.submitted_at, at);
+        VALUES (?, 'codex_static', 'complete', 'likely', ?, ?, ?)`).run(findingId, reason, row.submitted_at, at);
       registerFinding(db, findingId, data, at);
       const sequence = db.prepare("UPDATE registry_sequences SET last_number = last_number + 1 WHERE target = 'knfsd' RETURNING last_number").get();
       managementId = `A-${String(sequence.last_number).padStart(3, '0')}`;
@@ -908,26 +873,6 @@ export function completeSubmission(db, id, result, leaseToken) {
     }
     db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, accepted_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
       .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), JSON.stringify(accepted), at, id);
-    if (existing?.kind === 'live' && !visibleRevision) {
-      const currentEvent = db.prepare('SELECT * FROM events WHERE id = ?').get(findingId);
-      const currentRegistry = db.prepare('SELECT * FROM finding_registry WHERE finding_id = ?').get(findingId);
-      const parsed = readFrontMatter(currentEvent.markdown);
-      const impacts = new Set([...(parsed.data.verified_impacts || []), ...evidence.impacts]);
-      if (impacts.size > (parsed.data.verified_impacts || []).length) {
-        db.prepare(`INSERT INTO finding_revision_audit
-          (submission_id, management_id, previous_event_json, previous_registry_json, recorded_at)
-          VALUES (?, ?, ?, ?, ?)`).run(id, managementId,
-          JSON.stringify(currentEvent), JSON.stringify(currentRegistry), at);
-        const markdown = frontMatter({ ...parsed.data, verified_impacts: [...impacts] }, parsed.body);
-        db.prepare('UPDATE events SET markdown = ?, sha256 = ? WHERE id = ?')
-          .run(markdown, hash(markdown), findingId);
-        db.prepare('UPDATE finding_registry SET updated_at = ?, revision = revision + 1 WHERE finding_id = ?')
-          .run(at, findingId);
-        db.prepare(`UPDATE primitive_reviews SET status = 'pending', summary = NULL, requested_at = ?,
-          claimed_at = NULL, completed_at = NULL, last_activity_at = NULL, lease_token = NULL,
-          retry_after = NULL, attempts = 0, worker_id = NULL WHERE finding_id = ?`).run(at, findingId);
-      }
-    }
     if (!existing) db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
       .run(findingId, at);
     db.exec('COMMIT');
