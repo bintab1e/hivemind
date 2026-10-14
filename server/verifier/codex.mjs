@@ -28,6 +28,19 @@ const typeAliases = new Map([
 const sourcePathPattern = /(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+\.(?:c|h)/g;
 const trustedPathPattern = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+\.(?:c|h)$/;
 const maxTrustedSourceFiles = 8;
+const staticRetryHints = {
+  json_parse: 'Return one complete JSON object matching the required schema.',
+  shape: 'Use exactly the required JSON keys. A likely verdict requires clear integrity and admin_action_required=false.',
+  report_format: 'For a likely verdict, provide a substantive report with exactly the five required headings in order.',
+  source_refs: 'Use safe relative source paths and valid code_refs and source_evidence arrays.',
+  source_evidence: 'Every source_evidence path and line must exactly match a nonempty line in the supplied trusted source.',
+  metadata: 'Use only supported metadata values; set uncertain or unsupported fields to null.',
+  poc: 'Select a valid original C PoC with main(), using its zero-based submission file index.',
+  logs: 'Select valid original log indexes, and claim KASAN Read or Write only when the first selected log contains that observation.',
+  likely_grounding: 'Return likely only with a grounded title, report, original C PoC, file_path, and matching trusted source_evidence.',
+  proof: 'For likely, ground all four proof source anchors in source_evidence, plus a nonempty original C PoC line and first selected log line.',
+  pre_auth: 'A pre_auth claim requires source_path and source_line exactly in trusted source_evidence, poc_line in the original C PoC, and nfs_version=null. If trusted source and the C PoC do not establish the pre-auth path, set pre_auth=null and return uncertain rather than claiming likely.',
+};
 const maxDiagnosticBytes = 64 * 1024;
 const networkFailure = code => code === 'upstream_or_network' || code.startsWith('network_') || code.startsWith('upstream_');
 const infrastructureFailureCodes = new Set(['auth_or_session', 'rate_limited', 'retry_exhausted',
@@ -492,13 +505,17 @@ Untrusted submission JSON:
 ${serialized}
 </submission>
 `;
+  let retryHint = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const { parsed, model } = await runStructuredCodex(prompt, schemaPath, options);
+      const retryPrompt = retryHint ? `${prompt}\nThe previous draft failed local validation. Correct this issue without assuming the draft was otherwise valid: ${retryHint}\nReturn a fresh JSON result based only on the trusted source and original submission.\n` : prompt;
+      const { parsed, model } = await runStructuredCodex(retryPrompt, schemaPath, options);
       return { ...validateResult(parsed, submission, trustedSource), model };
     } catch (error) {
       if (attempt || !(error instanceof CodexReviewError) ||
           !['invalid_output', 'ungrounded_output'].includes(error.code)) throw error;
+      const stage = error.diagnostic?.validation_stage;
+      retryHint = Object.hasOwn(staticRetryHints, stage) ? staticRetryHints[stage] : null;
     }
   }
 }

@@ -350,6 +350,36 @@ test('pre-auth review requires grounded source and original C PoC lines without 
   }
 });
 
+test('pre-auth validation retry gives a bounded correction without echoing the rejected draft', async t => {
+  const corrected = structuredClone(answer);
+  corrected.normalized.nfs_version = null;
+  corrected.normalized.permission = 'Pre-auth';
+  corrected.normalized.pre_auth = { source_path: 'fs/nfsd/nfs4proc.c', source_line: 1, poc_line: 1 };
+  const invalid = structuredClone(corrected);
+  invalid.reason = 'PRIVATE_EVIDENCE';
+  invalid.normalized.pre_auth.source_line = 99;
+  invalid.normalized.nfs_version = '4.2';
+  const cli = fakeCli(t, corrected);
+  const dir = path.dirname(cli);
+  fs.appendFileSync(cli, `
+const countPath = ${JSON.stringify(path.join(dir, 'attempts'))};
+const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+fs.writeFileSync(${JSON.stringify(path.join(dir, 'prompt-'))} + count, prompt);
+if (count === 1) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(invalid))});
+`);
+  const reviewed = await reviewSubmissionWithCodex(submission, options(cli));
+  assert.equal(reviewed.verdict, 'likely');
+  assert.deepEqual(reviewed.normalized.pre_auth, corrected.normalized.pre_auth);
+  assert.equal(fs.readFileSync(path.join(dir, 'attempts'), 'utf8'), '2');
+  const firstPrompt = fs.readFileSync(path.join(dir, 'prompt-1'), 'utf8');
+  const retryPrompt = fs.readFileSync(path.join(dir, 'prompt-2'), 'utf8');
+  assert.doesNotMatch(firstPrompt, /previous draft failed local validation/i);
+  assert.match(retryPrompt, /pre_auth claim requires source_path and source_line exactly in trusted source_evidence, poc_line in the original C PoC, and nfs_version=null/);
+  assert.match(retryPrompt, /return uncertain rather than claiming likely/);
+  assert.doesNotMatch(retryPrompt, /PRIVATE_EVIDENCE/);
+});
+
 test('fails closed when CLI is missing or submitted paths are unsafe', async () => {
   await assert.rejects(reviewSubmissionWithCodex(submission, options('')), error => error instanceof VerifierUnavailableError && error.code === 'not_configured');
   await assert.rejects(reviewSubmissionWithCodex(submission, { cliPath: '/missing/codex' }), error => error instanceof CodexReviewError && error.code === 'trusted_source_missing');

@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import { readFrontMatter } from './contract.mjs';
 import { listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 
-const sourcePath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+$/;
+const sourcePath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+$/;
 const managementId = /^A-\d{3,}$/;
 const maxScan = 256;
 const maxCandidates = 8;
-const maxReport = 30_000;
+const maxReport = 90_000;
 
 function pathFromRef(ref) {
   const path = ref.split(/[#:]/, 1)[0];

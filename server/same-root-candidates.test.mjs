@@ -66,6 +66,26 @@ test('shortlists imported historical records from archived report source paths',
   assert.equal(result.truncated, false);
 });
 
+test('scans complete historical reports beyond the candidate excerpt before deciding relevance', t => {
+  const { db, dataDir } = fixture(t);
+  const sourceDir = path.join(dataDir, 'source');
+  fs.mkdirSync(sourceDir);
+  db.prepare('INSERT INTO registry_history VALUES (?, ?, ?)').run('A-037', 'Unrelated long report', 'knfsd');
+  db.prepare('INSERT INTO registry_history VALUES (?, ?, ?)').run('A-038', 'Related long report', 'knfsd');
+  fs.writeFileSync(path.join(sourceDir, 'unrelated.md'), `## Root cause\n${'x'.repeat(31_000)}\nfs/nfsd/other.c`);
+  fs.writeFileSync(path.join(sourceDir, 'related.md'), `## Root cause\n${'x'.repeat(31_000)}\ndrivers/infiniband/core/iwcm.c:42`);
+  importHistoryArtifacts(db, dataDir, sourceDir, [
+    { management_id: 'A-037', kind: 'report', source_path: 'unrelated.md', display_name: 'report.md' },
+    { management_id: 'A-038', kind: 'report', source_path: 'related.md', display_name: 'report.md' },
+  ]);
+  const result = sameRootCandidates(db, {
+    project: 'knfsd', filePath: 'drivers/infiniband/core/iwcm.c', dataDir,
+  });
+  assert.deepEqual(result.candidates.map(item => item.management_id), ['A-038']);
+  assert.match(result.candidates[0].report, /drivers\/infiniband\/core\/iwcm\.c:42/);
+  assert.equal(result.truncated, false);
+});
+
 test('limits candidate count and tells caller when matching is incomplete', t => {
   const { db } = fixture(t);
   for (let n = 43; n <= 52; n++) live(db, `A-${n}`, 'fs/nfsd/nfs4proc.c');
@@ -80,5 +100,19 @@ test('flags an unreadable historical report so an incomplete shortlist cannot au
   db.prepare('INSERT INTO registry_history VALUES (?, ?, ?)').run('A-005', 'Missing archive', 'knfsd');
   const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c', dataDir });
   assert.deepEqual(result.candidates.map(item => item.management_id), ['A-043']);
+  assert.equal(result.truncated, true);
+});
+
+test('retains the incomplete-shortlist guard when a historical report exceeds the review limit', t => {
+  const { db, dataDir } = fixture(t);
+  const sourceDir = path.join(dataDir, 'source');
+  fs.mkdirSync(sourceDir);
+  db.prepare('INSERT INTO registry_history VALUES (?, ?, ?)').run('A-037', 'Oversized report', 'knfsd');
+  fs.writeFileSync(path.join(sourceDir, 'large.md'), `${'x'.repeat(90_001)}\nfs/nfsd/nfs4proc.c`);
+  importHistoryArtifacts(db, dataDir, sourceDir, [
+    { management_id: 'A-037', kind: 'report', source_path: 'large.md', display_name: 'report.md' },
+  ]);
+  const result = sameRootCandidates(db, { project: 'knfsd', filePath: 'fs/nfsd/nfs4proc.c', dataDir });
+  assert.deepEqual(result.candidates, []);
   assert.equal(result.truncated, true);
 });
