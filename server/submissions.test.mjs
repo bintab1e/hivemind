@@ -64,12 +64,13 @@ function approve(db, id, result = verdict()) { return completeSubmission(db, id,
 
 test('static-screened submission receives a number without fabricated dynamic impacts or VM evidence', t => {
   const db = setup(t);
-  const id = submit(db, 'one');
+  const id = submitSubmission(db, raw('one'), 'jinpyo').submission_id;
   const result = verdict();
   result.review.normalized.code_refs = [];
   const accepted = approve(db, id, result);
   assert.equal(accepted.management_id, 'A-043');
   const record = listRegistry(db).find(row => row.management_id === 'A-043');
+  assert.equal(record.owner, '이진표');
   assert.equal(record.review_provider, 'codex_static');
   assert.equal(record.dynamic_status, 'not_run');
   assert.deepEqual(record.verified_impacts, []);

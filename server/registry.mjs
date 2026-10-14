@@ -3,6 +3,10 @@ import { latestHistoryVerifications } from './history-verifications.mjs';
 
 const prefixes = { knfsd: 'A', 'NFS-Ganesha': 'B', libnfs: 'C' };
 const floors = { knfsd: 42, 'NFS-Ganesha': 21, libnfs: 1 };
+const agentOwners = new Map([
+  ['jinpyo', '이진표'], ['hyunsol', '문현솔'], ['yeonsu', '정연수'],
+  ['minsu', '김민수'], ['jiwoong', '위지웅'],
+]);
 const editable = {
   option: 200, privilege: 200, report_project: 200,
   report_status: 32, owner: 100, nfs_version: 100,
@@ -83,19 +87,39 @@ export function initializeRegistry(db) {
   for (const correction of db.prepare("SELECT c.corrects_event_id, c.received_at FROM events c JOIN events f ON f.id = c.corrects_event_id WHERE c.kind = 'correction' AND f.kind = 'finding'").all()) {
     withdrawFinding(db, correction.corrects_event_id, correction.received_at);
   }
+  const missingOwners = db.prepare(`SELECT r.finding_id, r.admin_overrides_json, e.agent_id
+    FROM finding_registry r JOIN events e ON e.id = r.finding_id
+    WHERE r.management_id IS NOT NULL AND r.owner IS NULL`).all()
+    .filter(row => agentOwners.has(row.agent_id) && !JSON.parse(row.admin_overrides_json).includes('owner'));
+  if (missingOwners.length) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const update = db.prepare('UPDATE finding_registry SET owner = ?, updated_at = ?, revision = revision + 1 WHERE finding_id = ? AND owner IS NULL');
+      const audit = db.prepare('INSERT INTO registry_edits(row_id, actor, edited_at, changes_json) VALUES (?, ?, ?, ?)');
+      for (const row of missingOwners) {
+        const owner = agentOwners.get(row.agent_id);
+        const at = new Date().toISOString();
+        if (update.run(owner, at, row.finding_id).changes) {
+          audit.run(row.finding_id, 'system', at, JSON.stringify({ owner: { before: null, after: owner } }));
+        }
+      }
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
   // Submission screening may assign a number without claiming dynamic reproduction.
 }
 
 export function registerFinding(db, id, data, createdAt) {
   validateRegistryMetadata(data);
   const target = data.registry_target ?? 'knfsd';
+  const agentId = db.prepare('SELECT agent_id FROM events WHERE id = ?').get(id)?.agent_id;
   const values = {
     target,
     option: data.registry_option ?? null,
     privilege: data.registry_privilege ?? null,
     report_project: data.registry_report_project ?? (target === 'knfsd' ? 'Linux kernel' : null),
     report_status: '미제보',
-    owner: data.registry_owner ?? null,
+    owner: agentOwners.get(agentId) ?? data.registry_owner ?? null,
     nfs_version: data.registry_nfs_version ?? null,
     vulnerability_type: data.registry_vulnerability_type ?? null,
     methodology: data.registry_methodology ?? 'LLM',

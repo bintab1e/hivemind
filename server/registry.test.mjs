@@ -5,12 +5,43 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { issueAgentToken, openDatabase, startServer } from './server.mjs';
-import { completeFindingReview, retryFindingReview } from './registry.mjs';
+import { completeFindingReview, registerFinding, retryFindingReview } from './registry.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40);
 const poc = 'int main(void) { return 0; }\n';
 const kasan = 'BUG: KASAN: slab-out-of-bounds in nfsd_test\nWrite of size 8 at addr deadbeef\n';
+
+test('registered findings use the authenticated analyst identity and backfill only untouched blank owners', t => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-agent-owners-'));
+  const file = path.join(dataDir, 'data.sqlite3');
+  let db = openDatabase(file);
+  t.after(() => { db.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const names = [
+    ['jinpyo', '이진표'], ['hyunsol', '문현솔'], ['yeonsu', '정연수'],
+    ['minsu', '김민수'], ['jiwoong', '위지웅'],
+  ];
+  const ids = [];
+  const insert = db.prepare(`INSERT INTO events
+    (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title, scope_json, created_at, received_at, markdown)
+    VALUES (?, ?, ?, 'hash', 'finding', '7.3-rc7', ?, 'Candidate', '[]', ?, ?, '---\nschema_version: 1\nkind: finding\n---\n')`);
+  for (const [index, [agentId, owner]] of names.entries()) {
+    const id = String(index + 1).repeat(64);
+    ids.push(id);
+    insert.run(id, agentId, `exchange/outbox/${agentId}/finding.md`, commit,
+      '2026-10-14T00:00:00Z', '2026-10-14T00:00:00Z');
+    registerFinding(db, id, { registry_owner: '제출자가 적은 다른 이름' }, '2026-10-14T00:00:00Z');
+    assert.equal(db.prepare('SELECT owner FROM finding_registry WHERE finding_id = ?').get(id).owner, owner);
+  }
+  db.prepare("UPDATE finding_registry SET owner = NULL, management_id = 'A-043', number = 43 WHERE finding_id = ?").run(ids[0]);
+  db.prepare("UPDATE finding_registry SET owner = NULL, management_id = 'A-044', number = 44, admin_overrides_json = '[\"owner\"]' WHERE finding_id = ?").run(ids[1]);
+  db.close();
+  db = openDatabase(file);
+  assert.equal(db.prepare('SELECT owner FROM finding_registry WHERE finding_id = ?').get(ids[0]).owner, '이진표');
+  assert.equal(db.prepare('SELECT owner FROM finding_registry WHERE finding_id = ?').get(ids[1]).owner, null);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM registry_edits WHERE row_id = ?').get(ids[0]).count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM registry_edits WHERE row_id = ?').get(ids[1]).count, 0);
+});
 
 test('legacy static review remains advisory while admin edits stay intact', async t => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'knfsd-registry-'));
