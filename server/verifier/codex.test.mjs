@@ -568,6 +568,37 @@ test('keeps distant cited source lines within the 400-line excerpt budget', asyn
   }
 });
 
+test('keeps both ends of cited source ranges amid competing references', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-kernel-ranges-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const siw = 'drivers/infiniband/sw/siw/siw_cm.c';
+  const recv = 'net/sunrpc/xprtrdma/svc_rdma_recvfrom.c';
+  for (const name of [siw, recv]) {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Array.from({ length: 1800 }, (_, index) => `int line_${index + 1};`).join('\n'));
+  }
+  const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  run('init', '-q');
+  run('config', 'user.name', 'Test');
+  run('config', 'user.email', 'test@example.invalid');
+  run('add', '.');
+  run('commit', '-qm', 'fixture');
+  const commit = run('rev-parse', 'HEAD');
+  const source = await loadTrustedKernelSource(dir, commit, { metadata: { code_refs: [
+    `${siw}:383-408`, `${siw}:563-753`, `${siw}:653`,
+    `${recv}:321`, `${recv}:944-1027`, `${recv}:1600`,
+  ] } });
+  for (const [name, required] of [[siw, [383, 408, 563, 658, 750, 753]],
+    [recv, [321, 944, 985, 1026, 1027, 1600]]]) {
+    const excerpt = source.files.find(file => file.path === name);
+    assert.ok(excerpt, `missing ${name}`);
+    assert.ok(excerpt.lines.length <= 400);
+    const selected = new Set(excerpt.lines.map(line => line.number));
+    for (const line of required) assert.ok(selected.has(line), `missing ${name}:${line}`);
+  }
+});
+
 test('loads pinned NFS and RDMA driver files across a multi-file call path', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-rdma-source-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -611,7 +642,10 @@ test('loads pinned NFS and RDMA driver files across a multi-file call path', asy
 test('static likely verdict cannot cite a source line that is absent from the trusted checkout', async t => {
   const ungrounded = structuredClone(answer);
   ungrounded.normalized.source_evidence[0].line = 99;
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ungrounded))), error => error.code === 'ungrounded_output');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ungrounded))),
+    error => error.code === 'ungrounded_output' &&
+      error.diagnostic?.validation_stage === 'source_evidence' &&
+      Object.keys(error.diagnostic).length === 1);
 });
 
 test('post-QEMU relevance requires an exact server KASAN frame, pinned source line, and original PoC line', async t => {

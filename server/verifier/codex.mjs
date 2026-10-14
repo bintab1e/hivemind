@@ -112,10 +112,17 @@ export async function loadTrustedKernelSource(sourceDir, expectedCommit, submiss
     for (const ref of references) {
       for (let at = ref.indexOf(name); at >= 0; at = ref.indexOf(name, at + name.length)) {
         const suffix = ref.slice(at + name.length, at + name.length + 256);
-        const number = /^:(\d{1,7})\b/.exec(suffix);
+        const number = /^:(\d{1,7})(?:-(\d{1,7}))?\b/.exec(suffix);
         if (number) {
-          const center = Number(number[1]);
-          if (center >= 1 && center <= lines.length) centers.add(center);
+          const start = Number(number[1]);
+          if (start >= 1 && start <= lines.length) {
+            centers.add(start);
+            const end = Number(number[2]);
+            if (end >= start && end <= lines.length) {
+              centers.add(Math.floor((start + end) / 2));
+              centers.add(end);
+            }
+          }
         }
         const symbol = /^[#:](?!\d)([A-Za-z_][A-Za-z_0-9]{2,})\b/.exec(suffix);
         if (symbol) {
@@ -245,7 +252,7 @@ function validateResult(parsed, submission, trustedSource) {
   if (!Array.isArray(answer.source_evidence) || answer.source_evidence.length > 8 || answer.source_evidence.some(item => !exactKeys(item, ['path', 'line']) || typeof item.path !== 'string' || !Number.isInteger(item.line) || item.line < 1)) throw invalidOutput('source_refs');
   const evidence = answer.source_evidence.map(item => {
     const line = trustedSource.files.find(file => file.path === item.path)?.lines.find(row => row.number === item.line);
-    if (!line || !line.text.trim()) throw new CodexReviewError('ungrounded_output');
+    if (!line || !line.text.trim()) throw new CodexReviewError('ungrounded_output', { validation_stage: 'source_evidence' });
     return { path: item.path, line: item.line, text: line.text };
   });
   const options = field(answer.options, 500, false, 'metadata');
@@ -280,13 +287,13 @@ function validateResult(parsed, submission, trustedSource) {
   } else if (answer.poc_language !== null || buildCommand !== null || runCommand !== null) {
     throw invalidOutput('poc');
   }
-  if (parsed.verdict === 'likely' && (!title || !report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output');
+  if (parsed.verdict === 'likely' && (!title || !report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output', { validation_stage: 'likely_grounding' });
   const preAuth = answer.pre_auth;
   if (preAuth !== null && (!exactKeys(preAuth, ['source_path', 'source_line', 'poc_line']) ||
       !Number.isInteger(preAuth.source_line) || !Number.isInteger(preAuth.poc_line) || preAuth.poc_line < 1 ||
       nfsVersion !== null || !poc || parsed.verdict !== 'likely' ||
       !evidence.some(item => item.path === preAuth.source_path && item.line === preAuth.source_line) ||
-      !poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim())) throw new CodexReviewError('ungrounded_output');
+      !poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim())) throw new CodexReviewError('ungrounded_output', { validation_stage: 'pre_auth' });
   const logs = answer.log_file_indexes.map((index, number) => ({ filename: `evidence-${number + 1}.log`, original_name: submission.files[index].name, source_index: index, content: submission.files[index].content }));
   const logText = logs[0]?.content ?? '';
   if (answer.claimed_impacts.includes('kasan_read') && !/\bBUG:\s*KASAN:[\s\S]*?\bRead of size\b/i.test(logText) || answer.claimed_impacts.includes('kasan_write') && !/\bBUG:\s*KASAN:[\s\S]*?\bWrite of size\b/i.test(logText)) throw invalidOutput('logs');

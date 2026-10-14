@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { CodexReviewError } from './codex.mjs';
 import { processSubmissionJob, runWorkerOnce, stableWorkerId } from './worker.mjs';
 
 const commit = 'a'.repeat(40);
@@ -52,6 +53,14 @@ test('worker identity is stable per instance rather than pinned to an RC or stab
   const first = config(t);
   assert.equal(stableWorkerId(first, 'host'), stableWorkerId({ ...first }, 'host'));
   assert.notEqual(stableWorkerId(first, 'host'), stableWorkerId({ ...first, workRoot: '/other' }, 'host'));
+});
+
+test('ungrounded model output reports only a safe validation stage', async t => {
+  const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
+    reviewer: async () => { throw new CodexReviewError('ungrounded_output',
+      { validation_stage: 'source_evidence', private_text: 'do not expose this PoC' }); } });
+  assert.equal(result.review.reason, 'ungrounded_output {"validation_stage":"source_evidence"}');
+  assert.doesNotMatch(result.review.reason, /private_text|PoC/);
 });
 
 test('static screening preserves original C/log and never invokes a VM', async t => {
