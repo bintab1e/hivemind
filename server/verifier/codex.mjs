@@ -419,8 +419,15 @@ Untrusted submission JSON:
 ${serialized}
 </submission>
 `;
-  const { parsed, model } = await runStructuredCodex(prompt, schemaPath, options);
-  return { ...validateResult(parsed, submission, trustedSource), model };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { parsed, model } = await runStructuredCodex(prompt, schemaPath, options);
+      return { ...validateResult(parsed, submission, trustedSource), model };
+    } catch (error) {
+      if (attempt || !(error instanceof CodexReviewError) ||
+          !['invalid_output', 'ungrounded_output'].includes(error.code)) throw error;
+    }
+  }
 }
 
 export async function reviewSameRootCauseWithCodex(existing, review, options = {}) {

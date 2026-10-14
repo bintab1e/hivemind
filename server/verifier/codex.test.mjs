@@ -176,6 +176,42 @@ test('identifies invalid output stage without retaining model text', async t => 
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'json_parse');
 });
 
+test('retries a malformed or ungrounded static review once without promoting the first result', async t => {
+  const malformed = structuredClone(answer);
+  malformed.normalized.extra = 'PRIVATE_EVIDENCE';
+  const ungrounded = structuredClone(answer);
+  ungrounded.normalized.source_evidence[0].line = 99;
+  for (const firstResult of [malformed, ungrounded, '{']) {
+    const cli = fakeCli(t, answer);
+    const countPath = path.join(path.dirname(cli), 'attempts');
+    fs.appendFileSync(cli, `
+const countPath = ${JSON.stringify(countPath)};
+const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+if (count === 1) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(typeof firstResult === 'string' ? firstResult : JSON.stringify(firstResult))});
+`);
+    const review = await reviewSubmissionWithCodex(submission, options(cli));
+    assert.equal(review.verdict, 'likely');
+    assert.equal(fs.readFileSync(countPath, 'utf8'), '2');
+  }
+});
+
+test('persistent invalid output fails closed after two calls; CLI turn errors are not retried', async t => {
+  const invalid = structuredClone(answer);
+  invalid.normalized.extra = 'PRIVATE_EVIDENCE';
+  for (const [event, expectedCount, expectedCode] of [
+    [{ type: 'turn.completed' }, '2', 'invalid_output'],
+    [{ type: 'turn.failed' }, '1', 'turn_failed'],
+  ]) {
+    const cli = fakeCli(t, invalid, event);
+    const countPath = path.join(path.dirname(cli), 'attempts');
+    fs.appendFileSync(cli, `fs.appendFileSync(${JSON.stringify(countPath)}, 'x');\n`);
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(cli)), error =>
+      error.code === expectedCode && !JSON.stringify(error).includes('PRIVATE_EVIDENCE'));
+    assert.equal(fs.readFileSync(countPath, 'utf8'), 'x'.repeat(Number(expectedCount)));
+  }
+});
+
 test('pre-auth review requires grounded source and original C PoC lines without a fabricated NFS version', async t => {
   const direct = structuredClone(answer);
   direct.normalized.nfs_version = null;
