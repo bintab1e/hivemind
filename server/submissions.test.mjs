@@ -10,18 +10,30 @@ import { claimPrimitiveReview, claimSubmission, completeSubmission, getVerifiedA
 import { listRegistry } from './registry.mjs';
 
 const commit = 'a'.repeat(40);
+const entryLine = 'int nfsd4_proc_compound(const char *buffer, unsigned int count) {';
 const line = 'if (count > available) return -EINVAL;';
 const poc = 'int main(void) { return 0; }\n';
 const log = 'BUG: KASAN: submitted claim\nRead of size 4\n';
 const report = `## Summary\n요청 길이 검사 후보입니다.\n\n## Root cause\nfs/nfsd/nfs4proc.c:42\n\`\`\`c\n${line}\n\`\`\`\n\n## Reproduction environment\n서버 검증은 제출 자료의 정적 검토만 수행했습니다.\n\n## PoC\n원본 C 요청입니다.\n\n## Impact analysis\n제출 로그는 미재현 주장입니다.`;
 const artifact = (name, kind, content) => ({ name, kind, content_base64: Buffer.from(content).toString('base64') });
+const sourceProof = { path: 'fs/nfsd/nfs4proc.c', line: 42,
+  explanation: 'The reviewed source line is part of the claimed request path.' };
+const proof = { entry: { path: 'fs/nfsd/nfs4proc.c', line: 41,
+  explanation: 'This entry point receives the input from the caller.' },
+  flaw: sourceProof, impact: sourceProof, defenses: sourceProof,
+  poc: { line: 1, explanation: 'The original C source line constructs the submitted request.' },
+  log: { index: 1, line: 1, explanation: 'The submitted diagnostic line names the claimed failure.' } };
+const proofReview = { verdict: 'supports', reason: 'All required static links were independently challenged',
+  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported', defenses: 'supported' } };
 const raw = (id, metadata = {}) => ({ project: 'knfsd', client_submission_id: id, title: 'NFS request length error',
   report, metadata: { version_id: '7.3-rc7', repo_commit: commit, nfs_version: '4.2', ...metadata },
   files: [artifact('source.c', 'poc', poc), artifact('submitted.log', 'log', log)] });
 const verdict = ({ integrity = 'clear', existingId = null, anchorLine = 42 } = {}) => ({
   review: { verdict: 'likely', integrity: { verdict: integrity, reason: integrity === 'clear' ? 'No artificial conditions' : 'Kernel delay added' },
     reason: 'Source and original C PoC support a plausible static candidate',
-    grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: anchorLine, text: line }] },
+    proof, proof_review: proofReview,
+    grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: anchorLine, text: line },
+      { path: 'fs/nfsd/nfs4proc.c', line: 41, text: entryLine }] },
     ...(existingId ? { same_root_cause: { verdict: 'same', management_id: existingId, reason: 'Same faulty invariant' } } : {}),
     normalized: { title: 'NFS request length error', report, file_path: 'fs/nfsd/nfs4proc.c',
       code_refs: ['fs/nfsd/nfs4proc.c:42'], nfs_version: '4.2', permission: 'AUTH_SYS',
@@ -78,6 +90,23 @@ test('suspicious shortcuts, uncertain screening and forged 2VM results never rec
   const forged = submit(db, 'forged');
   const claimed = claimSubmission(db, commit);
   assert.throws(() => completeSubmission(db, forged, { ...verdict(), reproduction: { status: 'observed' } }, claimed.lease_token), /Dynamic evidence/);
+  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
+});
+
+test('missing or disputed static proof never receives a management number', t => {
+  const db = setup(t);
+  for (const [name, change] of [
+    ['missing-proof', result => { delete result.review.proof; }],
+    ['no-second-review', result => { delete result.review.proof_review; }],
+    ['contradiction', result => { result.review.proof_review = { ...proofReview, verdict: 'refutes' }; }],
+    ['missing-poc-anchor', result => { result.review.proof = { ...proof, poc: { ...proof.poc, line: 99 } }; }],
+    ['missing-log-anchor', result => { result.review.proof = { ...proof, log: { ...proof.log, line: 99 } }; }],
+  ]) {
+    const id = submit(db, name);
+    const result = verdict();
+    change(result);
+    assert.equal(approve(db, id, result).status, 'needs_review', name);
+  }
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 

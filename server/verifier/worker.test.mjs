@@ -7,6 +7,7 @@ import { processSubmissionJob, runWorkerOnce, stableWorkerId } from './worker.mj
 
 const commit = 'a'.repeat(40);
 const stableCommit = 'b'.repeat(40);
+const entryLine = 'int nfsd4_proc_compound(const char *buffer, unsigned int count) {';
 const line = 'if (count > available) return -EINVAL;';
 const poc = 'int main(void) { return 0; }\n';
 const log = 'BUG: KASAN: submitted only\nRead of size 4\n';
@@ -17,10 +18,20 @@ const job = { submission_id: 'c'.repeat(64), lease_token: 'd'.repeat(64), projec
     { name: 'original.c', kind: 'poc', content_base64: Buffer.from(poc).toString('base64') },
     { name: 'original.log', kind: 'log', content_base64: Buffer.from(log).toString('base64') },
   ] };
-const trustedSource = { commit, files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [{ number: 42, text: line }] }] };
+const trustedSource = { commit, files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [{ number: 41, text: entryLine }, { number: 42, text: line }] }] };
+const sourceProof = { path: 'fs/nfsd/nfs4proc.c', line: 42, explanation: 'This source line is part of the alleged request path.' };
+const proof = { entry: { path: 'fs/nfsd/nfs4proc.c', line: 41,
+  explanation: 'This source entry point receives the input from the caller.' },
+  flaw: sourceProof, impact: sourceProof, defenses: sourceProof,
+  poc: { line: 1, explanation: 'This original C line constructs the submitted request.' },
+  log: { index: 1, line: 1, explanation: 'This submitted trace names the claimed failure.' } };
+const proofReviewer = async () => ({ verdict: 'supports', reason: 'All five static links withstand independent review',
+  checks: { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported', defenses: 'supported' } });
 const reviewer = async () => ({ verdict: 'likely', integrity: { verdict: 'clear', reason: 'No artificial conditions' },
   reason: 'Plausible static candidate', model: 'test',
-  grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 42, text: line }] },
+  proof,
+  grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 42, text: line },
+    { path: 'fs/nfsd/nfs4proc.c', line: 41, text: entryLine }] },
   normalized: { title: 'NFS request length error', report, file_path: 'fs/nfsd/nfs4proc.c',
     code_refs: ['fs/nfsd/nfs4proc.c:42'], nfs_version: '4.2', permission: 'AUTH_SYS',
     vulnerability_type: 'OOB Read',
@@ -42,11 +53,12 @@ test('worker identity is stable per instance rather than pinned to an RC or stab
 
 test('static screening preserves original C/log and never invokes a VM', async t => {
   const phases = [];
-  const result = await processSubmissionJob(job, { config: config(t), reviewer,
+  const result = await processSubmissionJob(job, { config: config(t), reviewer, proofReviewer,
     sourceLoader: async (directory, requested) => {
       assert.equal(directory, '/trusted/rc'); assert.equal(requested, commit); return trustedSource;
     }, onPhase: phase => phases.push(phase) });
   assert.equal(result.review.verdict, 'likely');
+  assert.equal(result.review.proof_review.verdict, 'supports');
   assert.equal(result.reproduction.status, 'not_run');
   assert.deepEqual(phases, ['static_review']);
   assert.equal(result.artifacts.poc.source, poc);
@@ -56,14 +68,27 @@ test('static screening preserves original C/log and never invokes a VM', async t
 
 test('suspicious shortcut is never promoted even if source path is plausible', async t => {
   const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
-    reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'suspect', reason: 'Injected kernel delay' } }) });
+    proofReviewer, reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'suspect', reason: 'Injected kernel delay' } }) });
   assert.equal(result.review.integrity.verdict, 'suspect');
   assert.equal(result.artifacts, undefined);
 });
 
+test('missing proof or independent contradiction prevents canonical promotion', async t => {
+  const cfg = config(t);
+  const sourceLoader = async () => trustedSource;
+  const missing = await processSubmissionJob(job, { config: cfg, reviewer: async () => ({ ...await reviewer(), proof: null }),
+    proofReviewer, sourceLoader });
+  assert.equal(missing.review.verdict, 'uncertain');
+  assert.equal(missing.artifacts, undefined);
+  const contradicted = await processSubmissionJob(job, { config: cfg, reviewer, sourceLoader,
+    proofReviewer: async () => ({ ...await proofReviewer(), verdict: 'refutes', reason: 'A bounds check prevents the claimed access' }) });
+  assert.equal(contradicted.review.verdict, 'uncertain');
+  assert.equal(contradicted.artifacts, undefined);
+});
+
 test('uncertain same-root candidates stop automatic numbering', async t => {
   const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
-    reviewer, candidateLookup: async () => ({ candidates: [{ management_id: 'A-005', title: 'old',
+    reviewer, proofReviewer, candidateLookup: async () => ({ candidates: [{ management_id: 'A-005', title: 'old',
       file_path: 'fs/nfsd/nfs4proc.c', report }], truncated: false }),
     sameRootReviewer: async () => ({ verdict: 'uncertain', reason: 'Old report incomplete' }) });
   assert.equal(result.review.same_root_cause.verdict, 'uncertain');
@@ -78,7 +103,7 @@ test('two pooled workers claim compatible commits and report active target only 
     return endpoint === '/claim' ? { job } : endpoint === '/same-root-candidates'
       ? { candidates: [], truncated: false } : {};
   };
-  assert.equal(await runWorkerOnce({ config: cfg, transport, reviewer, sourceLoader: async () => trustedSource,
+  assert.equal(await runWorkerOnce({ config: cfg, transport, reviewer, proofReviewer, sourceLoader: async () => trustedSource,
     workerId: 'e'.repeat(32) }), true);
   assert.deepEqual(calls[0].body.supported_commits, [commit, stableCommit]);
   assert.equal(calls.find(call => call.endpoint === '/heartbeat' && call.body.submission_id).body.target_commit, commit);

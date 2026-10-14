@@ -369,6 +369,31 @@ function checkedPoc(db, submissionId, normalized) {
   return { source, language: 'c', filename: 'poc.c' };
 }
 
+function supportedStaticProof(db, submissionId, review, poc) {
+  const checks = review.proof_review?.checks;
+  if (review.proof_review?.verdict !== 'supports' || !checks ||
+      !['reachability', 'flaw', 'poc', 'log', 'defenses'].every(name => checks[name] === 'supported')) return false;
+  const proof = review.proof;
+  const evidence = review.grounding?.evidence;
+  if (!proof || !Array.isArray(evidence)) return false;
+  const sourceAnchor = anchor => anchor && typeof anchor.path === 'string' &&
+    Number.isInteger(anchor.line) && typeof anchor.explanation === 'string' && anchor.explanation.trim().length >= 16 &&
+    evidence.some(line => line.path === anchor.path && line.line === anchor.line &&
+      typeof line.text === 'string' && line.text.trim());
+  if (!['entry', 'flaw', 'impact', 'defenses'].every(name => sourceAnchor(proof[name])) ||
+      proof.flaw.path !== review.normalized?.file_path ||
+      proof.entry.path === proof.flaw.path && proof.entry.line === proof.flaw.line) return false;
+  if (!Number.isInteger(proof.poc?.line) || typeof proof.poc.explanation !== 'string' ||
+      proof.poc.explanation.trim().length < 16 || !poc.source.split(/\r?\n/)[proof.poc.line - 1]?.trim()) return false;
+  const logIndex = review.normalized?.logs?.[0]?.source_index;
+  if (!Number.isInteger(logIndex) || proof.log?.index !== logIndex ||
+      !Number.isInteger(proof.log.line) || typeof proof.log.explanation !== 'string' ||
+      proof.log.explanation.trim().length < 16) return false;
+  const submittedLog = db.prepare('SELECT content FROM submission_artifacts WHERE submission_id = ? AND ordinal = ?')
+    .get(submissionId, logIndex);
+  return Boolean(submittedLog && utf8(submittedLog.content)?.split(/\r?\n/)[proof.log.line - 1]?.trim());
+}
+
 function frontMatter(data, report) {
   const lines = ['---'];
   for (const [key, item] of Object.entries(data)) {
@@ -662,6 +687,8 @@ export function completeSubmission(db, id, result, leaseToken) {
     if (run.status !== 'not_run' || result.server_serial || run.observation || run.kernelCommit) invalid('Dynamic evidence is not accepted by the static screening route');
     const summary = { static_verdict: review.verdict, dynamic_status: 'not_run',
       integrity: review.integrity?.verdict ?? 'uncertain',
+      proof_review: review.proof_review && typeof review.proof_review === 'object'
+        ? { verdict: review.proof_review.verdict, reason: String(review.proof_review.reason || '').slice(0, 1000) } : null,
       ...(existingManagementId ? { same_root_cause: {
         verdict: ['same', 'different', 'uncertain'].includes(review.same_root_cause?.verdict)
           ? review.same_root_cause.verdict : 'uncertain',
@@ -719,6 +746,10 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', error.message, summary); db.exec('COMMIT'); return out;
     }
     if (!poc) { const out = mark(db, id, 'needs_review', 'No selected PoC source', summary); db.exec('COMMIT'); return out; }
+    if (!supportedStaticProof(db, id, review, poc)) {
+      const out = mark(db, id, 'needs_review', 'Static vulnerability proof or independent challenge is incomplete', summary);
+      db.exec('COMMIT'); return out;
+    }
     if (preAuthMode && (!Number.isInteger(preAuth.source_line) || !Number.isInteger(preAuth.poc_line) ||
         preAuth.poc_line < 1 || !poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim() ||
         !review.grounding?.evidence?.some(item => item.path === preAuth.source_path && item.line === preAuth.source_line &&

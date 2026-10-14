@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reason", "integrity", "normalized"],
+  "required": ["verdict", "reason", "integrity", "normalized", "proof"],
   "properties": {
     "verdict": { "type": "string", "enum": ["likely", "unlikely", "uncertain"] },
     "reason": { "type": "string" },
@@ -10,6 +10,24 @@
       "required": ["verdict", "reason"], "properties": {
         "verdict": { "type": "string", "enum": ["clear", "suspect", "uncertain"] },
         "reason": { "type": "string" }
+      }
+    },
+    "proof": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["entry", "flaw", "impact", "defenses", "poc", "log"],
+      "properties": {
+        "entry": { "$ref": "#/$defs/sourceAnchor" },
+        "flaw": { "$ref": "#/$defs/sourceAnchor" },
+        "impact": { "$ref": "#/$defs/sourceAnchor" },
+        "defenses": { "$ref": "#/$defs/sourceAnchor" },
+        "poc": { "type": "object", "additionalProperties": false,
+          "required": ["line", "explanation"],
+          "properties": { "line": { "type": "integer", "minimum": 1 }, "explanation": { "type": "string" } }
+        },
+        "log": { "type": "object", "additionalProperties": false,
+          "required": ["index", "line", "explanation"],
+          "properties": { "index": { "type": "integer", "minimum": 0 }, "line": { "type": "integer", "minimum": 1 }, "explanation": { "type": "string" } }
+        }
       }
     },
     "normalized": {
@@ -37,6 +55,16 @@
         "build_command": { "type": ["string", "null"] },
         "run_command": { "type": ["string", "null"] },
         "log_file_indexes": { "type": "array", "items": { "type": "integer" } }
+      }
+    }
+  },
+  "$defs": {
+    "sourceAnchor": { "type": "object", "additionalProperties": false,
+      "required": ["path", "line", "explanation"],
+      "properties": {
+        "path": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "explanation": { "type": "string" }
       }
     }
   }

@@ -4,15 +4,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 
 const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [
-  { number: 1, text: 'int nfsd4_proc_compound(void) { return 0; }' },
+  { number: 1, text: 'int nfsd4_proc_compound(void) {' },
+  { number: 2, text: '  return decode_compound_request();' },
 ] }] };
 const options = cliPath => ({ cliPath, trustedSource });
 
-test('both structured-output schemas are valid JSON', () => {
-  for (const name of ['codex-output.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json', 'codex-same-root.schema.json']) {
+test('structured-output schemas are valid JSON', () => {
+  for (const name of ['codex-output.schema.json', 'codex-proof.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json', 'codex-same-root.schema.json']) {
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(new URL(name, import.meta.url), 'utf8')));
   }
 });
@@ -32,12 +33,20 @@ const answer = {
   verdict: 'likely',
   reason: 'The code path is plausible but requires reproduction.',
   integrity: { verdict: 'clear', reason: 'Original C PoC, source and submitted log agree without test-only modifications.' },
+  proof: {
+    entry: { path: 'fs/nfsd/nfs4proc.c', line: 1, explanation: 'Entry point for the request.' },
+    flaw: { path: 'fs/nfsd/nfs4proc.c', line: 2, explanation: 'Claimed faulty decode operation.' },
+    impact: { path: 'fs/nfsd/nfs4proc.c', line: 2, explanation: 'Claimed effect of that operation.' },
+    defenses: { path: 'fs/nfsd/nfs4proc.c', line: 2, explanation: 'Relevant check is claimed inadequate.' },
+    poc: { line: 1, explanation: 'Original C trigger line.' },
+    log: { index: 2, line: 2, explanation: 'Submitted diagnostic read line.' },
+  },
   normalized: {
     title: 'NFSv4 COMPOUND boundary out-of-bounds read',
     report: '## Summary\n경계 검사가 의심됩니다.\n\n## Root cause\nfs/nfsd/nfs4proc.c:1 코드에서 검사가 필요합니다.\n```c\nint nfsd4_proc_compound(void) { return 0; }\n```\n\n## Reproduction environment\n제출 환경만 확인했고 2VM 실행 전입니다.\n\n## PoC\nC 프로그램이 경계를 검사합니다.\n\n## Impact analysis\n제출 로그는 KASAN 읽기를 주장하지만 재현 전입니다.',
     file_path: 'fs/nfsd/nfs4proc.c',
     code_refs: ['fs/nfsd/nfs4proc.c:nfsd4_proc_compound'],
-    source_evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1 }],
+    source_evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1 }, { path: 'fs/nfsd/nfs4proc.c', line: 2 }],
     options: null,
     permission: 'AUTH_SYS',
     nfs_version: '4.2',
@@ -120,9 +129,53 @@ test('uses a C PoC, includes impact allegations, retains original evidence, and 
     build_command: 'cc -o poc poc.c', run_command: './poc',
   });
   assert.deepEqual(result.normalized.logs, [{ filename: 'evidence-1.log', original_name: 'report.txt', source_index: 2, content: submission.files[2].content }]);
-  assert.deepEqual(result.grounding, { source_commit: trustedSource.commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 1, text: trustedSource.files[0].lines[0].text }] });
+  assert.deepEqual(result.grounding, { source_commit: trustedSource.commit, evidence: trustedSource.files[0].lines.map(line => ({ path: 'fs/nfsd/nfs4proc.c', line: line.number, text: line.text })) });
+  assert.deepEqual(result.proof, answer.proof);
   assert.equal(Object.hasOwn(result, 'reproduced'), false);
   assert.equal(Object.hasOwn(result, 'approved'), false);
+});
+
+test('likely static proof requires distinct grounded entry and flaw, original PoC and primary log lines', async t => {
+  for (const alter of [
+    result => { result.proof = null; },
+    result => { result.proof.flaw.line = 1; },
+    result => { result.proof.defenses.line = 99; },
+    result => { result.proof.poc.line = 99; },
+    result => { result.proof.log.index = 0; },
+    result => { result.proof.log.line = 99; },
+  ]) {
+    const invalid = structuredClone(answer);
+    alter(invalid);
+    await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, invalid))),
+      error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof');
+  }
+  const uncertain = structuredClone(answer);
+  uncertain.verdict = 'uncertain';
+  uncertain.proof = null;
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, uncertain)))).proof, null);
+  uncertain.proof = structuredClone(answer.proof);
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, uncertain))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof');
+});
+
+test('independent proof review only supports when every static check is supported', async t => {
+  const first = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
+  const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
+    log: 'supported', defenses: 'supported' };
+  const confirmed = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { verdict: 'supports', reason: 'All submitted claims match the shown source.', checks },
+    { type: 'turn.completed' }, 0, '<first-review>')));
+  assert.deepEqual(confirmed, { verdict: 'supports', reason: 'All submitted claims match the shown source.', checks });
+  const conflicting = { verdict: 'supports', reason: 'Unresolved guard.', checks: { ...checks, defenses: 'uncertain' } };
+  await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, conflicting,
+    { type: 'turn.completed' }, 0, '<first-review>'))),
+  error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  const uncertain = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { verdict: 'uncertain', reason: 'Missing guard context.', checks: conflicting.checks },
+    { type: 'turn.completed' }, 0, '<first-review>')));
+  assert.equal(uncertain.verdict, 'uncertain');
+  await assert.rejects(reviewStaticProofWithCodex(submission, { ...first, proof: null }, options(fakeCli(t, confirmed))),
+    error => error.code === 'invalid_proof_input');
 });
 
 test('fills omitted C PoC command hints and requires a C PoC for a likely verdict', async t => {
@@ -222,7 +275,7 @@ test('pre-auth review requires grounded source and original C PoC lines without 
   assert.equal(reviewed.normalized.nfs_version, null);
   assert.deepEqual(reviewed.normalized.pre_auth, direct.normalized.pre_auth);
   for (const change of [
-    result => { result.normalized.pre_auth.source_line = 2; },
+    result => { result.normalized.pre_auth.source_line = 99; },
     result => { result.normalized.pre_auth.poc_line = 9; },
     result => { result.normalized.nfs_version = '4.2'; },
   ]) {
@@ -445,7 +498,7 @@ test('post-QEMU relevance requires an exact server KASAN frame, pinned source li
   await assert.rejects(reviewReproductionWithCodex(input,
     { cliPath: fakeCli(t, { ...supporting, trace_line: 'invented frame' }, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
   await assert.rejects(reviewReproductionWithCodex(input,
-    { cliPath: fakeCli(t, { ...supporting, source_line: 2 }, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
+    { cliPath: fakeCli(t, { ...supporting, source_line: 99 }, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
   await assert.rejects(reviewReproductionWithCodex({ ...input, symbolizedFrames: [{ ...symbolizedFrames[0], locations: [] }] },
     { cliPath: fakeCli(t, supporting, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
   await assert.rejects(reviewReproductionWithCodex({ ...input, symbolizedFrames: [{ ...symbolizedFrames[0], locations: [

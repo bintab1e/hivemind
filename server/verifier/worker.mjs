@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewSameRootCauseWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewSameRootCauseWithCodex, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 import { canonicalArtifacts } from './canonical.mjs';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -148,7 +148,8 @@ function safeCodexDiagnostic(value) {
 }
 
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
-  sameRootReviewer = reviewSameRootCauseWithCodex, candidateLookup = async () => ({ candidates: [], truncated: false }),
+  proofReviewer = reviewStaticProofWithCodex, sameRootReviewer = reviewSameRootCauseWithCodex,
+  candidateLookup = async () => ({ candidates: [], truncated: false }),
   onPhase = async () => {} } = {}) {
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
   let artifacts;
@@ -168,6 +169,18 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
           trustedSource.files.some(file => file.path === item.path && file.lines.some(line => line.number === item.line && line.text === item.text)))) {
       review.verdict = 'uncertain';
       review.reason = 'Static review lacks trusted source evidence';
+      return { review, reproduction: notRun };
+    }
+    if (!review.proof) {
+      review.verdict = 'uncertain';
+      review.reason = 'Static review lacks a complete vulnerability proof';
+      return { review, reproduction: notRun };
+    }
+    review.proof_review = await proofReviewer(submission, review, { cliPath: config.cliPath, trustedSource });
+    if (review.proof_review?.verdict !== 'supports' ||
+        Object.values(review.proof_review.checks || {}).some(check => check !== 'supported')) {
+      review.verdict = 'uncertain';
+      review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`.slice(0, 1000);
       return { review, reproduction: notRun };
     }
     if (submission.metadata.existing_management_id) {
@@ -222,7 +235,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
 }
 
 export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader,
-  sameRootReviewer, workerId = null } = {}) {
+  proofReviewer, sameRootReviewer, workerId = null } = {}) {
   const targets = sourceTargets(config);
   const supportedCommits = [...targets.keys()];
   const claimed = await transport(config.socketPath, '/claim', { supported_commits: supportedCommits });
@@ -245,7 +258,7 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     : Promise.resolve();
   try {
     const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader,
-      sameRootReviewer, candidateLookup: async request =>
+      proofReviewer, sameRootReviewer, candidateLookup: async request =>
         transport(config.socketPath, '/same-root-candidates', request), onPhase });
     if (!result.infrastructure_error) await onPhase('finalizing');
     if (Array.isArray(result.review?.normalized?.logs)) {

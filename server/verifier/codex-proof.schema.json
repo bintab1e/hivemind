@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reason", "checks"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["supports", "refutes", "uncertain"] },
+    "reason": { "type": "string" },
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reachability", "flaw", "poc", "log", "defenses"],
+      "properties": {
+        "reachability": { "$ref": "#/$defs/check" },
+        "flaw": { "$ref": "#/$defs/check" },
+        "poc": { "$ref": "#/$defs/check" },
+        "log": { "$ref": "#/$defs/check" },
+        "defenses": { "$ref": "#/$defs/check" }
+      }
+    }
+  },
+  "$defs": {
+    "check": { "type": "string", "enum": ["supported", "uncertain", "contradicted"] }
+  }
+}
