@@ -153,10 +153,27 @@ test('canonicalizes common permission and NFS version aliases, rejecting ambiguo
     ['NFSv4 COMPOUND boundary out-of-bounds read', 'AUTH_SYS', '4.2', 'Race, UAF']);
   const ambiguous = structuredClone(answer);
   ambiguous.normalized.nfs_version = '4.1, 4.2';
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ambiguous))), error => error.code === 'invalid_output');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ambiguous))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'metadata');
   const unstructured = structuredClone(answer);
   unstructured.normalized.report = '## Summary\nOnly one section.';
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unstructured))), error => error.code === 'invalid_output');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unstructured))),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'report_format');
+});
+
+test('identifies invalid output stage without retaining model text', async t => {
+  const extra = structuredClone(answer);
+  extra.normalized.extra = 'PRIVATE_EVIDENCE';
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, extra))), error => {
+    assert.equal(error.code, 'invalid_output');
+    assert.deepEqual(error.diagnostic, { validation_stage: 'shape' });
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE_EVIDENCE/);
+    return true;
+  });
+  const malformed = fakeCli(t, answer);
+  fs.appendFileSync(malformed, "fs.writeFileSync(args[args.indexOf('-o') + 1], '{');\n");
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(malformed)),
+    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'json_parse');
 });
 
 test('pre-auth review requires grounded source and original C PoC lines without a fabricated NFS version', async t => {
@@ -188,10 +205,12 @@ test('fails closed when CLI is missing or submitted paths are unsafe', async () 
 test('rejects unsupported Python selection when a C PoC exists and invalid model indexes', async t => {
   const wrongLanguage = structuredClone(answer);
   Object.assign(wrongLanguage.normalized, { poc_file_index: 0, poc_language: 'python', build_command: null, run_command: 'python3 poc.py' });
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, wrongLanguage))), error => error instanceof CodexReviewError && error.code === 'invalid_output');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, wrongLanguage))),
+    error => error instanceof CodexReviewError && error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'poc');
   const wrongIndex = structuredClone(answer);
   wrongIndex.normalized.log_file_indexes = [99];
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, wrongIndex))), error => error instanceof CodexReviewError && error.code === 'invalid_output');
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, wrongIndex))),
+    error => error instanceof CodexReviewError && error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'logs');
 });
 
 test('rejects incomplete or failed Codex turns even if a result file exists', async t => {

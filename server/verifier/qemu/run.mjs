@@ -159,6 +159,20 @@ async function waitFor(vm, success, failure, deadline) {
   return false;
 }
 
+export function clientPreparationFailure(vm, deadline, now = Date.now()) {
+  const serial = vm.serial || '';
+  if (/\bHV_MOUNT_EXIT:-?[1-9]\d*(?=\r?\n|$)/.test(serial)) return 'guest NFS mount failed';
+  if (/\bHV_BUILD_EXIT:-?[1-9]\d*(?=\r?\n|$)/.test(serial)) return 'guest PoC build failed';
+  if (serial.includes('HV_GUEST_TIMEOUT')) return 'guest preparation command timed out';
+  if (serial.includes('HV_GUEST_ERROR:')) return 'guest preparation raised an error';
+  if (serial.includes('HV_GUEST_FAILED')) return 'guest preparation failed';
+  if (vm.overflow) return 'client VM serial output exceeded limit';
+  if (vm.error) return 'client QEMU process error';
+  if (vm.closed) return `client QEMU exited before PoC ready (exit ${Number.isInteger(vm.exitCode) ? vm.exitCode : 'unknown'})`;
+  if (now >= deadline) return 'verification deadline expired before PoC ready';
+  return 'client VM stopped preparing PoC';
+}
+
 async function stopVm(vm) {
   if (!vm) return;
   if (!vm.closed && !vm.error) vm.child.kill('SIGTERM');
@@ -264,7 +278,7 @@ export async function runTwoVmReproduction({ bundleDir, kernelImage, kernelInfoP
       serverReadyOffset = server.serialBytes;
       client = startVm(qemuBinary, buildQemuArgs({ role: 'client', kernelImage, rootfsImage, jobImage, socketPath }), evidence.clientSerialPath, evidence.clientQemuStderrPath);
       if (!(await waitFor(client, 'HV_POC_READY', 'HV_GUEST_FAILED', deadline))) {
-        reason = `client VM did not prepare PoC: ${client.stderr || client.error?.message || 'timeout'}`;
+        reason = `client VM did not prepare PoC: ${clientPreparationFailure(client, deadline)}`;
       } else {
         await delay(2000);
         const prePocServerLog = Buffer.concat(server.serialChunks).subarray(serverReadyOffset).toString('utf8');

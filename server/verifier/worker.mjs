@@ -134,6 +134,10 @@ const inconclusive = reason => ({ status: 'inconclusive', reason });
 
 function safeCodexDiagnostic(value) {
   if (!value || typeof value !== 'object') return '';
+  if (Object.hasOwn(value, 'validation_stage')) {
+    const stages = ['json_parse', 'shape', 'report_format', 'source_refs', 'metadata', 'poc', 'logs'];
+    return stages.includes(value.validation_stage) ? ` ${JSON.stringify({ validation_stage: value.validation_stage })}` : '';
+  }
   const pick = (key, choices) => choices.includes(value[key]) ? value[key] : 'unknown';
   const keys = new Set(['message', 'error', 'error.message', 'error.code', 'error.type']);
   const hints = new Set(['approval_workspace_routing', 'policy_rejected', 'auth_or_session', 'rate_limited',

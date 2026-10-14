@@ -377,3 +377,25 @@ test('worker emits only allowlisted diagnostic enums for a failed Codex CLI', as
   assert.equal(completed.reproduction.reason, 'invalid_request');
   assert.doesNotMatch(JSON.stringify(completed), /PRIVATE_EVIDENCE|secret/);
 });
+
+test('invalid review output exposes only an allowlisted validation stage', async t => {
+  const { config } = setup(t);
+  for (const [stage, expected] of [
+    ['report_format', 'invalid_output {"validation_stage":"report_format"}'],
+    ['PRIVATE_EVIDENCE', 'invalid_output'],
+  ]) {
+    let completed;
+    const transport = async (_socket, endpoint, body) => {
+      if (endpoint === '/claim') return { job };
+      if (endpoint === '/complete') completed = body.result;
+      return {};
+    };
+    const reviewer = async () => { throw new CodexReviewError('invalid_output', {
+      validation_stage: stage, source_text: 'PRIVATE_EVIDENCE',
+    }); };
+    assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader }), true);
+    assert.equal(completed.review.reason, expected);
+    assert.equal(completed.reproduction.reason, 'invalid_output');
+    assert.doesNotMatch(JSON.stringify(completed), /PRIVATE_EVIDENCE|source_text/);
+  }
+});

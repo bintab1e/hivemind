@@ -156,9 +156,11 @@ function exactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 }
 
-function field(value, max, required = false) {
+const invalidOutput = validation_stage => new CodexReviewError('invalid_output', { validation_stage });
+
+function field(value, max, required = false, stage = null) {
   if (value === null && !required) return null;
-  if (typeof value !== 'string' || value.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value) || (required && !value.trim())) throw new CodexReviewError('invalid_output');
+  if (typeof value !== 'string' || value.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value) || (required && !value.trim())) throw stage ? invalidOutput(stage) : new CodexReviewError('invalid_output');
   return value.trim();
 }
 
@@ -167,64 +169,63 @@ function cSource(file) {
 }
 
 function validateResult(parsed, submission, trustedSource) {
-  if (!exactKeys(parsed, ['verdict', 'reason', 'normalized']) || !['likely', 'unlikely', 'uncertain'].includes(parsed.verdict) || !exactKeys(parsed.normalized, outputKeys)) throw new CodexReviewError('invalid_output');
-  const reason = field(parsed.reason, 3000, true);
+  if (!exactKeys(parsed, ['verdict', 'reason', 'normalized']) || !['likely', 'unlikely', 'uncertain'].includes(parsed.verdict) || !exactKeys(parsed.normalized, outputKeys)) throw invalidOutput('shape');
+  const reason = field(parsed.reason, 3000, true, 'shape');
   const answer = parsed.normalized;
-  const rawTitle = field(answer.title, 300);
+  const rawTitle = field(answer.title, 300, false, 'metadata');
   const title = rawTitle?.replace(/[ \t]+/g, ' ') ?? null;
-  const report = field(answer.report, 30_000);
-  if (title && /[\r\n]/.test(title)) throw new CodexReviewError('invalid_output');
+  const report = field(answer.report, 30_000, false, 'report_format');
+  if (title && /[\r\n]/.test(title)) throw invalidOutput('metadata');
   if (parsed.verdict === 'likely') {
-    if (!report) throw new CodexReviewError('invalid_output');
+    if (!report) throw invalidOutput('report_format');
     const headings = [...report.matchAll(/^##[ \t]+([^\r\n]+)$/gm)];
     if (headings.length !== reportSections.length || headings[0].index !== 0 ||
         headings.some((heading, index) => heading[0] !== `## ${reportSections[index]}` ||
           !report.slice(heading.index + heading[0].length, headings[index + 1]?.index ?? report.length).trim())) {
-      throw new CodexReviewError('invalid_output');
+      throw invalidOutput('report_format');
     }
   }
-  const filePath = field(answer.file_path, 300);
-  if (filePath && (/^[/\\]|^[A-Za-z]:/.test(filePath) || filePath.includes('\\') || filePath.split('/').some(part => !part || part === '.' || part === '..'))) throw new CodexReviewError('invalid_output');
-  if (!Array.isArray(answer.code_refs) || answer.code_refs.length > 30 || answer.code_refs.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 300 || /[\x00-\x1f]/.test(ref))) throw new CodexReviewError('invalid_output');
-  if (!Array.isArray(answer.source_evidence) || answer.source_evidence.length > 8 || answer.source_evidence.some(item => !exactKeys(item, ['path', 'line']) || typeof item.path !== 'string' || !Number.isInteger(item.line) || item.line < 1)) throw new CodexReviewError('invalid_output');
+  const filePath = field(answer.file_path, 300, false, 'source_refs');
+  if (filePath && (/^[/\\]|^[A-Za-z]:/.test(filePath) || filePath.includes('\\') || filePath.split('/').some(part => !part || part === '.' || part === '..'))) throw invalidOutput('source_refs');
+  if (!Array.isArray(answer.code_refs) || answer.code_refs.length > 30 || answer.code_refs.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 300 || /[\x00-\x1f]/.test(ref))) throw invalidOutput('source_refs');
+  if (!Array.isArray(answer.source_evidence) || answer.source_evidence.length > 8 || answer.source_evidence.some(item => !exactKeys(item, ['path', 'line']) || typeof item.path !== 'string' || !Number.isInteger(item.line) || item.line < 1)) throw invalidOutput('source_refs');
   const evidence = answer.source_evidence.map(item => {
     const line = trustedSource.files.find(file => file.path === item.path)?.lines.find(row => row.number === item.line);
     if (!line || !line.text.trim()) throw new CodexReviewError('ungrounded_output');
     return { path: item.path, line: item.line, text: line.text };
   });
-  const options = field(answer.options, 500);
-  const rawPermission = field(answer.permission, 200);
+  const options = field(answer.options, 500, false, 'metadata');
+  const rawPermission = field(answer.permission, 200, false, 'metadata');
   const permission = rawPermission && /^(?:AUTH_NONE|AUTH_NULL)$/i.test(rawPermission) ? 'AUTH_NONE'
     : rawPermission && /^(?:AUTH_SYS|AUTH_UNIX)$/i.test(rawPermission) ? 'AUTH_SYS'
       : rawPermission && /^RPCSEC_GSS(?:\/Kerberos)?$/i.test(rawPermission) ? 'RPCSEC_GSS' : rawPermission;
-  const rawVersion = field(answer.nfs_version, 200);
+  const rawVersion = field(answer.nfs_version, 200, false, 'metadata');
   const versionMatch = rawVersion && /^(?:NFSv)?(3|4(?:\.0|\.1|\.2)?)$/i.exec(rawVersion);
-  if (rawVersion && !versionMatch) throw new CodexReviewError('invalid_output');
+  if (rawVersion && !versionMatch) throw invalidOutput('metadata');
   const nfsVersion = versionMatch ? versionMatch[1] === '4.0' ? '4' : versionMatch[1] : null;
-  const rawType = field(answer.vulnerability_type, 200);
+  const rawType = field(answer.vulnerability_type, 200, false, 'metadata');
   const vulnerabilityType = rawType && [...new Set(rawType.split(/[,;]/).map(part => {
     const label = part.trim();
     return typeAliases.get(label.toLowerCase().replace(/[-_]+/g, ' ')) || label;
   }).filter(Boolean))].join(', ');
-  if (rawType && !vulnerabilityType) throw new CodexReviewError('invalid_output');
-  const foundDate = field(answer.found_date, 10);
+  if (rawType && !vulnerabilityType) throw invalidOutput('metadata');
+  const foundDate = field(answer.found_date, 10, false, 'metadata');
   const parsedDate = foundDate ? Date.parse(`${foundDate}T00:00:00Z`) : null;
-  if (foundDate && (!/^\d{4}-\d{2}-\d{2}$/.test(foundDate) || !Number.isFinite(parsedDate) || new Date(parsedDate).toISOString().slice(0, 10) !== foundDate)) throw new CodexReviewError('invalid_output');
-  if (!Array.isArray(answer.claimed_impacts) || answer.claimed_impacts.length > impactTypes.size || new Set(answer.claimed_impacts).size !== answer.claimed_impacts.length || answer.claimed_impacts.some(value => !impactTypes.has(value))) throw new CodexReviewError('invalid_output');
-  if (!Array.isArray(answer.log_file_indexes) || answer.log_file_indexes.length > 5 || new Set(answer.log_file_indexes).size !== answer.log_file_indexes.length || answer.log_file_indexes.some(index => !Number.isInteger(index) || index < 0 || index >= submission.files.length)) throw new CodexReviewError('invalid_output');
-  let buildCommand = field(answer.build_command, 1000);
-  let runCommand = field(answer.run_command, 1000);
+  if (!Array.isArray(answer.claimed_impacts) || answer.claimed_impacts.length > impactTypes.size || new Set(answer.claimed_impacts).size !== answer.claimed_impacts.length || answer.claimed_impacts.some(value => !impactTypes.has(value))) throw invalidOutput('metadata');
+  if (!Array.isArray(answer.log_file_indexes) || answer.log_file_indexes.length > 5 || new Set(answer.log_file_indexes).size !== answer.log_file_indexes.length || answer.log_file_indexes.some(index => !Number.isInteger(index) || index < 0 || index >= submission.files.length)) throw invalidOutput('logs');
+  let buildCommand = field(answer.build_command, 1000, false, 'poc');
+  let runCommand = field(answer.run_command, 1000, false, 'poc');
   let poc = null;
   if (answer.poc_file_index !== null) {
     const index = answer.poc_file_index;
-    if (!Number.isInteger(index) || index < 0 || index >= submission.files.length || answer.poc_language !== 'c') throw new CodexReviewError('invalid_output');
+    if (!Number.isInteger(index) || index < 0 || index >= submission.files.length || answer.poc_language !== 'c') throw invalidOutput('poc');
     const file = submission.files[index];
-    if (!cSource(file)) throw new CodexReviewError('invalid_output');
+    if (!cSource(file)) throw invalidOutput('poc');
     buildCommand ||= 'gcc -O0 -g -o /tmp/hivemind-poc /mnt/job/poc.c';
     runCommand ||= '/tmp/hivemind-poc 10.77.0.1 /mnt/nfs';
     poc = { filename: 'poc.c', original_name: file.name, source_index: index, source: file.content, language: 'c', build_command: buildCommand, run_command: runCommand };
   } else if (answer.poc_language !== null || buildCommand !== null || runCommand !== null) {
-    throw new CodexReviewError('invalid_output');
+    throw invalidOutput('poc');
   }
   if (parsed.verdict === 'likely' && (!title || !report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output');
   const preAuth = answer.pre_auth;
@@ -235,7 +236,7 @@ function validateResult(parsed, submission, trustedSource) {
       !poc.source.split(/\r?\n/)[preAuth.poc_line - 1]?.trim())) throw new CodexReviewError('ungrounded_output');
   const logs = answer.log_file_indexes.map((index, number) => ({ filename: `evidence-${number + 1}.log`, original_name: submission.files[index].name, source_index: index, content: submission.files[index].content }));
   const logText = logs.map(log => log.content).join('\n');
-  if (answer.claimed_impacts.includes('kasan_read') && !/\bBUG:\s*KASAN:[\s\S]*?\bRead of size\b/i.test(logText) || answer.claimed_impacts.includes('kasan_write') && !/\bBUG:\s*KASAN:[\s\S]*?\bWrite of size\b/i.test(logText)) throw new CodexReviewError('invalid_output');
+  if (answer.claimed_impacts.includes('kasan_read') && !/\bBUG:\s*KASAN:[\s\S]*?\bRead of size\b/i.test(logText) || answer.claimed_impacts.includes('kasan_write') && !/\bBUG:\s*KASAN:[\s\S]*?\bWrite of size\b/i.test(logText)) throw invalidOutput('logs');
   return {
     verdict: parsed.verdict,
     reason,
@@ -381,7 +382,7 @@ export async function runStructuredCodex(prompt, outputSchema, options) {
     for (const line of events.split(/\r?\n/)) {
       if (!line.trim()) continue;
       let event;
-      try { event = JSON.parse(line); } catch { throw new CodexReviewError('invalid_output'); }
+      try { event = JSON.parse(line); } catch { throw invalidOutput('json_parse'); }
       if (event.type === 'turn.failed') throw new CodexReviewError('turn_failed');
       if (event.type === 'turn.completed') completed = true;
     }
@@ -390,7 +391,7 @@ export async function runStructuredCodex(prompt, outputSchema, options) {
     try {
       if (fs.statSync(outputPath).size > 100_000) throw new Error('oversize');
       parsed = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-    } catch { throw new CodexReviewError('invalid_output'); }
+    } catch { throw invalidOutput('json_parse'); }
     return { parsed, model: model ?? 'codex-default' };
   } finally {
     fs.rmSync(jobDir, { recursive: true, force: true });

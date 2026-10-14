@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildQemuArgs, summarizeEvidence, validateManifest } from './run.mjs';
+import { buildQemuArgs, clientPreparationFailure, summarizeEvidence, validateManifest } from './run.mjs';
 
 const valid = {
   schemaVersion: 1,
@@ -80,4 +80,19 @@ test('both VMs use snapshots and only a private Unix-socket link', () => {
   assert.match(client, /hivemind\.role=client/);
   assert.match(client, /stream,id=private,server=off,/);
   assert.throws(() => buildQemuArgs({ ...shared, role: 'server', socketPath: '/job/pair.sock,foo=bar' }), /option separators/);
+});
+
+test('client preparation errors use bounded diagnostics instead of a false timeout', () => {
+  const deadline = 1000;
+  const diagnose = (vm, now = 500) => clientPreparationFailure(vm, deadline, now);
+  assert.equal(diagnose({ serial: 'HV_MOUNT_EXIT:2\r\nHV_GUEST_FAILED\r\n' }), 'guest NFS mount failed');
+  assert.equal(diagnose({ serial: 'HV_BUILD_EXIT:1\nHV_GUEST_FAILED\n' }), 'guest PoC build failed');
+  assert.equal(diagnose({ serial: 'HV_GUEST_TIMEOUT\nHV_GUEST_FAILED\n' }), 'guest preparation command timed out');
+  assert.equal(diagnose({ serial: 'HV_GUEST_ERROR:ValueError\nHV_GUEST_FAILED\n' }), 'guest preparation raised an error');
+  assert.equal(diagnose({ serial: 'HV_GUEST_FAILED\n' }), 'guest preparation failed');
+  assert.equal(diagnose({ serial: '', closed: true, exitCode: 1, stderr: 'sensitive path' }), 'client QEMU exited before PoC ready (exit 1)');
+  assert.equal(diagnose({ serial: '', error: new Error('sensitive path') }), 'client QEMU process error');
+  assert.equal(diagnose({ serial: '', overflow: true }), 'client VM serial output exceeded limit');
+  assert.equal(diagnose({ serial: '' }, 1000), 'verification deadline expired before PoC ready');
+  assert.equal(diagnose({ serial: '' }), 'client VM stopped preparing PoC');
 });
