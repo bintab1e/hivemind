@@ -143,6 +143,9 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .finding-table .registry-id{color:#c7b6ff}
 .finding-table .registry-unassigned{color:#aab3c3}
 .finding-table .registry-wrap{max-width:180px;white-space:normal;line-height:1.35}
+.finding-table .registry-option-cell{min-width:180px;max-width:180px}
+.registry-option-button{display:block;width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;color:#c7b6ff;text-align:left;padding:0;font:inherit;cursor:pointer}
+.registry-option-button:hover{text-decoration:underline}
 .finding-table .registry-title-cell{min-width:320px;max-width:320px}
 .finding-table .finding-edit-input{display:block;width:160px;max-width:100%;min-width:95px;height:30px;border:1px solid #6c5b96;border-radius:4px;background:#101522;color:#f1edfa;padding:5px 7px;font-size:11px}
 .finding-table .registry-title-cell .finding-edit-input{width:290px}
@@ -197,9 +200,11 @@ footer{display:flex;justify-content:space-between;gap:12px;padding:19px 0 32px;c
 footer a{color:#b9a8fb}
 .muted{color:#8994aa;font-size:11px}
 .eyebrow{font-size:10px;letter-spacing:.13em;font-weight:800;color:#ad9cff;margin:0 0 8px}
-.detail-dialog,.zip-submit-dialog{width:min(1000px,calc(100% - 28px));max-height:90vh;padding:0;border:1px solid #41465a;border-radius:9px;background:#11151f;color:#e7e9f2;box-shadow:0 24px 90px #000b}
+.detail-dialog,.zip-submit-dialog,.option-dialog{width:min(1000px,calc(100% - 28px));max-height:90vh;padding:0;border:1px solid #41465a;border-radius:9px;background:#11151f;color:#e7e9f2;box-shadow:0 24px 90px #000b}
 .zip-submit-dialog{width:min(760px,calc(100% - 28px));overflow:auto}
-.detail-dialog::backdrop,.zip-submit-dialog::backdrop{background:#050710d9}
+.option-dialog{width:min(640px,calc(100% - 28px));overflow:auto}
+.option-dialog pre{margin:0 24px 24px;padding:15px;border:1px solid #303747;border-radius:6px;background:#0b101a;color:#dce2ed;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 Consolas,"Cascadia Code",monospace}
+.detail-dialog::backdrop,.zip-submit-dialog::backdrop,.option-dialog::backdrop{background:#050710d9}
 .detail-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 #queue-detail[open]{overflow:auto}
 .dialog-top{display:flex;justify-content:space-between;gap:15px;padding:22px 24px 16px}

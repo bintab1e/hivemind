@@ -419,6 +419,12 @@ function findingHeading(label, key) {
   return head;
 }
 
+function openOptionDetail(finding) {
+  $('option-detail-title').textContent = `${finding.management_id || finding.title} · 옵션`;
+  $('option-detail-content').textContent = finding.option;
+  $('option-detail').showModal();
+}
+
 function findingCell(finding, key) {
   if (key === 'management_id') {
     const cell = element('td', 'registry-id-cell');
@@ -448,6 +454,16 @@ function findingCell(finding, key) {
     const tone = status === '제보 완료' ? 'done' : status === '철회' ? 'withdrawn' : status === '중복' ? 'duplicate' : '';
     const cell = element('td');
     cell.append(element('span', `report-status ${tone}`, status));
+    return cell;
+  }
+  if (key === 'option') {
+    const cell = element('td', 'registry-option-cell');
+    if (!finding.option) { cell.textContent = '—'; return cell; }
+    const button = element('button', 'registry-option-button', finding.option);
+    button.type = 'button';
+    button.setAttribute('aria-label', `${finding.management_id || finding.title} 옵션 전체 보기`);
+    button.addEventListener('click', () => openOptionDetail(finding));
+    cell.append(button);
     return cell;
   }
   return element('td', ['option', 'vulnerability_type'].includes(key) ? 'registry-wrap' : '', finding[key] || '—');
@@ -1328,6 +1344,7 @@ function selectCoverageAgent(id) {
 for (const button of document.querySelectorAll('[data-detail-tab]')) button.addEventListener('click', () => { state.detailTab = button.dataset.detailTab; showDetailTab(); });
 $('detail-revision').addEventListener('change', event => { state.detailRevision = event.target.value; showDetailTab(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
+$('close-option-detail').addEventListener('click', () => $('option-detail').close());
 $('close-queue-detail').addEventListener('click', () => $('queue-detail').close());
 $('queue-detail').addEventListener('close', () => {
   if (activeView() !== 'queue') return;
