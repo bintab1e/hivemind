@@ -144,6 +144,20 @@ test('pooled claim picks oldest compatible target and idle heartbeats expose no 
   assert.equal(card.status, 'idle');
 });
 
+test('queue shows only the two current pooled verifiers while legacy cards age out', t => {
+  const db = setup(t);
+  const oldRc = '1'.repeat(32), oldStable = '2'.repeat(32);
+  heartbeatWorker(db, { worker_id: oldRc, target_commit: commit });
+  heartbeatWorker(db, { worker_id: oldStable, target_commit: 'b'.repeat(40) });
+  db.prepare('UPDATE verifier_workers SET last_seen_at = ? WHERE worker_id IN (?, ?)')
+    .run(new Date(Date.now() - 60 * 60_000).toISOString(), oldRc, oldStable);
+  const poolOne = '3'.repeat(32), poolTwo = '4'.repeat(32);
+  heartbeatWorker(db, { worker_id: poolOne, target_commit: null });
+  heartbeatWorker(db, { worker_id: poolTwo, target_commit: null });
+  assert.deepEqual(listVerificationQueue(db).workers.filter(worker => worker.role === 'verifier')
+    .map(worker => worker.worker_id).sort(), [poolOne, poolTwo]);
+});
+
 test('blocked queue exposes all records so each UI column can paginate independently', t => {
   const db = setup(t);
   for (let index = 0; index < 51; index++) {
