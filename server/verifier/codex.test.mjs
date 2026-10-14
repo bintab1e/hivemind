@@ -162,7 +162,7 @@ test('likely static proof requires distinct grounded entry and flaw, original Po
 
 test('first static review requires an explicit administrator-action assessment', async t => {
   const ordinarySetup = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer,
-    { type: 'turn.completed' }, 0, 'An already running NFS service, existing export')));
+    { type: 'turn.completed' }, 0, 'QEMU VM setup, network namespaces, Soft-RoCE/RDMA device setup')));
   assert.equal(ordinarySetup.integrity.admin_action_required, false);
   for (const value of [undefined, 'false', 0]) {
     const invalid = structuredClone(answer);
@@ -205,7 +205,7 @@ test('independent proof review only supports when every static check includes an
   const ordinarySetup = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'supports', reason: 'Existing export is target setup, not a trigger privilege.',
       admin_action_required: false, checks },
-    { type: 'turn.completed' }, 0, 'An already running NFS service, existing export')));
+    { type: 'turn.completed' }, 0, 'QEMU VM preparation, network namespaces, Soft-RoCE/RDMA device setup')));
   assert.equal(ordinarySetup.admin_action_required, false);
   const conflicting = { verdict: 'supports', reason: 'Unresolved guard.', checks: { ...checks, defenses: 'uncertain' } };
   await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, conflicting,
@@ -538,6 +538,74 @@ test('reads source from the clean pinned Git checkout and rejects drift', async 
   await assert.rejects(loadTrustedKernelSource(dir, '0'.repeat(40), fixture), error => error.code === 'source_commit_or_cleanliness_mismatch');
   fs.appendFileSync(path.join(dir, 'fs/nfsd/nfs4proc.c'), '/* dirty */\n');
   await assert.rejects(loadTrustedKernelSource(dir, commit, fixture), error => error.code === 'source_commit_or_cleanliness_mismatch');
+});
+
+test('keeps distant cited source lines within the 400-line excerpt budget', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-kernel-windows-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'fs/nfsd'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'fs/nfsd/nfs4proc.c'),
+    Array.from({ length: 1100 }, (_, index) => `int line_${index + 1};`).join('\n'));
+  const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  run('init', '-q');
+  run('config', 'user.name', 'Test');
+  run('config', 'user.email', 'test@example.invalid');
+  run('add', '.');
+  run('commit', '-qm', 'fixture');
+  const commit = run('rev-parse', 'HEAD');
+  const name = 'fs/nfsd/nfs4proc.c';
+  const cited = [50, 250, 550, 900];
+  const source = await loadTrustedKernelSource(dir, commit,
+    { report: cited.map(line => `${name}:${line}`).join('\n') });
+  const excerpt = source.files[0];
+  const selected = new Set(excerpt.lines.map(line => line.number));
+  assert.equal(excerpt.total_lines, 1100);
+  assert.equal(excerpt.excerpted, true);
+  assert.ok(excerpt.lines.length <= 400);
+  for (const line of cited) {
+    assert.ok(selected.has(line), `missing cited line ${line}`);
+    assert.ok(selected.has(line - 1), `missing context for cited line ${line}`);
+  }
+});
+
+test('loads pinned NFS and RDMA driver files across a multi-file call path', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-rdma-source-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const paths = [
+    'fs/nfsd/nfs4proc.c',
+    'net/sunrpc/xprtrdma/svc_rdma_recvfrom.c',
+    'net/sunrpc/xprtrdma/svc_rdma_rw.c',
+    'drivers/infiniband/sw/siw/siw_cm.c',
+    'drivers/infiniband/core/iwcm.c',
+    'drivers/infiniband/core/cma.c',
+    'include/rdma/ib_verbs.h',
+  ];
+  for (const name of paths) {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'int entry(void) { return 0; }\nint flaw(void) { return 1; }\n');
+  }
+  const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  run('init', '-q');
+  run('config', 'user.name', 'Test');
+  run('config', 'user.email', 'test@example.invalid');
+  run('add', '.');
+  run('commit', '-qm', 'fixture');
+  const commit = run('rev-parse', 'HEAD');
+  const source = await loadTrustedKernelSource(dir, commit,
+    { report: paths.map(name => `${name}:2`).join('\n') + '\ndrivers/net/other.c:2' });
+  assert.deepEqual(source.files.map(file => file.path), paths);
+  const driver = paths[3];
+  const response = structuredClone(answer);
+  response.normalized.file_path = driver;
+  response.normalized.code_refs = [`${driver}:2`];
+  response.normalized.source_evidence = [{ path: driver, line: 1 }, { path: driver, line: 2 }];
+  for (const role of ['entry', 'flaw', 'impact', 'defenses']) response.proof[role].path = driver;
+  response.normalized.report = response.normalized.report.replaceAll('fs/nfsd/nfs4proc.c', driver);
+  const reviewed = await reviewSubmissionWithCodex(submission,
+    { cliPath: fakeCli(t, response), trustedSource: source });
+  assert.equal(reviewed.normalized.file_path, driver);
+  assert.equal(reviewed.grounding.evidence[1].text, 'int flaw(void) { return 1; }');
 });
 
 test('static likely verdict cannot cite a source line that is absent from the trusted checkout', async t => {

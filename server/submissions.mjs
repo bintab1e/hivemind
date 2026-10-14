@@ -18,7 +18,7 @@ const MAX_PRIMITIVE_SUMMARY_BYTES = 6000;
 const verificationPhases = new Set(['preparing', 'static_review', 'finalizing']);
 const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
-const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd)\/)[a-zA-Z0-9_./+-]+$/;
+const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+$/;
 const existingIdPattern = /^A-\d{3,}$/;
 
 function value(input, name, max, required = false) {

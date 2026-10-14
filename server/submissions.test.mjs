@@ -84,6 +84,19 @@ test('static-screened submission receives a number without fabricated dynamic im
   assert.deepEqual(data.code_refs, ['fs/nfsd/nfs4proc.c:42']);
 });
 
+test('NFS/RDMA findings can be anchored in the InfiniBand source they traverse', t => {
+  const db = setup(t);
+  const source = 'drivers/infiniband/sw/siw/siw_cm.c';
+  const id = submitSubmission(db, {
+    ...raw('rdma-driver', { file_path: source, code_refs: [`${source}:42`] }),
+    report: report.replaceAll('fs/nfsd/nfs4proc.c', source),
+  }, 'analyst').submission_id;
+  const result = JSON.parse(JSON.stringify(verdict()).replaceAll('fs/nfsd/nfs4proc.c', source));
+  const accepted = approve(db, id, result);
+  assert.equal(accepted.status, 'approved');
+  assert.equal(listRegistry(db).find(row => row.management_id === accepted.management_id).file_path, source);
+});
+
 test('suspicious shortcuts, uncertain screening and forged 2VM results never receive a number', t => {
   const db = setup(t);
   const suspect = submit(db, 'suspect');
