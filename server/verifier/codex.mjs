@@ -239,17 +239,21 @@ function validateResult(parsed, submission, trustedSource) {
 }
 
 function nonzeroExitAnalysis(stdout, stderr, exitCode, signal, stderrTotal) {
-  let remaining = maxDiagnosticBytes;
   const eventTypes = new Set();
   const eventKeys = new Set();
   const hints = new Set();
-  const scan = text => { for (const [code, pattern] of diagnosticPatterns) if (pattern.test(text)) hints.add(code); };
+  let finalFailureHints = null;
+  let finalFailureCode = null;
+  const stderrHints = new Set();
+  const scan = (text, target) => { for (const [code, pattern] of diagnosticPatterns) if (pattern.test(text)) target.add(code); };
   for (const line of stdout.split(/\r?\n/)) {
     if (!line || line.length > maxDiagnosticBytes * 2) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     if (event?.type !== 'error' && event?.type !== 'turn.failed') continue;
     eventTypes.add(event.type);
+    const eventHints = new Set();
+    let eventCode = null;
     if (Object.hasOwn(event, 'message')) eventKeys.add('message');
     if (Object.hasOwn(event, 'error')) eventKeys.add('error');
     if (event.error && typeof event.error === 'object') {
@@ -257,17 +261,22 @@ function nonzeroExitAnalysis(stdout, stderr, exitCode, signal, stderrTotal) {
       if (Object.hasOwn(event.error, 'code')) eventKeys.add('error.code');
       if (Object.hasOwn(event.error, 'type')) eventKeys.add('error.type');
       const mapped = structuredErrorCodes.get(event.error.code);
-      if (mapped) hints.add(mapped);
+      if (mapped) { hints.add(mapped); eventHints.add(mapped); eventCode = mapped; }
     }
     const message = typeof event.error?.message === 'string' ? event.error.message : event.message;
-    if (typeof message !== 'string' || remaining <= 0) continue;
-    const bounded = Buffer.from(message).subarray(0, remaining).toString('utf8');
-    remaining -= Buffer.byteLength(bounded);
-    scan(bounded);
+    if (typeof message === 'string') {
+      const bounded = Buffer.from(message).subarray(0, maxDiagnosticBytes).toString('utf8');
+      scan(bounded, eventHints);
+      for (const hint of eventHints) hints.add(hint);
+    }
+    if (event.type === 'turn.failed') { finalFailureHints = eventHints; finalFailureCode = eventCode; }
   }
-  scan(stderr);
+  scan(stderr, stderrHints);
+  for (const hint of stderrHints) hints.add(hint);
+  const causeHints = finalFailureHints?.size ? finalFailureHints : stderrHints.size ? stderrHints
+    : finalFailureHints === null ? hints : new Set();
   return {
-    code: diagnosticPatterns.find(([code]) => hints.has(code))?.[0] ?? 'cli_nonzero_exit',
+    code: finalFailureCode ?? diagnosticPatterns.find(([code]) => causeHints.has(code))?.[0] ?? 'cli_nonzero_exit',
     diagnostic: {
       exit_code: exitCode === null ? 'signal' : exitCode === 1 ? 'one' : exitCode === 2 ? 'two' : 'other',
       signal: signal === null ? 'none' : signal === 'SIGKILL' ? 'kill' : signal === 'SIGTERM' ? 'term' : signal === 'SIGABRT' ? 'abort' : 'other',

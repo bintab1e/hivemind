@@ -306,6 +306,25 @@ test('persistent verifier infrastructure failures mark the lease error without r
   }
 });
 
+test('infrastructure failure includes only bounded diagnostic enums in the queue reason', async t => {
+  const { config } = setup(t);
+  const calls = [];
+  const transport = async (_socket, endpoint, body) => {
+    calls.push({ endpoint, body });
+    return endpoint === '/claim' ? { job } : {};
+  };
+  const reviewer = async () => { throw new CodexReviewError('cli_nonzero_exit', {
+    exit_code: 'one', signal: 'none', stderr_size: 'short', json_error_events: 'turn_failed',
+    json_error_keys: ['error.message', 'PRIVATE_EVIDENCE'], hints: ['schema_error', 'PRIVATE_EVIDENCE'],
+    secret: 'PRIVATE_EVIDENCE',
+  }); };
+  assert.equal(await runWorkerOnce({ config, transport, reviewer, sourceLoader }), true);
+  assert.deepEqual(calls.map(call => call.endpoint), ['/claim', '/fail']);
+  assert.match(calls.at(-1).body.reason, /^Verifier cli_nonzero_exit \{/);
+  assert.match(calls.at(-1).body.reason, /"schema_error"/);
+  assert.doesNotMatch(calls.at(-1).body.reason, /PRIVATE_EVIDENCE|secret/);
+});
+
 test('worker emits only allowlisted diagnostic enums for a failed Codex CLI', async t => {
   const { config } = setup(t);
   let completed;

@@ -161,6 +161,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
   let artifacts;
   let privateDir;
   let infrastructureError;
+  let infrastructureDiagnostic;
   try {
     const submission = decodeJob(job);
     const kernelInfo = JSON.parse(fs.readFileSync(config.kernelInfoPath, 'utf8'));
@@ -253,7 +254,10 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     }
   } catch (error) {
     const known = error instanceof WorkerError || error instanceof CodexReviewError || error instanceof VerifierUnavailableError;
-    if (isInfrastructureReviewError(error)) infrastructureError = error.code;
+    if (isInfrastructureReviewError(error)) {
+      infrastructureError = error.code;
+      if (error instanceof CodexReviewError) infrastructureDiagnostic = error.diagnostic;
+    }
     reproduction = inconclusive(known ? error.code : 'Verifier environment unavailable');
     if (review.verdict !== 'likely') review = { verdict: 'uncertain',
       reason: known ? `${error.code}${error instanceof CodexReviewError ? safeCodexDiagnostic(error.diagnostic) : ''}`
@@ -262,7 +266,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
     if (privateDir) fs.rmSync(privateDir, { recursive: true, force: true });
   }
   return { review, reproduction, server_serial: serverSerial, ...(artifacts ? { artifacts } : {}),
-    ...(infrastructureError ? { infrastructure_error: infrastructureError } : {}) };
+    ...(infrastructureError ? { infrastructure_error: infrastructureError,
+      ...(infrastructureDiagnostic ? { infrastructure_diagnostic: infrastructureDiagnostic } : {}) } : {}) };
 }
 
 export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader, relevanceReviewer,
@@ -297,7 +302,8 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     }
     const endpoint = result.infrastructure_error ? '/fail' : '/complete';
     const body = result.infrastructure_error
-      ? { submission_id: submissionId, lease_token: leaseToken, reason: `Verifier ${result.infrastructure_error}` }
+      ? { submission_id: submissionId, lease_token: leaseToken,
+        reason: `Verifier ${result.infrastructure_error}${safeCodexDiagnostic(result.infrastructure_diagnostic)}` }
       : { submission_id: submissionId, lease_token: leaseToken, result };
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {

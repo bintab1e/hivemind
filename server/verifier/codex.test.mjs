@@ -242,6 +242,21 @@ test('nonzero-exit diagnostics summarize only fixed enums and structured error c
     error.code === 'cli_nonzero_exit' && error.diagnostic.stderr_size === 'truncated' && error.diagnostic.hints.length === 0);
 });
 
+test('final failed turn determines the cause ahead of earlier error events', async t => {
+  const earlierRateLimit = { type: 'error', message: 'Rate limit exceeded; PRIVATE_EVIDENCE' };
+  const finalContextError = { type: 'turn.failed', error: { code: 'context_length_exceeded', message: 'Prompt too long after a rate limit retry' } };
+  const cli = fakeCli(t, answer, earlierRateLimit);
+  fs.appendFileSync(cli, `process.stdout.write(${JSON.stringify(`${JSON.stringify(finalContextError)}\n`)}); process.exitCode = 19;\n`);
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(cli)), error =>
+    error.code === 'context_too_large' && error.diagnostic.hints.includes('rate_limited') &&
+    !JSON.stringify(error).includes('PRIVATE_EVIDENCE'));
+
+  const unknownFinal = fakeCli(t, answer, earlierRateLimit);
+  fs.appendFileSync(unknownFinal, `process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: 'turn.failed', error: { message: 'Turn failed' } })}\n`)}); process.exitCode = 19;\n`);
+  await assert.rejects(reviewSubmissionWithCodex(submission, options(unknownFinal)), error =>
+    error.code === 'cli_nonzero_exit' && error.diagnostic.hints.includes('rate_limited'));
+});
+
 test('classifies JSON upstream errors into fixed network subtypes', async t => {
   const cases = [
     ['network_stream_disconnected', 'stream disconnected before completion'],
