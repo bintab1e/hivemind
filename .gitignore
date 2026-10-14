@@ -11,6 +11,9 @@
 # Credentials and service state
 .env
 .env.*
+**/.ssh/
+**/.npmrc
+**/.netrc
 **/auth.json
 **/.credentials.json
 **/dashboard-auth.env

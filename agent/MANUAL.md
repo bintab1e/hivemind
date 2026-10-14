@@ -1,6 +1,6 @@
 # 네이티브 Windows 수동 설치
 
-Windows에서는 WSL을 켜고 [Linux/WSL 설치기](README.md)를 실행하는 방법을 권장합니다. **Codex·Claude도 같은 WSL 커널 체크아웃에서 실행해야** WSL에 설치한 AgentCov가 코드 열람을 기록합니다. Windows 경로의 커널과 네이티브 Codex를 쓴다면 아래 절차를 따르세요.
+Windows에서는 WSL을 켜고 [Linux/WSL 설치기](../README.md)를 실행하는 방법을 권장합니다. **Codex·Claude도 같은 WSL 커널 체크아웃에서 실행해야** WSL에 설치한 AgentCov가 코드 열람을 기록합니다. Windows 경로의 커널과 네이티브 Codex를 쓴다면 아래 절차를 따르세요.
 
 Node.js 24 이상, Python 3.12, Git과 GitHub 비공개 저장소 접근 권한이 필요합니다. 서버 관리자로부터 본인 PC 전용 64자리 토큰 파일과 등록된 커널 버전·Git SHA를 받으세요. 서버 관리자 토큰은 필요하지 않습니다. PowerShell에서 다음 값의 플레이스홀더를 바꿉니다.
 
