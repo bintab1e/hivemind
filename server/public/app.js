@@ -429,7 +429,6 @@ function findingCell(finding, key) {
   if (key === 'management_id') {
     const cell = element('td', 'registry-id-cell');
     cell.append(element('strong', finding.management_id ? 'registry-id' : 'registry-unassigned', finding.management_id || '미부여'));
-    if (finding.origin !== 'history') cell.append(element('span', 'finding-id', reviewLabel(finding)));
     findingEditActions(cell, finding);
     return cell;
   }

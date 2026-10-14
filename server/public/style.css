@@ -139,7 +139,6 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .finding-table tbody tr.editing-row td{border-top-color:#8d77d5;border-bottom:1px solid #8d77d5}
 .finding-table .registry-row-number{color:#929db2;font-variant-numeric:tabular-nums}
 .finding-table .registry-id-cell strong{font:700 12px Consolas,"Cascadia Code",monospace}
-.finding-table .registry-id-cell .finding-id{white-space:normal;line-height:1.3}
 .finding-table .registry-id{color:#c7b6ff}
 .finding-table .registry-unassigned{color:#aab3c3}
 .finding-table .registry-wrap{max-width:180px;white-space:normal;line-height:1.35}
