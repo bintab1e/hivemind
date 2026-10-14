@@ -21,7 +21,7 @@
     <div id="empty" class="empty-state" hidden><h2>분석 대상이 없습니다</h2><p>서버에서 분석 버전과 커밋을 설정해 주세요.</p></div>
 
     <main id="dashboard" hidden>
-      <nav class="tabs" aria-label="분석 메뉴"><button type="button" data-view="findings">신규 취약점</button><button type="button" data-view="queue">검증 큐</button><button type="button" data-view="coverage">코드 커버리지</button><button type="button" data-view="registry">취약점 관리</button></nav>
+      <nav class="tabs" aria-label="분석 메뉴"><button type="button" data-view="findings">신규 취약점</button><button type="button" data-view="queue">검증 큐</button><button type="button" data-view="coverage">코드 커버리지</button><button type="button" data-view="registry">취약점 관리</button><button type="button" data-view="patch">패치</button></nav>
 
       <section id="findings-view" class="viewer" aria-labelledby="findings-title">
         <div class="viewer-head"><h2 id="findings-title">신규 취약점</h2><div class="viewer-head-actions"><span id="finding-count" class="count"></span><button id="open-zip-submit" class="edit-mode-button" type="button">ZIP 취약점 제출</button><button id="finding-export-csv" class="edit-mode-button" type="button" hidden>CSV 내보내기</button><button id="finding-edit-mode" class="edit-mode-button" type="button" aria-pressed="false">수정 모드</button></div></div>
@@ -73,6 +73,15 @@
         <nav id="coverage-pagination" class="pagination" aria-label="코드 커버리지 페이지" hidden></nav>
       </section>
 
+      <section id="patch-view" class="viewer" aria-labelledby="patch-title" hidden>
+        <div class="viewer-head"><h2 id="patch-title">패치</h2><span id="patch-count" class="count"></span></div>
+        <div class="toolbar">
+          <label class="search-field"><span class="visually-hidden">취약점 검색</span><span aria-hidden="true">⌕</span><input id="patch-search" type="search" placeholder="관리번호, 취약점명 검색" autocomplete="off"></label>
+        </div>
+        <p id="patch-error" class="note" role="alert" hidden></p>
+        <div id="patch-list" class="table-scroll" role="region" aria-label="취약점별 패치 검토 표" tabindex="0"></div>
+      </section>
+
       <footer id="coverage-footer"><span>마지막 수집 <time id="updated">—</time> · 30초마다 갱신</span><a id="report-link" href="/api/team-status.md">Markdown 현황 내려받기 ↗</a></footer>
     </main>
   </div>
@@ -90,6 +99,24 @@
       <p class="zip-submit-note">ZIP 8 MB 이하 · 분석 보고서(report.md, 다른 이름도 가능) · 독립 실행형 C PoC · 재현 절차(.md/.sh) · KASAN/KCSAN .log 필수</p>
       <p id="zip-submit-result" class="zip-submit-result" role="status" aria-live="polite" hidden></p>
     </form>
+  </dialog>
+
+  <dialog id="patch-upload-dialog" class="zip-submit-dialog" aria-labelledby="patch-upload-title">
+    <div class="dialog-top"><div><h2 id="patch-upload-title">패치 업로드</h2><p id="patch-upload-finding" class="muted"></p></div><button id="close-patch-upload" class="icon-button" type="button" aria-label="닫기">×</button></div>
+    <form id="patch-upload-form" class="zip-submit-form">
+      <div class="zip-submit-fields">
+        <label>대상 커널 <select id="patch-track" required><option value="">불러오는 중</option></select></label>
+        <label>패치 파일 <input id="patch-file" type="file" accept=".patch,.diff,text/x-patch,text/plain" required></label>
+      </div>
+      <p class="zip-submit-note">UTF-8 Git diff 형식 · .patch 또는 .diff · 1 MB 이하 · 기존 파일 수정만 지원</p>
+      <p id="patch-upload-result" class="zip-submit-result" role="status" aria-live="polite" hidden></p>
+      <div class="patch-dialog-actions"><button id="patch-submit-button" class="edit-mode-button" type="submit">Sashiko 검토 요청</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="patch-result-dialog" class="detail-dialog" aria-labelledby="patch-result-title">
+    <div class="dialog-top"><div><h2 id="patch-result-title">Sashiko 검토 결과</h2><p id="patch-result-finding" class="muted"></p></div><button id="close-patch-result" class="icon-button" type="button" aria-label="닫기">×</button></div>
+    <div id="patch-result-content" class="detail-content patch-result-content" role="region" aria-label="Sashiko 검토 결과"></div>
   </dialog>
 
   <dialog id="detail" class="detail-dialog" aria-labelledby="detail-title">

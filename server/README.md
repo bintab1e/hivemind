@@ -50,6 +50,8 @@ WantedBy=default.target
 
 기존·신규 관리 기록의 공개 메일 및 유지관리 브랜치 중복 검사는 [일일 중복 검사 문서](duplicate/README.md)를 따릅니다. 매일 06:00 Asia/Seoul에 별도 사용자 타이머가 실행되며, 공개 근거와 동일한 원인이 확인된 미제보 기록만 `중복`으로 변경합니다.
 
+**패치** 탭에서는 knfsd A 기록의 커널 패치를 선택한 트랙에서 실제 Sashiko로 검토합니다. 별도 `bintable` 사용자 워커 설치와 결과 해석은 [Sashiko 패치 검토 문서](patch/README.md)를 따릅니다.
+
 ## 웹에서 ZIP으로 직접 제출
 
 대시보드의 **신규 취약점**에서 제보자 표시명, 취약점 명, 활성 커널 트랙을 선택하고 ZIP을 제출할 수 있습니다. 공유 대시보드 계정을 사용하므로 표시명은 본인이 입력한 이름이며 신원 인증 정보는 아닙니다. 접수된 내용은 **검증 큐**로 이동하고, 승인된 제보만 관리 번호를 받아 신규 취약점과 취약점 관리 표에 나타납니다.
@@ -73,7 +75,7 @@ NODE=/absolute/path/to/node24
 "$NODE" server/manage-local.mjs agent rotate pc01
 ```
 
-기존 취약점 관리표와 첨부 이관에는 `registry import-history`, `registry reconcile-history`, `registry import-artifacts`, `registry curate-artifacts` 명령이 있습니다. 원본 자료와 스테이징 파일은 Git에 추가하지 마세요. Kimi 정적 검토를 사용할 경우 런타임 환경에서만 `KIMI_API_KEY`를 주입합니다. 키가 없으면 검토는 `unconfigured` 상태로 남습니다. Sashiko 패치 검토는 기본적으로 비활성화되어 있습니다.
+기존 취약점 관리표와 첨부 이관에는 `registry import-history`, `registry reconcile-history`, `registry import-artifacts`, `registry curate-artifacts` 명령이 있습니다. 원본 자료와 스테이징 파일은 Git에 추가하지 마세요. Kimi 정적 검토를 사용할 경우 런타임 환경에서만 `KIMI_API_KEY`를 주입합니다. 키가 없으면 검토는 `unconfigured` 상태로 남습니다.
 
 ## 테스트
 

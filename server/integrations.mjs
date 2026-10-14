@@ -36,7 +36,7 @@ export async function reviewFindingWithKimi({ title, filePath, codeRefs, impact,
   return { verdict: answer.verdict, summary: answer.summary.trim().slice(0, 3000), model };
 }
 
-export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliPath, dataDir }) {
+export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliPath, dataDir, configDir = repoPath }) {
   if (!/^[a-f0-9]{40,64}$/i.test(baseCommit)) throw new Error('Invalid base commit');
   const jobsDir = path.join(dataDir, 'jobs');
   fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
@@ -48,14 +48,26 @@ export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliP
   try {
     await exec('git', ['-C', repoPath, 'worktree', 'add', '--detach', worktree, baseCommit], { timeout: 120_000 });
     added = true;
+    const changedPaths = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
+    if (!changedPaths.length) throw new Error('Patch has no Git diff paths');
+    for (const [, before, after] of changedPaths) {
+      const file = path.resolve(worktree, before);
+      if (before !== after || !file.startsWith(`${worktree}${path.sep}`) ||
+          !fs.lstatSync(file).isFile() || !fs.realpathSync(file).startsWith(`${worktree}${path.sep}`)) {
+        throw new Error('Patch must change regular files inside the kernel worktree');
+      }
+    }
     await exec('git', ['-C', worktree, 'apply', '--check', patchFile], { timeout: 30_000 });
     await exec('git', ['-C', worktree, 'apply', patchFile], { timeout: 30_000 });
     await exec('git', ['-C', worktree, 'add', '--all'], { timeout: 30_000 });
-    await exec('git', ['-C', worktree, '-c', 'user.name=Hivemind Review', '-c', 'user.email=review@localhost', 'commit', '-m', 'Review uploaded knfsd patch'], { timeout: 60_000 });
+    await exec('git', ['-C', worktree, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Hivemind Review', '-c', 'user.email=review@localhost', 'commit', '-m', 'Review uploaded knfsd patch'], { timeout: 60_000 });
     let stdout = '';
     let exitCode = 0;
     try {
-      ({ stdout } = await exec(cliPath, ['--format', 'json', 'local', 'HEAD', '--repo', worktree, '--baseline', baseCommit, '--force-local'], { timeout: 300_000, maxBuffer: 4_000_000, env: process.env }));
+      ({ stdout } = await exec(cliPath, ['--format', 'json', 'local', 'HEAD', '--repo', worktree, '--baseline', baseCommit, '--force-local', '--agent'], {
+        cwd: worktree, timeout: 1_800_000, maxBuffer: 4_000_000,
+        env: { ...process.env, SASHIKO_CONFIG: path.join(configDir, 'Settings.toml') },
+      }));
     } catch (error) {
       stdout = error.stdout || '';
       exitCode = typeof error.code === 'number' ? error.code : 3;
@@ -63,9 +75,11 @@ export async function reviewPatchWithSashiko({ patch, baseCommit, repoPath, cliP
     }
     let result;
     try { result = JSON.parse(stdout); } catch { throw new Error('Sashiko returned invalid JSON'); }
-    const patches = Array.isArray(result?.patches) ? result.patches : [];
-    const applied = patches.length > 0 && patches.every(item => item.status === 'applied');
-    const status = result?.error || result?.partial || !applied || exitCode === 3 ? 'error' : exitCode === 1 ? 'findings' : exitCode === 0 ? 'reviewed' : 'error';
+    const status = result?.error || result?.partial || result?.status === 'error' || exitCode === 3
+      ? 'error'
+      : result?.status === 'issues_found' || (result?.findings || []).length || (result?.concerns || []).length || exitCode === 1
+        ? 'findings'
+        : result?.status === 'clean' && exitCode === 0 ? 'reviewed' : 'error';
     return { status, exit_code: exitCode, result };
   } finally {
     if (added) await exec('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktree], { timeout: 120_000 }).catch(() => {});

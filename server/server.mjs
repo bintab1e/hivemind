@@ -16,6 +16,8 @@ import { getSubmission, getVerifiedArtifact, initializeSubmissions, listSubmissi
 import { startVerifierIpc } from './verifier-ipc.mjs';
 import { initializeDuplicateRegistry } from './duplicate-registry.mjs';
 import { uploadedSubmission, uploadedTargets } from './zip-upload.mjs';
+import { getPatchReview, getPatchReviewFile, initializePatchReviews, listPatchReviews,
+  submitPatchReview, validatePatchFile } from './patch-reviews.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -99,6 +101,7 @@ export function openDatabase(file) {
   initializeHistoryArtifacts(db);
   initializeHistoryVerifications(db);
   initializeSubmissions(db);
+  initializePatchReviews(db);
   initializeDuplicateRegistry(db);
   return db;
 }
@@ -726,32 +729,13 @@ async function readJson(req) {
 function submitPatch(db, findingId, input) {
   const finding = db.prepare("SELECT id FROM events WHERE id = ? AND kind = 'finding'").get(findingId);
   if (!finding) invalid('Finding not found', 404);
-  const filename = required(input?.filename, 'filename', 120);
-  if (!/^[a-z0-9][a-z0-9._-]*\.(?:patch|diff)$/i.test(filename)) invalid('Patch filename must end in .patch or .diff');
-  const encoded = required(input?.content_base64, 'content_base64', 1_400_000);
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) invalid('Invalid base64 patch');
-  const bytes = Buffer.from(encoded, 'base64');
-  if (!bytes.length || bytes.length > 1_000_000 || bytes.includes(0)) invalid('Patch size or encoding is invalid', 413);
-  const patch = bytes.toString('utf8');
-  if (!Buffer.from(patch, 'utf8').equals(bytes)) invalid('Patch must be UTF-8');
-  if (/^(?:GIT binary patch|Binary files |rename (?:from|to) |copy (?:from|to) |new file mode |deleted file mode )/m.test(patch)) invalid('Binary, rename, copy, and file creation/deletion patches are not supported');
-  const paths = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
-  if (!paths.length) invalid('Patch needs a Git diff header');
-  const headers = [...patch.matchAll(/^(?:---|\+\+\+) (\S+)$/gm)].map(match => match[1]);
-  if (headers.length !== paths.length * 2) invalid('Patch file headers are incomplete');
-  for (const match of paths) {
-    const file = match[1];
-    if (file !== match[2] || file.startsWith('/') || file.includes('\\') || file.includes(':') || /[\x00-\x1f]/.test(file) || file.split('/').some(part => !part || part === '.' || part === '..')) invalid('Patch must use safe repository-relative file paths');
-  }
-  for (let index = 0; index < paths.length; index += 1) {
-    if (headers[index * 2] !== `a/${paths[index][1]}` || headers[index * 2 + 1] !== `b/${paths[index][1]}`) invalid('Patch file headers do not match the Git diff');
-  }
-  const id = hash(`${findingId}\0${hash(bytes)}`);
+  const { filename, patch, sha256 } = validatePatchFile(input);
+  const id = hash(`${findingId}\0${sha256}`);
   const existing = db.prepare('SELECT id, finding_id, filename, status, uploaded_at FROM patches WHERE id = ?').get(id);
   if (existing) return existing;
   const status = sashikoConfigured() ? 'pending' : 'unconfigured';
   const uploadedAt = now();
-  db.prepare('INSERT INTO patches (id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, findingId, filename, hash(bytes), patch, status, uploadedAt);
+  db.prepare('INSERT INTO patches (id, finding_id, filename, sha256, patch, status, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, findingId, filename, sha256, patch, status, uploadedAt);
   return { id, finding_id: findingId, filename, status, uploaded_at: uploadedAt };
 }
 
@@ -884,6 +868,38 @@ export async function startServer(options = {}) {
       }
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
       if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
+      if (url.pathname === '/api/patch-reviews' && req.method === 'GET') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
+        return send(res, 200, { reviews: listPatchReviews(db) });
+      }
+      if (url.pathname === '/api/patch-reviews' && req.method === 'POST') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required to upload patches' });
+        if (req.headers.origin) {
+          let sameOrigin = false;
+          try { sameOrigin = new URL(req.headers.origin).origin === new URL(`http://${req.headers.host}`).origin; }
+          catch { /* invalid origin */ }
+          if (!sameOrigin) return send(res, 403, { error: 'Origin not allowed' });
+        }
+        if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site upload not allowed' });
+        return send(res, 201, submitPatchReview(db, await readJson(req)));
+      }
+      const patchReviewMatch = /^\/api\/patch-reviews\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (patchReviewMatch && req.method === 'GET') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
+        return send(res, 200, { review: getPatchReview(db, patchReviewMatch[1]) });
+      }
+      const patchReviewFileMatch = /^\/api\/patch-reviews\/([a-f0-9]{64})\/file$/.exec(url.pathname);
+      if (patchReviewFileMatch && req.method === 'GET') {
+        if (!dashboardPassword && !dashboardPasswordHash) return send(res, 403, { error: 'Dashboard authentication is required for patch reviews' });
+        const file = getPatchReviewFile(db, patchReviewFileMatch[1]);
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Length': Buffer.byteLength(file.patch),
+          'Content-Disposition': `attachment; filename="${file.filename}"`,
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer' });
+        res.end(file.patch);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions/upload-targets') return send(res, 200, { targets: uploadedTargets(db) });
       if (req.method === 'POST' && url.pathname === '/api/submissions/upload') {

@@ -109,6 +109,15 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-commit{font:10px/1.5 Consolas,"Cascadia Code",monospace;overflow-wrap:anywhere;max-width:250px}
 .queue-position{color:#c7b6ff;font-weight:700;text-align:right!important;font-variant-numeric:tabular-nums}
 .queue-error{color:#ffb8bd}
+.patch-table td{vertical-align:middle}
+.patch-table .patch-id{font:700 12px Consolas,"Cascadia Code",monospace;color:#c7b6ff;white-space:nowrap}
+.patch-table .queue-title-cell{min-width:340px}
+.patch-actions{white-space:nowrap}
+.patch-actions button+button{margin-left:6px}
+.patch-dialog-actions{display:flex;justify-content:flex-end;margin-top:12px}
+.patch-result-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:18px}
+.patch-result-content>.detail-link{display:inline-block;margin-bottom:18px}
+.patch-result-content .detail-section pre+pre{margin-top:8px}
 .toolbar{display:flex;align-items:center;gap:9px;padding:12px 16px;flex-wrap:wrap}
 .search-field{height:33px;display:flex;align-items:center;gap:7px;background:#151924;border:1px solid #313747;border-radius:5px;padding:0 9px;color:#8892a6;min-width:270px}
 .search-field span:not(.visually-hidden){font-size:19px;line-height:0}
@@ -225,4 +234,5 @@ footer a{color:#b9a8fb}
 .artifact-preview pre{margin-top:10px}
 @media(max-width:720px){.shell{width:calc(100% - 20px)}.workspace-actions .connection{display:none}.workspace-head{flex-wrap:wrap}.workspace-actions{margin-left:auto}.track-select select{max-width:calc(100vw - 110px)}.toolbar .search-field{width:100%;min-width:0}.toolbar>.count{margin-left:0}.finding-table th:nth-child(3),.finding-table td:nth-child(3){position:static;min-width:260px;max-width:260px}.coverage-table th:first-child,.coverage-table td:first-child{min-width:108px;max-width:108px}.coverage-table th:nth-child(2),.coverage-table td:nth-child(2){position:static;min-width:230px;max-width:230px}.detail-summary{grid-template-columns:1fr 1fr;margin:0 14px 13px}.dialog-top{padding:16px 14px}.detail-tabs{padding:0 14px;gap:14px}.detail-content{padding:14px}footer{display:block}footer a{display:block;margin-top:7px}}
 @media(max-width:620px){.zip-submit-fields{grid-template-columns:1fr}.zip-submit-fields button{width:100%}}
+@media(max-width:720px){.patch-result-summary{grid-template-columns:1fr}}
 @media(max-width:900px){.queue-columns{grid-template-columns:1fr}.queue-column{border-right:0;border-bottom:1px solid #292e3b}.queue-column:last-child{border-bottom:0}.queue-column:not(:first-child) .coverage-section-heading{border-top:0}}
