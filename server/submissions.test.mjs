@@ -135,6 +135,54 @@ test('administrator-dependent triggers are rejected and unknown prerequisites ar
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 
+test('valid long static-review reasons are stored without failing completion', t => {
+  const db = setup(t);
+  const approvedId = submit(db, 'long-review-reason');
+  const approvedResult = verdict();
+  approvedResult.review.reason = '검증'.repeat(600);
+  const approved = approve(db, approvedId, approvedResult);
+  assert.equal(approved.status, 'approved');
+  assert.ok(Buffer.byteLength(approved.reason) <= 1000);
+  assert.ok(approved.reason.startsWith('검증'));
+
+  const suspectId = submit(db, 'long-integrity-reason');
+  const suspectResult = verdict({ integrity: 'suspect' });
+  suspectResult.review.integrity.reason = 'Admin-only trigger is absent from the claimed attack path. '.repeat(30);
+  const rejected = approve(db, suspectId, suspectResult);
+  assert.equal(rejected.status, 'rejected');
+  assert.ok(Buffer.byteLength(rejected.reason) <= 1000);
+
+  const adminId = submit(db, 'long-admin-reason');
+  const adminResult = verdict();
+  adminResult.review.integrity.admin_action_required = true;
+  adminResult.review.integrity.reason = '관리자 권한이 필요한 마운트 작업입니다. '.repeat(60);
+  const adminRejected = approve(db, adminId, adminResult);
+  assert.equal(adminRejected.status, 'rejected');
+  assert.ok(Buffer.byteLength(adminRejected.reason) <= 1000);
+});
+
+test('overlong option metadata is held instead of turning a completed review into an error', t => {
+  const db = setup(t);
+  const id = submit(db, 'long-option');
+  const result = verdict();
+  result.review.normalized.options = 'pNFS '.repeat(60);
+  const held = approve(db, id, result);
+  assert.equal(held.status, 'needs_review');
+  assert.match(held.reason, /option metadata/i);
+  assert.equal(held.management_id, null);
+});
+
+test('invalid source-path metadata is held instead of failing result delivery', t => {
+  const db = setup(t);
+  const id = submit(db, 'long-source-path');
+  const result = verdict();
+  result.review.normalized.file_path = `fs/nfsd/${'가'.repeat(110)}.c`;
+  const held = approve(db, id, result);
+  assert.equal(held.status, 'needs_review');
+  assert.match(held.reason, /source path/i);
+  assert.equal(held.management_id, null);
+});
+
 test('ambiguous same-root candidates cannot fall through to a new management ID', t => {
   const db = setup(t);
   const id = submit(db, 'ambiguous');

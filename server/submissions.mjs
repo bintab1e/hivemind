@@ -30,6 +30,22 @@ function value(input, name, max, required = false) {
   return input.trim();
 }
 
+function reviewReason(input, name, maxLength) {
+  if (input == null || input === '') return null;
+  if (typeof input !== 'string' || input.length > maxLength || input.includes('\0') || !input.trim()) {
+    invalid(`Invalid ${name}`);
+  }
+  let clipped = '';
+  let bytes = 0;
+  for (const character of input.trim()) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > 1000) break;
+    clipped += character;
+    bytes += size;
+  }
+  return clipped.trimEnd();
+}
+
 function object(input, name) {
   if (input == null) return {};
   if (typeof input !== 'object' || Array.isArray(input)) invalid(`Invalid ${name}`);
@@ -701,16 +717,15 @@ export function completeSubmission(db, id, result, leaseToken) {
         reason: typeof review.same_root_cause?.reason === 'string'
           ? review.same_root_cause.reason.slice(0, 1000) : null,
       } } : {}) };
-    const reason = value(review.reason, 'review reason', 1000) || 'Static screening completed';
+    const reason = reviewReason(review.reason, 'review reason', 3000) || 'Static screening completed';
     if (adminActionRequired === true) {
       const adminReason = secondaryAdmin === true ? review.proof_review.reason : review.integrity?.reason;
-      const out = mark(db, id, 'rejected', value(typeof adminReason === 'string' ? adminReason.slice(0, 1000) : null,
-        'administrator action reason', 1000)
+      const out = mark(db, id, 'rejected', reviewReason(adminReason, 'administrator action reason', 3000)
         || 'Administrator action is required to trigger the finding', summary);
       db.exec('COMMIT'); return out;
     }
     if (review.integrity?.verdict === 'suspect') {
-      const out = mark(db, id, 'rejected', value(review.integrity.reason, 'integrity reason', 1000) || reason, summary);
+      const out = mark(db, id, 'rejected', reviewReason(review.integrity.reason, 'integrity reason', 2000) || reason, summary);
       db.exec('COMMIT'); return out;
     }
     if (review.integrity?.verdict !== 'clear') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
@@ -742,7 +757,13 @@ export function completeSubmission(db, id, result, leaseToken) {
     }
     const normalized = object(review.normalized, 'normalized finding');
     const title = canonicalTitle(normalized.title);
-    const filePath = value(normalized.file_path, 'file_path', 300);
+    let filePath;
+    try { filePath = value(normalized.file_path, 'file_path', 300); }
+    catch (error) {
+      if (error.status !== 400) throw error;
+      const out = mark(db, id, 'needs_review', 'Static finding source path is invalid', summary);
+      db.exec('COMMIT'); return out;
+    }
     const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
     const submittedVersion = metadata.nfs_version == null ? null : canonicalNfsVersion(metadata.nfs_version);
     const preAuth = normalized.pre_auth;
@@ -811,6 +832,13 @@ export function completeSubmission(db, id, result, leaseToken) {
     const codeRefs = Array.isArray(normalized.code_refs)
       ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.trim() && ref.length <= 300).slice(0, 30) : [];
     if (!codeRefs.length) codeRefs.push(`${filePath}:${anchor.line}`);
+    let registryOption;
+    try { registryOption = value(normalized.options, 'options', 200); }
+    catch (error) {
+      if (error.status !== 400) throw error;
+      const out = mark(db, id, 'needs_review', 'Static finding option metadata exceeds the registry limit or is invalid', summary);
+      db.exec('COMMIT'); return out;
+    }
     const data = {
       schema_version: 1, kind: 'finding', version_id: version, repo_commit: commit, title,
       file_path: filePath, scope: [filePath], code_refs: codeRefs,
@@ -822,7 +850,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       reproduction_command: 'cc -o poc poc.c',
       poc_source: poc.source, poc_sha256: hash(poc.source), evidence_log: artifacts.log.content,
       evidence_sha256: hash(artifacts.log.content),
-      registry_target: 'knfsd', registry_option: value(normalized.options, 'options', 200),
+      registry_target: 'knfsd', registry_option: registryOption,
       registry_privilege: privilege, registry_nfs_version: nfsVersion,
       registry_vulnerability_type: vulnerabilityType,
       registry_found_date: foundDate, registry_methodology: 'LLM', registry_report_project: 'Linux kernel',

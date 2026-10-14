@@ -147,3 +147,30 @@ test('two pooled workers claim compatible commits and report active target only 
   assert.equal(calls.find(call => call.endpoint === '/complete').body.result.reproduction.status, 'not_run');
   assert.equal(calls.find(call => call.endpoint === '/complete').body.result.review.normalized.logs[0].content, undefined);
 });
+
+for (const [status, expectedAttempts] of [[400, 1], [500, 3]]) {
+  test(`/complete HTTP ${status} records a bounded diagnostic without leaking the review`, async t => {
+    const calls = [];
+    const transport = async (_socket, endpoint, body) => {
+      calls.push({ endpoint, body });
+      if (endpoint === '/claim') return { job };
+      if (endpoint === '/complete') {
+        const error = new Error('private PoC and model text must not appear in the queue');
+        error.code = 'server_error';
+        error.status = status;
+        throw error;
+      }
+      return {};
+    };
+    await assert.rejects(runWorkerOnce({ config: config(t), transport,
+      reviewer: async () => ({ verdict: 'unlikely', reason: 'private review text',
+        integrity: { verdict: 'clear', admin_action_required: false, reason: 'private integrity text' } }),
+      sourceLoader: async () => trustedSource }), error => error.code === 'completion_delivery_failed');
+    assert.equal(calls.filter(call => call.endpoint === '/complete').length, expectedAttempts);
+    const failures = calls.filter(call => call.endpoint === '/fail');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].body.reason, `Verification result delivery failed: server_error_http_${status}`);
+    assert.ok(Buffer.byteLength(failures[0].body.reason) < 1000);
+    assert.doesNotMatch(failures[0].body.reason, /private|PoC|model text|integrity/i);
+  });
+}

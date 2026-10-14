@@ -147,6 +147,14 @@ function safeCodexDiagnostic(value) {
   })}`;
 }
 
+function deliveryDiagnostic(error) {
+  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+    ? `http_${error.status}` : null;
+  const code = new Set(['server_error', 'server_timeout', 'invalid_response', 'response_too_large',
+    'transport_error']).has(error?.code) ? error.code : 'delivery_error';
+  return `${code}${status ? `_${status}` : ''}`;
+}
+
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
   proofReviewer = reviewStaticProofWithCodex, sameRootReviewer = reviewSameRootCauseWithCodex,
   candidateLookup = async () => ({ candidates: [], truncated: false }),
@@ -294,7 +302,8 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
       }
     }
     if (endpoint === '/complete') {
-      try { await transport(config.socketPath, '/fail', { submission_id: submissionId, lease_token: leaseToken, reason: 'Verification result delivery failed' }); }
+      try { await transport(config.socketPath, '/fail', { submission_id: submissionId, lease_token: leaseToken,
+        reason: `Verification result delivery failed: ${deliveryDiagnostic(lastError)}` }); }
       catch { throw new WorkerError('completion_and_failure_delivery_failed'); }
     }
     if (lastError) throw new WorkerError(endpoint === '/fail' ? 'failure_delivery_failed' : 'completion_delivery_failed');
