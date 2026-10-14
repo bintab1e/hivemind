@@ -116,50 +116,90 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .patch-actions .row-edit-button+.row-edit-button{margin-left:6px}
 .patch-actions a.row-edit-button{display:inline-flex;align-items:center;min-height:24px;text-decoration:none}
 .patch-dialog-actions{display:flex;justify-content:flex-end;margin-top:12px}
-.patch-review-verdict{color:#d8c9ff!important;font-size:14px!important;font-weight:700}
-.patch-review-card{min-width:0;border:1px solid #303747;border-radius:6px;background:#151a26;padding:12px;margin-top:8px}
-.patch-review-card p{margin:8px 0 0}
-.patch-review-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-.patch-review-head strong{flex:1 1 230px;color:#e5e9f2;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
-.patch-review-tag{border:1px solid #635683;border-radius:4px;color:#d6c7ff;font-size:10px;padding:2px 6px}
-.patch-review-explanation{white-space:pre-wrap;color:#c8d0dd!important;overflow-wrap:anywhere}
-.patch-review-location{border-left:2px solid #7567a6;padding:2px 0 2px 10px;min-width:0;margin-top:12px}
-.patch-review-location strong{font:11px/1.5 Consolas,"Cascadia Code",monospace;color:#cfc1ff;overflow-wrap:anywhere}
-.patch-review-location p{margin:7px 0 0}
-.patch-page-header{padding:24px 0 17px;border-bottom:1px solid #303747}
-.patch-page-back{display:inline-block;color:#c7b6ff;font-size:12px;text-decoration:none;margin-bottom:22px}
-.patch-page-back:hover,.patch-page-nav a:hover{text-decoration:underline}
-.patch-page-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:15px}
-.patch-page-title-row h1{font-size:25px;line-height:1.3;overflow-wrap:anywhere}
-.patch-page-title-row .muted{margin:7px 0 0;overflow-wrap:anywhere}
+.patch-review-page .shell{max-width:1320px}
+.patch-page-header{padding:27px 0 20px;border-bottom:1px solid #303747}
+.patch-page-back{display:inline-block;color:#c7b6ff;font-size:12px;text-decoration:none;margin-bottom:21px}
+.patch-page-back:hover,.patch-page-nav a:hover,.patch-inline-note a:hover{text-decoration:underline}
+.patch-page-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.patch-page-title-row h1{font-size:25px;line-height:1.35;overflow-wrap:anywhere}
+.patch-page-title-row .muted{margin:8px 0 0;color:#a4aec0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .patch-page-status{flex:none;border:1px solid #635683;border-radius:5px;background:#231d33;color:#d6c7ff;padding:7px 10px;font-size:11px;font-weight:700}
 .patch-page-status[data-tone=clean]{border-color:#35785e;background:#1d3b32;color:#9be7bf}
 .patch-page-status[data-tone=findings]{border-color:#796347;background:#3b3026;color:#e9ca92}
 .patch-page-status[data-tone=error]{border-color:#744858;background:#3a2732;color:#eda9ba}
 .patch-review-page .error{margin:18px 0}
-.patch-page-overview{margin-top:18px}
-.patch-page-overview .stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));overflow:visible;border-top:0}
-.patch-page-overview .strip-stat{flex:none}
-.patch-page-severity{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 17px}
-.patch-page-severity strong{font-size:11px;margin-right:3px}
-.patch-page-nav{display:flex;gap:18px;overflow:auto;padding:17px 0 13px;border-bottom:1px solid #303747;margin-bottom:17px}
+.patch-page-metadata{margin-top:18px;padding:0 18px;overflow-wrap:anywhere}
+.patch-page-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin:0}
+.patch-page-fact{min-width:0;padding:14px 16px 14px 0}
+.patch-page-fact:nth-child(n+4){border-top:1px solid #262d3a}
+.patch-page-facts dt{font-size:10px;color:#939db0;margin-bottom:6px}
+.patch-page-facts dd{font:12px/1.5 Consolas,"Cascadia Code",monospace;color:#e0e5ef;margin:0;overflow-wrap:anywhere}
+.patch-page-overview{margin-top:14px}
+.patch-page-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 18px;border-bottom:1px solid #292e3b}
+.patch-page-section-head h2{font-size:15px;line-height:1.4}
+.patch-page-result-line{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;color:#c2cada;font-size:12px;line-height:1.5}
+.patch-page-result-line strong{color:#d9ccff;font-size:17px}
+.patch-page-severity{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid #292e3b}
+.patch-page-severity-item{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;padding:12px 18px;border-right:1px solid #292e3b}
+.patch-page-severity-item:last-child{border-right:0}
+.patch-page-severity-item span{color:#a1acbf;font:11px Consolas,"Cascadia Code",monospace}
+.patch-page-severity-item strong{color:#e6eaf3;font-size:16px;font-variant-numeric:tabular-nums}
+.patch-page-severity-item.severity-critical strong,.patch-page-severity-item.severity-high strong{color:#eda9ba}
+.patch-page-severity-item.severity-medium strong{color:#e9ca92}
+.patch-page-severity-item.severity-low strong{color:#9be7bf}
+.patch-page-verdict-body{padding:0 18px}
+.patch-page-verdict-body:not(:empty){border-top:1px solid #292e3b;padding-top:13px;padding-bottom:14px}
+.patch-page-verdict-body p{margin:0;color:#c8d0dd;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.patch-page-verdict-body p+p{margin-top:9px}
+.patch-page-nav{display:flex;gap:22px;overflow:auto;padding:18px 2px 13px;border-bottom:1px solid #303747;margin-bottom:16px}
 .patch-page-nav a{color:#acb6c8;white-space:nowrap;text-decoration:none;font-size:12px;font-weight:700}
-.patch-page-grid{display:grid;grid-template-columns:260px minmax(0,1fr);align-items:start;gap:16px;padding-bottom:40px}
-.patch-page-metadata{padding:17px;overflow-wrap:anywhere}
-.patch-page-metadata h2,.patch-page-section h2{font-size:15px;margin:0 0 14px}
-.patch-page-facts{display:grid;gap:5px;margin:0}
-.patch-page-facts dt{font-size:10px;color:#8f98aa;margin-top:10px}
-.patch-page-facts dd{font:11px/1.55 Consolas,"Cascadia Code",monospace;color:#dce2ed;margin:0;overflow-wrap:anywhere}
-.patch-page-sections{display:grid;gap:14px;min-width:0}
-.patch-page-section{padding:18px 20px;scroll-margin-top:12px}
-.patch-page-section p{font-size:12px;line-height:1.65;color:#aab3c4;white-space:pre-wrap;overflow-wrap:anywhere}
-.patch-page-section .patch-review-verdict{font-size:17px!important;margin-bottom:8px}
-.patch-page-section .patch-review-card:first-child{margin-top:0}
-.patch-page-section .detail-link{display:inline-block;margin-bottom:6px;font-size:12px}
-.patch-page-section pre{white-space:pre;overflow:auto;max-height:520px;font:11px/1.6 Consolas,"Cascadia Code",monospace;color:#cad2e0;margin:7px 0 0;background:#0b101a;border:1px solid #293142;border-radius:6px;padding:15px}
+.patch-page-sections{display:grid;gap:14px;min-width:0;padding-bottom:42px}
+.patch-page-section{scroll-margin-top:12px}
+.patch-page-section-body{padding:16px 18px}
+.patch-page-section p{font-size:13px;line-height:1.68;color:#b8c2d2;white-space:pre-wrap;overflow-wrap:anywhere}
 .patch-page-empty{margin:0;color:#8994aa}
-@media(max-width:800px){.patch-page-grid{grid-template-columns:1fr}.patch-page-metadata{padding:16px}.patch-page-facts{grid-template-columns:110px minmax(0,1fr);align-items:start;gap:8px}.patch-page-facts dt{margin-top:0}.patch-page-section{padding:16px}}
-@media(max-width:560px){.patch-page-title-row{flex-direction:column}.patch-page-title-row h1{font-size:21px}.patch-page-severity{padding:11px}.patch-page-status{align-self:flex-start}.patch-page-overview .stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.patch-page-overview .strip-stat:nth-child(2){border-right:0}.patch-page-overview .strip-stat:nth-child(-n+2){border-bottom:1px solid #292e3b}}
+.patch-review-card{min-width:0;border:1px solid #303747;border-left:3px solid #7567a6;border-radius:6px;background:#151a26;padding:15px 17px}
+.patch-review-card+.patch-review-card{margin-top:11px}
+.patch-review-card.severity-critical,.patch-review-card.severity-high{border-left-color:#ba677e}
+.patch-review-card.severity-medium{border-left-color:#a98a58}
+.patch-review-card.severity-low{border-left-color:#4f9b77}
+.patch-review-card p{margin:10px 0 0}
+.patch-review-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.patch-review-head strong{flex:1 1 260px;color:#e9edf5;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.patch-review-number{color:#bfaaff;font:11px Consolas,"Cascadia Code",monospace;white-space:nowrap}
+.patch-review-tag{border:1px solid #635683;border-radius:4px;color:#d6c7ff;font-size:10px;padding:3px 7px;white-space:nowrap}
+.patch-review-tag.severity-critical,.patch-review-tag.severity-high{border-color:#744858;background:#3a2732;color:#eda9ba}
+.patch-review-tag.severity-medium{border-color:#796347;background:#3b3026;color:#e9ca92}
+.patch-review-tag.severity-low{border-color:#35785e;background:#1d3b32;color:#9be7bf}
+.patch-review-explanation{white-space:pre-wrap;color:#c8d0dd!important;overflow-wrap:anywhere}
+.patch-review-location{border-left:2px solid #7567a6;padding:2px 0 2px 12px;min-width:0;margin-top:15px}
+.patch-review-location strong{font:12px/1.5 Consolas,"Cascadia Code",monospace;color:#cfc1ff;overflow-wrap:anywhere}
+.patch-review-location p{margin:8px 0 0}
+.patch-review-location pre,.patch-page-section .artifact-preview pre{white-space:pre;overflow:auto;max-height:520px;font:12px/1.6 Consolas,"Cascadia Code",monospace;color:#cad2e0;margin:9px 0 0;background:#0b101a;border:1px solid #293142;border-radius:6px;padding:13px}
+.patch-page-section .detail-link{color:#c7b6ff;font-size:12px;white-space:nowrap}
+.patch-page-source-body{padding:16px 18px}
+.patch-diff{min-width:0}
+.patch-diff-file{border:1px solid #303747;border-radius:6px;background:#0b101a;overflow-x:auto}
+.patch-diff-file+.patch-diff-file{margin-top:14px}
+.patch-diff-file-head{position:sticky;left:0;min-width:max-content;padding:11px 14px;border-bottom:1px solid #303747;background:#171d2b;color:#cfc1ff;font:700 12px/1.5 Consolas,"Cascadia Code",monospace}
+.patch-diff-row{display:flex;min-width:max-content;font:12px/1.55 Consolas,"Cascadia Code",monospace;color:#c4cedd}
+.patch-diff-number{flex:0 0 50px;padding:2px 8px;border-right:1px solid #252d3b;color:#68758b;text-align:right;user-select:none}
+.patch-diff-code{min-width:max-content;padding:2px 14px;white-space:pre}
+.patch-diff-row.hunk{background:#252138;color:#ccbaff}
+.patch-diff-row.hunk .patch-diff-code{font-weight:700}
+.patch-diff-row.meta{color:#909fb8}
+.patch-diff-row.added{background:#172a27;color:#a7e1bd}
+.patch-diff-row.removed{background:#312027;color:#edb0b8}
+.patch-inline-note{min-width:360px;margin:7px 14px 10px 100px;padding:13px 15px;border:1px solid #64543e;border-left:3px solid #b89058;border-radius:4px;background:#29241f;white-space:normal}
+.patch-inline-note-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.patch-inline-note a{color:#f0d0a3;font-size:12px;font-weight:700;line-height:1.5;text-decoration:none;overflow-wrap:anywhere}
+.patch-inline-note p{margin:9px 0 0;color:#e0d4c3;font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+.patch-inline-note .patch-inline-why{color:#bdb4a9}
+.patch-diff-truncated{padding:14px 0;color:#a8b2c3}
+.patch-page-usage{margin:0 0 10px;color:#a8b2c3!important;font:11px/1.5 Consolas,"Cascadia Code",monospace!important}
+.patch-page-section .artifact-preview{margin:0}
+@media(max-width:800px){.patch-page-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.patch-page-fact:nth-child(3){border-top:1px solid #262d3a}}
+@media(max-width:560px){.patch-page-title-row{flex-direction:column}.patch-page-title-row h1{font-size:21px}.patch-page-status{align-self:flex-start}.patch-page-facts{grid-template-columns:1fr}.patch-page-fact{padding:12px 0}.patch-page-fact:nth-child(2){border-top:1px solid #262d3a}.patch-page-result-line{align-items:flex-start;flex-direction:column}.patch-page-severity{grid-template-columns:repeat(2,minmax(0,1fr))}.patch-page-severity-item:nth-child(2){border-right:0}.patch-page-severity-item:nth-child(-n+2){border-bottom:1px solid #292e3b}.patch-page-section-head,.patch-page-section-body,.patch-page-source-body{padding-left:13px;padding-right:13px}.patch-diff-number{flex-basis:39px}.patch-inline-note{min-width:280px;margin-left:78px}}
 .toolbar{display:flex;align-items:center;gap:9px;padding:12px 16px;flex-wrap:wrap}
 .search-field{height:33px;display:flex;align-items:center;gap:7px;background:#151924;border:1px solid #313747;border-radius:5px;padding:0 9px;color:#8892a6;min-width:270px}
 .search-field span:not(.visually-hidden){font-size:19px;line-height:0}

@@ -12,7 +12,6 @@
   <div class="shell">
     <header class="patch-page-header">
       <a class="patch-page-back" href="/?view=patch">← 패치 목록</a>
-      <p class="eyebrow">SASHIKO REVIEW</p>
       <div class="patch-page-title-row">
         <div><h1 id="review-title">패치 검토 결과</h1><p id="review-subtitle" class="muted">검토 결과를 불러오는 중…</p></div>
         <span id="review-status" class="patch-page-status" role="status">불러오는 중</span>
@@ -20,20 +19,21 @@
     </header>
     <div id="review-error" class="error" role="alert" hidden></div>
     <div id="review-body" hidden>
-      <section id="review-overview" class="viewer patch-page-overview" aria-label="검토 요약"></section>
+      <section id="review-metadata" class="viewer patch-page-metadata" aria-label="검토 정보"></section>
+      <section class="viewer patch-page-overview" aria-labelledby="review-verdict-title">
+        <div class="patch-page-section-head"><h2 id="review-verdict-title">AI 검토 결과</h2></div>
+        <div id="review-overview"></div>
+        <div id="review-verdict-body" class="patch-page-verdict-body"></div>
+      </section>
       <nav class="patch-page-nav" aria-label="검토 결과 목차">
-        <a href="#review-findings">지적 사항</a><a href="#review-concerns">추가 우려</a><a href="#review-patches">패치 적용</a><a href="#review-source">원본 패치</a><a href="#review-raw">원본 결과</a>
+        <a href="#review-findings">지적 사항</a><a href="#review-concerns">추가 우려</a><a href="#review-source">패치 · 인라인 검토</a><a href="#review-patches">패치 적용</a><a href="#review-raw">원본 결과</a>
       </nav>
-      <main class="patch-page-grid">
-        <aside id="review-metadata" class="viewer patch-page-metadata" aria-label="검토 정보"></aside>
-        <div class="patch-page-sections">
-          <section id="review-verdict" class="viewer patch-page-section" aria-labelledby="review-verdict-title"><h2 id="review-verdict-title">Sashiko 판정</h2><div id="review-verdict-body"></div></section>
-          <section id="review-findings" class="viewer patch-page-section" aria-labelledby="review-findings-title"><h2 id="review-findings-title">지적 사항</h2><div id="review-findings-body"></div></section>
-          <section id="review-concerns" class="viewer patch-page-section" aria-labelledby="review-concerns-title"><h2 id="review-concerns-title">추가 우려</h2><div id="review-concerns-body"></div></section>
-          <section id="review-patches" class="viewer patch-page-section" aria-labelledby="review-patches-title"><h2 id="review-patches-title">패치 적용</h2><div id="review-patches-body"></div></section>
-          <section id="review-source" class="viewer patch-page-section" aria-labelledby="review-source-title"><h2 id="review-source-title">원본 패치</h2><div id="review-source-body"></div></section>
-          <section id="review-raw" class="viewer patch-page-section" aria-labelledby="review-raw-title"><h2 id="review-raw-title">원본 결과</h2><div id="review-raw-body"></div></section>
-        </div>
+      <main class="patch-page-sections">
+        <section id="review-findings" class="viewer patch-page-section" aria-labelledby="review-findings-title"><div class="patch-page-section-head"><h2 id="review-findings-title">지적 사항</h2></div><div id="review-findings-body" class="patch-page-section-body"></div></section>
+        <section id="review-concerns" class="viewer patch-page-section" aria-labelledby="review-concerns-title"><div class="patch-page-section-head"><h2 id="review-concerns-title">추가 우려</h2></div><div id="review-concerns-body" class="patch-page-section-body"></div></section>
+        <section id="review-source" class="viewer patch-page-section" aria-labelledby="review-source-title"><div class="patch-page-section-head"><h2 id="review-source-title">패치 · 인라인 검토</h2><div id="review-source-actions"></div></div><div id="review-source-body" class="patch-page-source-body"></div></section>
+        <section id="review-patches" class="viewer patch-page-section" aria-labelledby="review-patches-title"><div class="patch-page-section-head"><h2 id="review-patches-title">패치 적용</h2></div><div id="review-patches-body" class="patch-page-section-body"></div></section>
+        <section id="review-raw" class="viewer patch-page-section" aria-labelledby="review-raw-title"><div class="patch-page-section-head"><h2 id="review-raw-title">원본 결과</h2></div><div id="review-raw-body" class="patch-page-section-body"></div></section>
       </main>
     </div>
   </div>
