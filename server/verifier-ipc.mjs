@@ -11,7 +11,6 @@ import { claimDuplicateReview, claimPrimitiveReview, claimSubmission,
   progressSubmission } from './submissions.mjs';
 import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplicateResult,
   recordInternalDuplicateResult } from './duplicate-registry.mjs';
-import { sameRootCandidates } from './same-root-candidates.mjs';
 
 function reply(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -99,13 +98,6 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null, data
                 new Set(body.supported_commits).size !== body.supported_commits.length ||
                 body.supported_commits.some(commit => typeof commit !== 'string' || !/^[a-f0-9]{40}$/.test(commit))))) invalid('Invalid claim request');
         return reply(res, 200, { job: claimSubmission(db, body.supported_commits ?? body.target_commit ?? null, dataDir) });
-      }
-      if (req.method === 'POST' && req.url === '/same-root-candidates') {
-        const body = await inputJson(req);
-        if (!body || typeof body !== 'object' || Array.isArray(body) ||
-            Object.keys(body).some(key => !['project', 'file_path', 'code_refs'].includes(key))) invalid('Invalid same-root candidate request');
-        return reply(res, 200, sameRootCandidates(db, { project: body.project, filePath: body.file_path,
-          codeRefs: body.code_refs, dataDir }));
       }
       if (req.method === 'POST' && req.url === '/progress') {
         const body = await inputJson(req);

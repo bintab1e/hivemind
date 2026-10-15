@@ -7,7 +7,7 @@ import test from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { buildCoverageScope, defaultCoveragePrefixes } from './coverage-scope.mjs';
 import { readFrontMatter } from './contract.mjs';
-import { assertFreshCheckout, coverageProgressStub, encodeJsonBody, makeBatch, pendingBatches, retryableTelemetryRejection, selectCoverage, supportsFindingRevisions, supportsGzipTelemetry, validateCoverageSummary } from './sync-agent.mjs';
+import { assertFreshCheckout, coverageProgressStub, encodeJsonBody, makeBatch, pendingBatches, retryableTelemetryRejection, supportsGzipTelemetry, validateCoverageSummary } from './sync-agent.mjs';
 
 test('coverage metadata excludes local analyst notes', () => {
   const commit = 'a'.repeat(40);
@@ -56,16 +56,6 @@ test('new commit needs a fresh agentcov checkout', () => {
   assert.throws(() => assertFreshCheckout({ repo_root: 'C:\\audit', repo_commit: commit }, 'C:\\audit', nextCommit), /fresh repo_root/);
 });
 
-test('coverage upload excludes files outside the knfsd scope', () => {
-  const lcov = 'TN:\nSF:fs/nfsd/main.c\nDA:1,1\nDA:2,0\nLF:2\nLH:1\nend_of_record\nTN:\nSF:fs/other/main.c\nDA:1,1\nLF:1\nLH:1\nend_of_record\n';
-  const report = JSON.stringify({ files: { 'fs/nfsd/main.c': { line_count: 2, read_lines: 1 }, 'fs/other/main.c': { line_count: 1, read_lines: 1 } }, summary: {}, unknown_events: [] });
-  const selected = selectCoverage(lcov, report, ['fs/nfsd/'], 'C:\\audit');
-  assert(!selected.lcov.includes('fs/other/'));
-  assert.deepEqual(Object.keys(JSON.parse(selected.coverageJson).files), ['fs/nfsd/main.c']);
-  assert.deepEqual(validateCoverageSummary(selected.lcov, JSON.stringify({ files: 1, total_lines: 2, read_lines: 1 }), 'C:\\audit'), { files: 1, total_lines: 2, read_lines: 1 });
-  assert.throws(() => validateCoverageSummary(selected.lcov, JSON.stringify({ files: 1, total_lines: 2, read_lines: 0 }), 'C:\\audit'), /summary mismatch/);
-});
-
 test('sparse AgentCov upload preserves the dense eligible and read line counts', () => {
   const dense = 'TN:agentcov\nSF:fs/nfsd/main.c\nDA:1,0\nDA:2,1\nDA:3,0\nLF:3\nLH:1\nend_of_record\n'
     + 'TN:agentcov\nSF:net/sunrpc/empty.c\nDA:1,0\nDA:2,0\nLF:2\nLH:0\nend_of_record\n';
@@ -90,8 +80,6 @@ test('telemetry uses repository-relative paths and keeps checkout path local', (
 test('telemetry compression is capability-gated and preserves the JSON body', async () => {
   assert.equal(supportsGzipTelemetry({ telemetry: { content_encodings: ['identity', 'gzip'] } }), true);
   assert.equal(supportsGzipTelemetry({ ok: true }), false);
-  assert.equal(supportsFindingRevisions({ exchange: { finding_revisions: true } }), true);
-  assert.equal(supportsFindingRevisions({ ok: true }), false);
   const payload = { coverage_json: 'x'.repeat(100_000) };
   const encoded = await encodeJsonBody(payload, true);
   assert.equal(encoded.headers['Content-Encoding'], 'gzip');

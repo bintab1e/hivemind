@@ -42,43 +42,6 @@ export function makeBatch({ agentId, versionId, repoRoot, commit, clean, generat
   };
 }
 
-export function selectCoverage(lcov, coverageJson, scope, repoRoot) {
-  const selected = [];
-  let record = [];
-  const relative = name => {
-    const normalized = name.replaceAll('\\', '/');
-    const root = repoRoot.replaceAll('\\', '/').replace(/\/$/, '');
-    return normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`) ? normalized.slice(root.length + 1) : normalized;
-  };
-  const inScope = name => Array.isArray(scope) ? scope.some(prefix => relative(name).startsWith(prefix)) : scope.has(relative(name));
-  for (const line of lcov.split(/\r?\n/)) {
-    if (!line && !record.length) continue;
-    record.push(line);
-    if (line === 'end_of_record') {
-      const source = record.find(item => item.startsWith('SF:'));
-      if (source && inScope(source.slice(3))) selected.push(record.join('\n'));
-      record = [];
-    }
-  }
-  if (record.some(line => line.trim()) || !selected.length) throw new Error('No complete agentcov LCOV records in knfsd coverage scope');
-  const scopedLcov = `${selected.join('\n')}\n`;
-  const files = parseLcov(scopedLcov, repoRoot);
-  const report = JSON.parse(coverageJson);
-  if (!report.files || typeof report.files !== 'object' || Array.isArray(report.files)) throw new Error('Invalid agentcov coverage.json');
-  report.files = Object.fromEntries(Object.entries(report.files).filter(([name]) => inScope(name)));
-  if (Object.keys(report.files).length !== Object.keys(files).length || Object.keys(files).some(name => !Object.hasOwn(report.files, name))) throw new Error('agentcov LCOV and JSON file scopes differ');
-  const entries = Object.values(report.files);
-  report.summary = { ...report.summary, files: entries.length };
-  for (const key of ['line_count', 'read_lines', 'search_seen_lines', 'search_hit_lines', 'search_context_lines']) {
-    report.summary[key === 'line_count' ? 'total_lines' : key] = entries.reduce((sum, file) => sum + Number(file[key] || 0), 0);
-  }
-  report.summary.read_percent = report.summary.total_lines ? Math.round(report.summary.read_lines / report.summary.total_lines * 10000) / 100 : 100;
-  report.unknown_events = (report.unknown_events || []).filter(event => event.file && inScope(event.file));
-  report.summary.unknown_events = report.unknown_events.length;
-  report.hivemind_scope = Array.isArray(scope) ? scope : { kind: 'include_closure', files: scope.size };
-  return { lcov: scopedLcov, coverageJson: JSON.stringify(report) };
-}
-
 export function validateCoverageSummary(lcov, metaJson, repoRoot) {
   const files = Object.values(parseLcov(lcov, repoRoot));
   const actual = {
@@ -128,10 +91,6 @@ export function validateServerUrl(serverUrl, allowInsecureLanHttp = false) {
 
 export function supportsGzipTelemetry(health) {
   return health?.telemetry?.content_encodings?.includes('gzip') === true;
-}
-
-export function supportsFindingRevisions(health) {
-  return health?.exchange?.finding_revisions === true;
 }
 
 export function retryableTelemetryRejection(error) {

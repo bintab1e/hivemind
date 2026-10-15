@@ -36,7 +36,7 @@ case "$(uname -s)" in
       command -v "$tool" >/dev/null || { echo "$tool이 필요합니다. xcode-select --install을 실행하세요." >&2; exit 1; }
     done
     ;;
-  *) echo 'Linux 또는 macOS가 필요합니다. Windows에서는 MANUAL.md를 따르세요.' >&2; exit 1 ;;
+  *) echo '이 설치기는 Linux·WSL·macOS에서 실행하세요.' >&2; exit 1 ;;
 esac
 curl -fsS "$SERVER_URL/healthz" >/dev/null || { echo "서버에 연결할 수 없습니다: $SERVER_URL" >&2; exit 1; }
 

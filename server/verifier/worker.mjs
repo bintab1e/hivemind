@@ -59,7 +59,7 @@ export function postJson(socketPath, endpoint, body) {
   if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail', '/progress', '/heartbeat',
     '/primitive/claim', '/primitive/complete', '/primitive/fail', '/primitive/heartbeat',
     '/duplicate/candidates', '/duplicate/result', '/duplicate/internal-candidates', '/duplicate/internal-result',
-    '/same-root-candidates', '/dedupe/claim', '/dedupe/complete', '/dedupe/fail', '/dedupe/heartbeat'].includes(endpoint)) throw new WorkerError('invalid_request');
+    '/dedupe/claim', '/dedupe/complete', '/dedupe/fail', '/dedupe/heartbeat'].includes(endpoint)) throw new WorkerError('invalid_request');
   const encoded = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({ socketPath, path: endpoint, method: 'POST', timeout: 30_000,

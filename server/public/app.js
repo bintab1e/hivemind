@@ -41,7 +41,7 @@ async function api(path, options) {
   const response = await fetch(path, options);
   if (!response.ok) {
     let reason = `요청 실패 (${response.status})`;
-    try { reason = (await response.json()).error || reason; } catch { /* text or empty response */ }
+    try { reason = (await response.json()).error || reason; } catch {}
     const error = new Error(reason);
     error.status = response.status;
     throw error;

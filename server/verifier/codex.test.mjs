@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewReproductionWithCodex, reviewSameRootCauseWithCodex, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, loadTrustedKernelSource, reviewPrimitiveWithCodex, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 
 const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [
   { number: 1, text: 'int nfsd4_proc_compound(void) {' },
@@ -13,7 +13,7 @@ const trustedSource = { commit: 'a'.repeat(40), files: [{ path: 'fs/nfsd/nfs4pro
 const options = cliPath => ({ cliPath, trustedSource });
 
 test('structured-output schemas are valid JSON', () => {
-  for (const name of ['codex-output.schema.json', 'codex-proof.schema.json', 'codex-relevance.schema.json', 'codex-primitive.schema.json', 'codex-same-root.schema.json']) {
+  for (const name of ['codex-output.schema.json', 'codex-proof.schema.json', 'codex-primitive.schema.json']) {
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(new URL(name, import.meta.url), 'utf8')));
   }
 });
@@ -90,49 +90,6 @@ process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
   fs.writeFileSync(cli, code, { mode: 0o700 });
   return cli;
 }
-
-test('same-root review compares the prior report and new grounded source, not the title alone', async t => {
-  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
-  const existing = { management_id: 'A-005', title: 'Similar title', file_path: 'fs/nfsd/nfs4proc.c',
-    report: 'The earlier flaw was a separate lifetime error in another operation.' };
-  const cliPath = fakeCli(t, { verdict: 'different', reason: 'Different violated invariant', comparison: null },
-    { type: 'turn.completed' }, 0, '<existing>');
-  const result = await reviewSameRootCauseWithCodex(existing, reviewed, { cliPath, trustedSource });
-  assert.equal(result.verdict, 'different');
-  assert.match(result.reason, /Different/);
-  await assert.rejects(reviewSameRootCauseWithCodex({ ...existing, report: '' }, reviewed,
-    { cliPath, trustedSource }), error => error.code === 'invalid_same_root_input');
-});
-
-test('same-root confirmation requires causal excerpts from both reports and the grounded flaw line', async t => {
-  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
-  const oldCause = 'The decode operation reads a client-controlled length before checking the XDR buffer boundary.';
-  const newCause = 'fs/nfsd/nfs4proc.c:1 코드에서 검사가 필요합니다.';
-  const existing = { management_id: 'A-005', title: 'Unrelated heading', file_path: 'fs/nfsd/nfs4proc.c',
-    report: `## Summary\nA prior request is affected.\n## Root cause\n${oldCause}\n` };
-  const comparison = { reachable_path: 'Client NFSv4 COMPOUND request reaches the same decoder.',
-    faulty_operation: 'Reads the request length before checking the XDR boundary.',
-    violated_invariant: 'The decode cursor must remain within the request buffer.',
-    defenses: 'The reported boundary check occurs after the unsafe length read.',
-    existing_quote: oldCause, new_quote: newCause,
-    source_path: 'fs/nfsd/nfs4proc.c', source_line: 2 };
-  const same = await reviewSameRootCauseWithCodex(existing, reviewed, { trustedSource,
-    cliPath: fakeCli(t, { verdict: 'same', reason: 'Matching operation and invariant', comparison },
-      { type: 'turn.completed' }, 0, ['<existing>', 'proof']) });
-  assert.equal(same.verdict, 'same');
-  assert.equal(same.comparison.source_line, 2);
-
-  for (const invalid of [
-    { ...comparison, existing_quote: 'This cause is not in the historical report at all.' },
-    { ...comparison, new_quote: 'This cause is not in the new Root cause section.' },
-    { ...comparison, source_line: 1 },
-  ]) {
-    const result = await reviewSameRootCauseWithCodex(existing, reviewed, { trustedSource,
-      cliPath: fakeCli(t, { verdict: 'same', reason: 'Matching title', comparison: invalid },
-        { type: 'turn.completed' }, 0, '<existing>') });
-    assert.equal(result.verdict, 'uncertain');
-  }
-});
 
 test('primitive review stays advisory and grounds each suggested direction in pinned source', async t => {
   const finding = {
@@ -1063,28 +1020,4 @@ test('static likely verdict cannot cite a source line that is absent from the tr
     error => error.code === 'ungrounded_output' &&
       error.diagnostic?.validation_stage === 'source_evidence' &&
       Object.keys(error.diagnostic).length === 1);
-});
-
-test('post-QEMU relevance requires an exact server KASAN frame, pinned source line, and original PoC line', async t => {
-  const review = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
-  const serverSerial = 'BUG: KASAN: slab-out-of-bounds\nRead of size 4\n nfsd4_proc_compound+0x4/0x20\n';
-  const symbolizedFrames = [{ trace_line: 'nfsd4_proc_compound+0x4/0x20', locations: [{ path: 'fs/nfsd/nfs4proc.c', line: 17 }] }];
-  const supporting = { verdict: 'supports', reason: 'Matching frame', trace_line: 'nfsd4_proc_compound+0x4/0x20',
-    source_path: 'fs/nfsd/nfs4proc.c', source_line: 1, poc_line: 1 };
-  const input = { review, serverSerial, pocSource: submission.files[1].content, trustedSource, symbolizedFrames };
-  const result = await reviewReproductionWithCodex(input,
-    { cliPath: fakeCli(t, supporting, { type: 'turn.completed' }, 0, '<server-serial>') });
-  assert.equal(result.verdict, 'supports');
-  assert.equal(result.poc_line, 1);
-  assert.equal(result.symbolized_path, 'fs/nfsd/nfs4proc.c');
-  assert.equal(result.symbolized_line, 17);
-  await assert.rejects(reviewReproductionWithCodex(input,
-    { cliPath: fakeCli(t, { ...supporting, trace_line: 'invented frame' }, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
-  await assert.rejects(reviewReproductionWithCodex(input,
-    { cliPath: fakeCli(t, { ...supporting, source_line: 99 }, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
-  await assert.rejects(reviewReproductionWithCodex({ ...input, symbolizedFrames: [{ ...symbolizedFrames[0], locations: [] }] },
-    { cliPath: fakeCli(t, supporting, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
-  await assert.rejects(reviewReproductionWithCodex({ ...input, symbolizedFrames: [{ ...symbolizedFrames[0], locations: [
-    { path: 'fs/nfsd/nfs4proc.c', line: 17 }, { path: 'fs/nfsd/nfs4proc.c', line: 18 },
-  ] }] }, { cliPath: fakeCli(t, supporting, { type: 'turn.completed' }, 0, '<server-serial>') }), error => error.code === 'ungrounded_relevance');
 });

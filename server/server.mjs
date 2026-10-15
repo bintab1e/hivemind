@@ -145,7 +145,7 @@ function addEvent(db, input, agentId, allowLegacyFindings = false) {
   const event = validateEvent(input);
   if (event.agentId !== agentId) invalid('agent_id does not match token', 403);
   const { sourcePath, markdown, digest, data } = event;
-  if (!allowLegacyFindings && data.kind === 'finding') invalid('Submit findings through /v1/submissions for two-VM verification', 409);
+  if (!allowLegacyFindings && data.kind === 'finding') invalid('Submit findings through /v1/submissions for static verification', 409);
   if (data.kind === 'finding') validateRegistryMetadata(data);
   const id = hash(`${data.version_id}\0${agentId}\0${sourcePath}`);
   if (data.kind === 'analysis') {

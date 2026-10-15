@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { userspacePocError } from './contract.mjs';
 import { handleMessage } from './mcp-agent.mjs';
 
 test('MCP advertises raw submissions and rejects obsolete direct finding tools', async () => {
@@ -18,16 +17,4 @@ test('MCP advertises raw submissions and rejects obsolete direct finding tools',
     const call = await handleMessage(config, '', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: {} } });
     assert.equal(call.error.code, -32602);
   }
-});
-
-test('standalone PoC validation accepts common compiler and build-tool forms', () => {
-  const source = 'int main(void) { return 0; }\n';
-  for (const command of [
-    '/usr/bin/gcc -o poc poc.c && ./poc',
-    'x86_64-linux-gnu-gcc -o poc poc.c && ./poc',
-    'CC=clang make poc && ./poc',
-    'cmake --build build && ./build/poc',
-    'ninja -C build poc && ./build/poc',
-  ]) assert.equal(userspacePocError(source, command), null, command);
-  assert.match(userspacePocError(source, './poc'), /컴파일/);
 });
