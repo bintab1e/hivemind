@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailId: 0, detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');

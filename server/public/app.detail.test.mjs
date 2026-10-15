@@ -181,3 +181,53 @@ test('finding detail can select an earlier approved report without changing the 
     `/api/registry/A-005/revisions/${older}/artifacts`, `/api/registry/A-005/revisions/${older}/artifacts/report.md`]);
   assert.equal(state.finding, finding);
 });
+
+test('real detail state renders report, PoC, log, and API errors', async () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const nodes = new Map();
+  const makeElement = tagName => ({ tagName, textContent: '', children: [], scrollTop: 0,
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    setAttribute() {}, removeAttribute() {},
+  });
+  nodes.set('detail-content', makeElement('div'));
+  const responses = new Map();
+  const context = {
+    document: { getElementById: id => nodes.get(id), createElement: makeElement, querySelectorAll: () => [] },
+    fetch: async url => {
+      assert.ok(responses.has(url), `Unexpected request: ${url}`);
+      const { body, status = 200 } = responses.get(url);
+      return { ok: status < 400, status, json: async () => body, text: async () => body };
+    },
+  };
+  vm.runInNewContext(
+    source.slice(0, source.indexOf('const agentName =')) +
+    source.slice(source.indexOf('async function api('), source.indexOf('function showError(')) +
+    source.slice(source.indexOf('async function renderCanonicalArtifacts('), source.indexOf('const queuePhaseLabels =')) +
+    '\nglobalThis.testState = state; globalThis.showTab = showDetailTab;', context,
+  );
+  const state = context.testState;
+  const content = nodes.get('detail-content');
+  const text = node => [node.textContent, ...node.children.map(text)].join(' ');
+  const findingId = 'a'.repeat(64);
+  const base = `/api/events/${findingId}/artifacts`;
+  const files = new Map([
+    ['report.md', '## Summary\nSubmitted report'],
+    ['poc.c', 'int main(void) { return 0; }'],
+    ['reproduction.md', 'cc poc.c'],
+    ['evidence.log', 'BUG: KASAN: submitted log'],
+  ]);
+  state.finding = { event_id: findingId, origin: 'agent' };
+  responses.set(base, { body: { artifacts: [...files].map(([name, body]) => ({ name, size: body.length })) } });
+  for (const [name, body] of files) responses.set(`${base}/${name}`, { body });
+  for (const [tab, expected] of [['report', 'Submitted report'], ['poc', 'int main'], ['verification', 'submitted log']]) {
+    state.detailTab = tab;
+    await context.showTab();
+    assert.ok(text(content).includes(expected), `${tab} artifact should appear`);
+  }
+  assert.ok(Number.isFinite(state.detailId));
+  responses.set(base, { status: 503, body: { error: 'temporary unavailable' } });
+  await context.showTab();
+  assert.match(text(content), /자료를 열지 못했습니다: temporary unavailable/);
+  assert.doesNotMatch(text(content), /자료를 불러오는 중/);
+});
