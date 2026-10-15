@@ -6,8 +6,10 @@ import test from 'node:test';
 import { openDatabase, setActiveTrack } from './server.mjs';
 import { hash, readFrontMatter } from './contract.mjs';
 import { importHistoryArtifacts } from './history-artifacts.mjs';
-import { claimPrimitiveReview, claimSubmission, completeSubmission, getVerifiedArtifact,
-  heartbeatWorker, listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, submitSubmission } from './submissions.mjs';
+import { claimDuplicateReview, claimPrimitiveReview, claimSubmission, completeDuplicateReview,
+  completeSubmission, failDuplicateReview, getVerifiedArtifact, heartbeatWorker,
+  listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, retrySubmission,
+  submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
 
 const commit = 'a'.repeat(40);
@@ -60,9 +62,20 @@ function setup(t) {
 }
 
 function submit(db, id, metadata = {}) { return submitSubmission(db, raw(id, metadata), 'analyst').submission_id; }
-function approve(db, id, result = verdict()) { return completeSubmission(db, id, result, claimSubmission(db, commit).lease_token); }
+function approve(db, id, result = verdict(), duplicateReview = {
+  verdict: 'new', matched_management_id: null, reason: 'Different root cause from registered findings',
+}) {
+  const screened = completeSubmission(db, id, result, claimSubmission(db, commit).lease_token);
+  if (screened.status !== 'duplicate_pending') return screened;
+  const job = claimDuplicateReview(db);
+  assert.equal(job.submission_id, id);
+  return completeDuplicateReview(db, id, duplicateReview, job.lease_token);
+}
 
-test('static-screened submission receives a number without fabricated dynamic impacts or VM evidence', t => {
+const sameFinding = managementId => ({ verdict: 'duplicate', matched_management_id: managementId,
+  reason: 'Same source path, reachable call chain and faulty invariant' });
+
+test('static-screened submission receives a number only after duplicate review, without fabricated dynamic evidence', t => {
   const db = setup(t);
   const id = submitSubmission(db, raw('one'), 'jinpyo').submission_id;
   const result = verdict();
@@ -84,6 +97,26 @@ test('static-screened submission receives a number without fabricated dynamic im
   assert.equal(data.evidence_sha256, hash(log));
   assert.equal(data.kasan_sha256, undefined);
   assert.deepEqual(data.code_refs, ['fs/nfsd/nfs4proc.c:42']);
+});
+
+test('static screening stages evidence without registering or numbering the finding', t => {
+  const db = setup(t);
+  const id = submit(db, 'staged');
+  const screened = completeSubmission(db, id, verdict(), claimSubmission(db, commit).lease_token);
+  assert.equal(screened.status, 'duplicate_pending');
+  assert.equal(screened.management_id, null);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 42);
+  assert.equal(listRegistry(db).some(row => row.title === 'NFS request length error'), false);
+  const queue = listVerificationQueue(db);
+  assert.equal(queue.duplicate.counts.pending, 1);
+  assert.equal(queue.duplicate.pending[0].submission_id, id);
+  const job = claimDuplicateReview(db);
+  assert.equal(job.submission_id, id);
+  assert.equal(job.candidate.title, 'NFS request length error');
+  assert.equal(listVerificationQueue(db).duplicate.active[0].submission_id, id);
+  assert.equal(completeDuplicateReview(db, id,
+    { verdict: 'new', matched_management_id: null, reason: 'No matching root cause or entry path' },
+    job.lease_token).management_id, 'A-043');
 });
 
 test('daily cleanup removes finished blocked submissions and blobs but preserves active work and approved evidence', t => {
@@ -347,12 +380,13 @@ test('invalid source-path metadata is held instead of failing result delivery', 
   assert.equal(held.management_id, null);
 });
 
-test('ambiguous same-root candidates cannot fall through to a new management ID', t => {
+test('uncertain duplicate comparison is held without assigning a management ID', t => {
   const db = setup(t);
   const id = submit(db, 'ambiguous');
-  const result = verdict();
-  result.review.same_root_cause = { verdict: 'uncertain', reason: 'Multiple candidates' };
-  assert.equal(approve(db, id, result).status, 'needs_review');
+  const held = approve(db, id, verdict(),
+    { verdict: 'uncertain', matched_management_id: null, reason: 'Multiple candidates share the same path' });
+  assert.equal(held.status, 'duplicate_needs_review');
+  assert.equal(held.reason, 'Multiple candidates share the same path');
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 
@@ -360,56 +394,45 @@ test('the same rooted enhancement retains one management ID and its earlier revi
   const db = setup(t);
   const first = approve(db, submit(db, 'first'));
   const second = submit(db, 'second', { existing_management_id: first.management_id });
-  const next = approve(db, second, verdict({ existingId: first.management_id }));
+  const next = approve(db, second, verdict(), sameFinding(first.management_id));
   assert.equal(next.management_id, first.management_id);
   assert.equal(db.prepare("SELECT count(*) AS count FROM submissions WHERE management_id = ? AND status = 'approved'").get(first.management_id).count, 2);
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_revision_audit WHERE management_id = ?').get(first.management_id).n, 1);
+  assert.equal(getVerifiedArtifact(db, next.finding_id, 'report.md').toString(), report);
 });
 
-test('same-root comparison receives the complete canonical live report or holds oversized evidence', t => {
+test('the static verifier does not receive an existing report; duplicate worker receives the reference', t => {
   const db = setup(t);
-  const firstReport = `${report}\n${'근거'.repeat(13_000)}\nLATE_ROOT_CAUSE_ANCHOR`;
-  assert.ok(Buffer.byteLength(firstReport) < 90_000);
-  const firstResult = verdict();
-  firstResult.review.normalized.report = firstReport;
-  firstResult.artifacts.report.content = firstReport;
-  const first = approve(db, submit(db, 'first'), firstResult);
-  submit(db, 'second', { existing_management_id: first.management_id });
-  const comparison = claimSubmission(db, commit);
-  assert.equal(comparison.existing_finding.report, firstReport);
-  assert.match(comparison.existing_finding.report, /LATE_ROOT_CAUSE_ANCHOR$/);
-
-  const oversized = `${report}\n${'근거'.repeat(16_000)}`;
-  assert.ok(oversized.length < 90_000 && Buffer.byteLength(oversized) > 90_000);
-  db.prepare('UPDATE submission_artifacts SET content = ?, size = ? WHERE submission_id = ? AND ordinal = 1000')
-    .run(Buffer.from(oversized), Buffer.byteLength(oversized), first.submission_id);
-  submit(db, 'third', { existing_management_id: first.management_id });
-  assert.equal(claimSubmission(db, commit).existing_finding.report, null);
+  const first = approve(db, submit(db, 'first'));
+  const second = submit(db, 'second', { existing_management_id: first.management_id });
+  const screening = claimSubmission(db, commit);
+  assert.equal(Object.hasOwn(screening, 'existing_finding'), false);
+  assert.equal(completeSubmission(db, second, verdict(), screening.lease_token).status, 'duplicate_pending');
+  const duplicateJob = claimDuplicateReview(db);
+  const reference = duplicateJob.references.find(item => item.management_id === first.management_id);
+  assert.ok(reference);
+  assert.match(reference.report_excerpt, /## Root cause/);
 });
 
-test('historical same-root comparison never passes a truncated archive report', t => {
+test('historical A records are available only to the duplicate reviewer', t => {
   const db = setup(t);
   const dataDir = mkdtempSync(path.join(tmpdir(), 'hv-existing-report-'));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   const sourceDir = path.join(dataDir, 'source');
   mkdirSync(sourceDir);
-  const complete = `${report}\n${'근거'.repeat(13_000)}\nHISTORICAL_TAIL_ANCHOR`;
-  const oversized = `${report}\n${'근거'.repeat(16_000)}`;
-  for (const [managementId, filename, content] of [
-    ['A-001', 'complete.md', complete], ['A-002', 'oversized.md', oversized],
-  ]) {
-    db.prepare('INSERT INTO registry_history(management_id, number, title, target, imported_at) VALUES (?, ?, ?, ?, ?)')
-      .run(managementId, Number(managementId.slice(2)), 'Historical issue', 'knfsd', new Date().toISOString());
-    writeFileSync(path.join(sourceDir, filename), content);
-  }
+  db.prepare('INSERT INTO registry_history(management_id, number, title, target, imported_at) VALUES (?, ?, ?, ?, ?)')
+    .run('A-001', 1, 'Historical issue', 'knfsd', new Date().toISOString());
+  writeFileSync(path.join(sourceDir, 'complete.md'), report);
   importHistoryArtifacts(db, dataDir, sourceDir, [
     { management_id: 'A-001', kind: 'report', source_path: 'complete.md', display_name: 'report.md' },
-    { management_id: 'A-002', kind: 'report', source_path: 'oversized.md', display_name: 'report.md' },
   ]);
-  submit(db, 'historical-complete', { existing_management_id: 'A-001' });
-  assert.equal(claimSubmission(db, commit, dataDir).existing_finding.report, complete);
-  submit(db, 'historical-oversized', { existing_management_id: 'A-002' });
-  assert.equal(claimSubmission(db, commit, dataDir).existing_finding.report, null);
+  const id = submit(db, 'historical-complete', { existing_management_id: 'A-001' });
+  const screening = claimSubmission(db, commit, dataDir);
+  assert.equal(Object.hasOwn(screening, 'existing_finding'), false);
+  assert.equal(completeSubmission(db, id, verdict(), screening.lease_token).status, 'duplicate_pending');
+  const duplicateJob = claimDuplicateReview(db, dataDir);
+  assert.match(duplicateJob.references.find(item => item.management_id === 'A-001').report_excerpt, /## Root cause/);
 });
 
 test('historical revision reports static screening without fabricated 2VM observation', t => {
@@ -420,7 +443,7 @@ test('historical revision reports static screening without fabricated 2VM observ
   const historical = db.prepare('SELECT management_id FROM registry_history ORDER BY management_id LIMIT 1').get();
   assert.ok(historical);
   const id = submit(db, 'historical-revision', { existing_management_id: historical.management_id });
-  const approved = approve(db, id, verdict({ existingId: historical.management_id }));
+  const approved = approve(db, id, verdict(), sameFinding(historical.management_id));
   assert.equal(approved.management_id, historical.management_id);
   const record = listRegistry(db).find(row => row.management_id === historical.management_id);
   assert.equal(record.review_provider, 'codex_static');
@@ -429,17 +452,77 @@ test('historical revision reports static screening without fabricated 2VM observ
   assert.deepEqual(record.latest_verification.observed_impacts, []);
 });
 
-test('concurrent same-path submissions are held for root comparison before a second number', t => {
+test('concurrent same-path submissions wait for duplicate comparison before any number', t => {
   const db = setup(t);
   const first = submit(db, 'first');
   const second = submit(db, 'second');
   const firstLease = claimSubmission(db, commit);
   const secondLease = claimSubmission(db, commit);
-  assert.equal(completeSubmission(db, first, verdict(), firstLease.lease_token).management_id, 'A-043');
-  const secondResult = verdict({ anchorLine: 43 });
-  secondResult.review.grounding.evidence[0].text = line;
-  assert.equal(completeSubmission(db, second, secondResult, secondLease.lease_token).status, 'needs_review');
+  assert.equal(completeSubmission(db, first, verdict(), firstLease.lease_token).status, 'duplicate_pending');
+  assert.equal(completeSubmission(db, second, verdict(), secondLease.lease_token).status, 'duplicate_pending');
+  assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
+  const firstJob = claimDuplicateReview(db);
+  assert.equal(firstJob.submission_id, first);
+  assert.equal(claimDuplicateReview(db), null);
+  assert.equal(completeDuplicateReview(db, first, { verdict: 'new', matched_management_id: null,
+    reason: 'No matching root cause' }, firstJob.lease_token).management_id, 'A-043');
+  const secondJob = claimDuplicateReview(db);
+  assert.equal(secondJob.submission_id, second);
+  assert.ok(secondJob.references.some(item => item.management_id === 'A-043'));
+  assert.equal(completeDuplicateReview(db, second, { verdict: 'uncertain', matched_management_id: null,
+    reason: 'Same source file but root cause differs in an unresolved way' }, secondJob.lease_token).status, 'duplicate_needs_review');
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
+});
+
+test('changed A/B/C references force a fresh duplicate comparison before new numbering', t => {
+  const db = setup(t);
+  const first = approve(db, submit(db, 'first'));
+  const second = submit(db, 'second');
+  assert.equal(completeSubmission(db, second, verdict(), claimSubmission(db, commit).lease_token).status, 'duplicate_pending');
+  const oldJob = claimDuplicateReview(db);
+  db.prepare('UPDATE finding_registry SET revision = revision + 1 WHERE management_id = ?').run(first.management_id);
+  assert.equal(completeDuplicateReview(db, second, { verdict: 'new', matched_management_id: null,
+    reason: 'No matching cause in the old snapshot' }, oldJob.lease_token).status, 'duplicate_pending');
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 43);
+  assert.equal(claimDuplicateReview(db).submission_id, second);
+});
+
+test('a duplicate-review hold stays in its own queue and survives daily cleanup', t => {
+  const db = setup(t);
+  const id = submit(db, 'held-duplicate');
+  assert.equal(completeSubmission(db, id, verdict(), claimSubmission(db, commit).lease_token).status, 'duplicate_pending');
+  const job = claimDuplicateReview(db);
+  assert.equal(completeDuplicateReview(db, id, { verdict: 'uncertain', matched_management_id: null,
+    reason: 'A historical report lacks a comparable causal path' }, job.lease_token).status, 'duplicate_needs_review');
+  const queue = listVerificationQueue(db);
+  assert.equal(queue.counts.blocked, 0);
+  assert.equal(queue.duplicate.counts.error, 1);
+  assert.equal(queue.duplicate.errors[0].submission_id, id);
+  purgeFinishedSubmissions(db, '9999-12-31T00:00:00.000Z');
+  assert.equal(db.prepare('SELECT status FROM submissions WHERE id = ?').get(id).status, 'duplicate_needs_review');
+  assert.equal(retrySubmission(db, id).status, 'duplicate_pending');
+});
+
+test('duplicate-review failures retry, then expose an error without consuming a number', t => {
+  const db = setup(t);
+  const id = submit(db, 'duplicate-failure');
+  assert.equal(completeSubmission(db, id, verdict(), claimSubmission(db, commit).lease_token).status, 'duplicate_pending');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const job = claimDuplicateReview(db);
+    assert.equal(job.submission_id, id);
+    const failed = failDuplicateReview(db, id, `Comparison failed ${attempt}`, job.lease_token);
+    assert.equal(failed.status, attempt < 3 ? 'duplicate_pending' : 'duplicate_error');
+    assert.equal(failed.management_id, null);
+    if (attempt < 3) db.prepare('UPDATE submissions SET duplicate_retry_after = ? WHERE id = ?')
+      .run('2000-01-01T00:00:00.000Z', id);
+  }
+  assert.equal(listVerificationQueue(db).duplicate.counts.error, 1);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 42);
+  assert.equal(retrySubmission(db, id).status, 'duplicate_pending');
+  const retry = claimDuplicateReview(db);
+  assert.equal(retry.submission_id, id);
+  assert.equal(completeDuplicateReview(db, id, { verdict: 'new', matched_management_id: null,
+    reason: 'Independent comparison found no matching root cause' }, retry.lease_token).management_id, 'A-043');
 });
 
 test('pooled claim picks oldest compatible target and idle heartbeats expose no fixed commit', t => {

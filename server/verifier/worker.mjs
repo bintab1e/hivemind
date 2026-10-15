@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewSameRootCauseWithCodex, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
+import { CodexReviewError, VerifierUnavailableError, isInfrastructureReviewError, loadTrustedKernelSource, reviewStaticProofWithCodex, reviewSubmissionWithCodex } from './codex.mjs';
 import { canonicalArtifacts } from './canonical.mjs';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -59,7 +59,7 @@ export function postJson(socketPath, endpoint, body) {
   if (!path.isAbsolute(socketPath) || !['/claim', '/complete', '/fail', '/progress', '/heartbeat',
     '/primitive/claim', '/primitive/complete', '/primitive/fail', '/primitive/heartbeat',
     '/duplicate/candidates', '/duplicate/result', '/duplicate/internal-candidates', '/duplicate/internal-result',
-    '/same-root-candidates'].includes(endpoint)) throw new WorkerError('invalid_request');
+    '/same-root-candidates', '/dedupe/claim', '/dedupe/complete', '/dedupe/fail', '/dedupe/heartbeat'].includes(endpoint)) throw new WorkerError('invalid_request');
   const encoded = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({ socketPath, path: endpoint, method: 'POST', timeout: 30_000,
@@ -99,17 +99,7 @@ function decodeJob(job) {
     }
   });
   const report = typeof job.report === 'string' ? job.report.slice(0, 150_000) : null;
-  const existing = job.existing_finding;
-  if (existing != null && (!existing || typeof existing !== 'object' ||
-      !/^A-\d{3,}$/.test(existing.management_id || '') ||
-      existing.management_id !== job.metadata?.existing_management_id ||
-      typeof existing.title !== 'string' || existing.title.length > 300 ||
-      existing.file_path != null && typeof existing.file_path !== 'string' ||
-      existing.report != null && (typeof existing.report !== 'string' || Buffer.byteLength(existing.report) > 90_000))) {
-    throw new WorkerError('invalid_job');
-  }
-  return { project: job.project, title: job.title, report, metadata: job.metadata || {}, files,
-    existing_finding: existing ?? null };
+  return { project: job.project, title: job.title, report, metadata: job.metadata || {}, files };
 }
 
 function selectedPoc(review, files) {
@@ -157,8 +147,7 @@ function deliveryDiagnostic(error) {
 }
 
 export async function processSubmissionJob(job, { config, reviewer = reviewSubmissionWithCodex, sourceLoader = loadTrustedKernelSource,
-  proofReviewer = reviewStaticProofWithCodex, sameRootReviewer = reviewSameRootCauseWithCodex,
-  candidateLookup = async () => ({ candidates: [], truncated: false }),
+  proofReviewer = reviewStaticProofWithCodex,
   onPhase = async () => {} } = {}) {
   let review = { verdict: 'uncertain', reason: 'Static review unavailable', normalized: null, model: 'codex' };
   let artifacts;
@@ -206,37 +195,8 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`;
       return { review, reproduction: notRun };
     }
-    if (submission.metadata.existing_management_id) {
-      if (!submission.existing_finding?.report) {
-        review.same_root_cause = { verdict: 'uncertain', reason: 'Existing finding report is unavailable' };
-        return { review, reproduction: notRun };
-      }
-      review.same_root_cause = await sameRootReviewer(submission.existing_finding, review,
-        { cliPath: config.cliPath, trustedSource });
-      if (review.same_root_cause.verdict !== 'same') {
-        return { review, reproduction: notRun };
-      }
-    }
     const poc = selectedPoc(review, submission.files);
     if (!poc) return { review, reproduction: notRun };
-    if (!submission.metadata.existing_management_id) {
-      const candidates = await candidateLookup({ project: submission.project, file_path: review.normalized.file_path,
-        code_refs: review.normalized.code_refs });
-      const matches = [];
-      let uncertain = false;
-      for (const candidate of candidates.candidates || []) {
-        if (!candidate.report) { uncertain = true; continue; }
-        const comparison = await sameRootReviewer(candidate, review, { cliPath: config.cliPath, trustedSource });
-        if (comparison.verdict === 'same') matches.push(candidate.management_id);
-        else if (comparison.verdict !== 'different') uncertain = true;
-      }
-      if (candidates.truncated || uncertain || matches.length > 1) {
-        review.same_root_cause = { verdict: 'uncertain', reason: 'Multiple or incomplete same-root candidates require manual review' };
-        review.verdict = 'uncertain';
-        return { review, reproduction: notRun };
-      }
-      if (matches.length === 1) review.same_root_cause = { verdict: 'same', management_id: matches[0], reason: 'Grounded same-root comparison' };
-    }
     artifacts = canonicalArtifacts({ review, trustedSource, poc, kernelCommit: targetCommit });
     if (!artifacts) {
       review.verdict = 'uncertain';
@@ -259,7 +219,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
 }
 
 export async function runWorkerOnce({ config = configuration(process.env), transport = postJson, reviewer, sourceLoader,
-  proofReviewer, sameRootReviewer, workerId = null } = {}) {
+  proofReviewer, workerId = null } = {}) {
   const targets = sourceTargets(config);
   const supportedCommits = [...targets.keys()];
   const claimed = await transport(config.socketPath, '/claim', { supported_commits: supportedCommits });
@@ -282,8 +242,7 @@ export async function runWorkerOnce({ config = configuration(process.env), trans
     : Promise.resolve();
   try {
     const result = await processSubmissionJob(claimed.job, { config, reviewer, sourceLoader,
-      proofReviewer, sameRootReviewer, candidateLookup: async request =>
-        transport(config.socketPath, '/same-root-candidates', request), onPhase });
+      proofReviewer, onPhase });
     if (!result.infrastructure_error) await onPhase('finalizing');
     if (Array.isArray(result.review?.normalized?.logs)) {
       result.review.normalized.logs = result.review.normalized.logs.map(({ content, ...reference }) => reference);

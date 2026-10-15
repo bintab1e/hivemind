@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviews"],
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["management_id", "verdict", "reason", "comparison"],
+        "properties": {
+          "management_id": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["same", "different", "uncertain"] },
+          "reason": { "type": "string" },
+          "comparison": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["reachable_path", "faulty_operation", "violated_invariant", "defenses", "candidate_quote", "reference_quote"],
+            "properties": {
+              "reachable_path": { "type": "string" },
+              "faulty_operation": { "type": "string" },
+              "violated_invariant": { "type": "string" },
+              "defenses": { "type": "string" },
+              "candidate_quote": { "type": "string" },
+              "reference_quote": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

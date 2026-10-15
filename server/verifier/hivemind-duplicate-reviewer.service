@@ -1,0 +1,19 @@
+[Unit]
+Description=Hivemind submission duplicate reviewer
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/bintable/hivemind-checkout
+ExecStart=/usr/bin/node /absolute/bintable/hivemind-checkout/server/verifier/duplicate-worker.mjs
+Environment=HIVEMIND_VERIFIER_SOCKET=/absolute/private/data-directory/verifier.sock
+Environment=HIVEMIND_CODEX_CLI=/usr/bin/codex
+Environment=HIVEMIND_CODEX_MODEL=gpt-5.6-sol
+Environment=HIVEMIND_DEDUPE_WORK_ROOT=/absolute/bintable/duplicate-review-work
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

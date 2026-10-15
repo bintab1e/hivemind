@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1, 'duplicate-pending': 1, 'duplicate-active': 1, 'duplicate-errors': 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
@@ -1011,13 +1011,17 @@ async function showDetailTab() {
 const queuePhaseLabels = {
   queued: '대기', preparing: '환경 준비', static_review: 'Codex 정적 검토',
   qemu_reproduction: '2VM PoC 재현', trace_review: 'KASAN 로그 검토', finalizing: '결과 정리',
+  duplicate_review: '중복 검토',
 };
 const queueStatusLabels = {
   pending: '검증 대기', processing: '검증 중', needs_evidence: '증거 보완 필요',
   needs_review: '추가 검토 필요', rejected: '반려', error: '오류',
+  duplicate_pending: '중복 검토 대기', duplicate_processing: '중복 검토 중',
+  duplicate_needs_review: '중복 검토 보류', duplicate_error: '중복 검토 오류',
 };
 const queueWorkerLabels = { busy: '작업 중', idle: '유휴', offline: '오프라인' };
-const queuePhaseLabel = row => row.phase ? queuePhaseLabels[row.phase] || row.phase : '검증 중';
+const queuePhaseLabel = row => row.status?.startsWith('duplicate_')
+  ? queueStatusLabels[row.status] : row.phase ? queuePhaseLabels[row.phase] || row.phase : '검증 중';
 const queueSubmitter = row => row.origin === 'manual_upload' ? `직접 제출 · ${row.reporter || '표시명 없음'}` : row.agent_id;
 let queueDetailSubmissionId = '';
 
@@ -1026,7 +1030,8 @@ function renderQueueDetail(row) {
   $('queue-detail-subtitle').textContent = `${row.project || '대상 미입력'} · ${queueSubmitter(row) || '제보자 미입력'}`;
   const facts = $('queue-detail-facts');
   clear(facts);
-  const phase = row.phase ? queuePhaseLabel(row) : row.status === 'processing' ? '검증 중' : '—';
+  const phase = row.status?.startsWith('duplicate_') || row.phase ? queuePhaseLabel(row)
+    : row.status === 'processing' ? '검증 중' : '—';
   facts.append(
     detailFact('상태', queueStatusLabels[row.status] || row.status),
     detailFact('검증 단계', `${phase}${row.stale ? ' · 응답 지연' : ''}`),
@@ -1039,6 +1044,7 @@ function renderQueueDetail(row) {
     detailFact('접수 ID', row.submission_id),
   );
   if (row.existing_management_id) facts.append(detailFact('보강 대상 관리번호', row.existing_management_id));
+  if (row.matched_management_id) facts.append(detailFact('동일 취약점 관리번호', row.matched_management_id));
   if (row.management_id) facts.append(detailFact('관리번호', row.management_id));
   if (row.reason) {
     const reason = detailFact('검증 결과 / 오류 사유', row.reason);
@@ -1076,13 +1082,16 @@ function renderQueueList(id, rows, emptyMessage) {
 }
 
 function renderVerificationQueue() {
-  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked']) clear($(id));
+  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked',
+    'queue-duplicate-pending', 'queue-duplicate-active', 'queue-duplicate-errors']) clear($(id));
   if (state.queueError) {
-    for (const id of ['queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination']) $(id).hidden = true;
+    for (const id of ['queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination',
+      'queue-duplicate-pending-pagination', 'queue-duplicate-active-pagination', 'queue-duplicate-errors-pagination']) $(id).hidden = true;
     if ($('queue-detail').open) $('queue-detail').close();
     $('queue-updated').textContent = '조회 실패';
     $('queue-worker-count').textContent = '';
     for (const id of ['queue-active-count', 'queue-pending-count', 'queue-blocked-count']) $(id).textContent = '';
+    for (const id of ['queue-duplicate-count', 'queue-duplicate-pending-count', 'queue-duplicate-active-count', 'queue-duplicate-errors-count']) $(id).textContent = '';
     const message = element('div', 'table-empty queue-error', `검증 큐를 불러오지 못했습니다: ${state.queueError.message}`);
     message.setAttribute('role', 'alert');
     $('queue-active').append(message);
@@ -1090,6 +1099,7 @@ function renderVerificationQueue() {
   }
   const queue = state.queue;
   if (!queue) return;
+  const duplicate = queue.duplicate || { pending: [], active: [], errors: [], counts: { pending: 0, processing: 0, error: 0 } };
   $('queue-updated').textContent = `마지막 확인 ${when(queue.fetched_at)}`;
   for (const [label, count, tone] of [
     ['검증 중', queue.counts.processing, 'accent'],
@@ -1108,10 +1118,12 @@ function renderVerificationQueue() {
     const card = element('div', 'queue-worker-card');
     const head = element('div', 'queue-worker-heading');
     const primitive = worker.role === 'primitive';
-    const current = queue.active.find(row => row.submission_id === worker.current_submission_id);
+    const duplicateWorker = worker.role === 'duplicate';
+    const current = (duplicateWorker ? duplicate.active : queue.active)
+      .find(row => row.submission_id === worker.current_submission_id);
     const targetCommit = current?.target_commit || worker.target_commit;
     const track = (state.data?.tracks || []).find(item => item.repo_commit === targetCommit);
-    const target = primitive ? '프리미티브 검토'
+    const target = primitive ? '프리미티브 검토' : duplicateWorker ? '중복 검토'
       : track ? `${track.label || track.track_id} · ${track.version_id}`
         : targetCommit ? `커밋 ${targetCommit.slice(0, 12)}` : '공용 검증 에이전트';
     head.append(element('strong', 'queue-worker-target', target));
@@ -1122,9 +1134,9 @@ function renderVerificationQueue() {
       ? [worker.current_management_id, worker.current_title].filter(Boolean).join(' · ') || currentId
       : current?.title || currentId;
     if (currentId) card.append(element('div', 'queue-worker-current', `${worker.status === 'offline' ? '마지막 담당' : '담당'} · ${currentTitle}`));
-    if (primitive) card.append(element('div', 'queue-worker-meta', `대기 ${number(worker.pending_count)}건`));
+    if (primitive || duplicateWorker) card.append(element('div', 'queue-worker-meta', `대기 ${number(worker.pending_count)}건`));
     card.append(element('div', 'queue-worker-meta', `워커 ${worker.worker_id ? worker.worker_id.slice(0, 12) : '—'}`));
-    if (!primitive && targetCommit) card.append(element('div', 'queue-worker-meta', `커널 ${targetCommit}`));
+    if (!primitive && !duplicateWorker && targetCommit) card.append(element('div', 'queue-worker-meta', `커널 ${targetCommit}`));
     card.append(element('div', 'queue-worker-meta', `마지막 응답 ${when(worker.last_seen_at)}`));
     $('queue-workers').append(card);
   }
@@ -1151,11 +1163,19 @@ function renderVerificationQueue() {
     board.append(columns);
     $('queue-workers').append(board);
   }
+  $('queue-duplicate-count').textContent = `${number(duplicate.counts.pending + duplicate.counts.processing + duplicate.counts.error)}건`;
+  for (const [id, count] of [['pending', duplicate.counts.pending], ['active', duplicate.counts.processing], ['errors', duplicate.counts.error]]) {
+    $(`queue-duplicate-${id}-count`).textContent = `${number(count)}건`;
+  }
+  renderQueueList('queue-duplicate-pending', duplicate.pending, '중복 검토를 기다리는 신규 제출이 없습니다.');
+  renderQueueList('queue-duplicate-active', duplicate.active, '현재 중복 검토 중인 신규 제출이 없습니다.');
+  renderQueueList('queue-duplicate-errors', duplicate.errors, '중복 검토 오류가 발생한 신규 제출이 없습니다.');
   renderQueueList('queue-active', queue.active, '현재 검증 중인 신규 제출이 없습니다.');
   renderQueueList('queue-pending', queue.pending, '검증을 기다리는 신규 제출이 없습니다.');
   renderQueueList('queue-blocked', queue.blocked, '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
   if ($('queue-detail').open) {
-    const current = [...queue.active, ...queue.pending, ...queue.blocked]
+    const current = [...queue.active, ...queue.pending, ...queue.blocked,
+      ...duplicate.active, ...duplicate.pending, ...duplicate.errors]
       .find(row => row.submission_id === queueDetailSubmissionId);
     if (current) renderQueueDetail(current);
     else $('queue-detail').close();
@@ -1166,7 +1186,8 @@ async function loadVerificationQueue() {
   const id = ++state.queueRequestId;
   try {
     const queue = await api('/api/verification-queue').then(response => response.json());
-    if (![queue.active, queue.pending, queue.blocked, queue.workers].every(Array.isArray) || !queue.counts) throw new Error('검증 큐 응답 형식이 올바르지 않습니다.');
+    if (![queue.active, queue.pending, queue.blocked, queue.workers].every(Array.isArray) || !queue.counts ||
+      queue.duplicate && (![queue.duplicate.pending, queue.duplicate.active, queue.duplicate.errors].every(Array.isArray) || !queue.duplicate.counts)) throw new Error('검증 큐 응답 형식이 올바르지 않습니다.');
     if (id !== state.queueRequestId) return;
     state.queue = { ...queue, fetched_at: new Date().toISOString() };
     state.queueError = null;
@@ -1181,6 +1202,8 @@ async function loadVerificationQueue() {
 const uploadStatusLabels = {
   pending: '검증 대기', processing: '검증 중', approved: '검증 완료', rejected: '반려',
   needs_evidence: '재현 자료 필요', needs_review: '추가 검토 필요', error: '검증 오류',
+  duplicate_pending: '중복 검토 대기', duplicate_processing: '중복 검토 중',
+  duplicate_needs_review: '중복 검토 보류', duplicate_error: '중복 검토 오류',
 };
 let zipSubmitting = false;
 let uploadTargets = [];

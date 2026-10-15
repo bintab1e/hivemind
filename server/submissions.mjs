@@ -1,21 +1,20 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import fs from 'node:fs';
 import { hash, invalid, isStandaloneUserspacePoc, readFrontMatter } from './contract.mjs';
 import { registerFinding, validateRegistryMetadata } from './registry.mjs';
-import { listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
 import { normalizeRegistryOption } from './registry-option.mjs';
+import { listInternalDuplicateReferences } from './duplicate-registry.mjs';
 
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 2_000_000;
 const MAX_TOTAL_BYTES = 8_000_000;
 const MAX_REPORT_BYTES = 1_000_000;
-const MAX_SAME_ROOT_REPORT_BYTES = 90_000;
 const MAX_PENDING_PER_AGENT = 30;
 const MAX_PENDING_TOTAL = 300;
 const MAX_STORED_BYTES = 4_000_000_000;
 const LEASE_MS = 60 * 60_000;
 const WORKER_ONLINE_MS = 60_000;
 const PRIMITIVE_LEASE_MS = 10 * 60_000;
+const DUPLICATE_LEASE_MS = 60 * 60_000;
 const MAX_PRIMITIVE_SUMMARY_BYTES = 6000;
 const verificationPhases = new Set(['preparing', 'static_review', 'finalizing']);
 const now = () => new Date().toISOString();
@@ -94,40 +93,11 @@ function findExistingManagementId(db, managementId) {
   return historical ? { kind: 'history', ...historical } : null;
 }
 
-function existingFindingContext(db, managementId, dataDir) {
-  const found = findExistingManagementId(db, managementId);
-  if (!found) return null;
-  if (found.kind === 'live') {
-    const prior = db.prepare(`SELECT a.content FROM submission_artifacts a
-      JOIN submissions s ON s.id = a.submission_id
-      WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal = 1000
-      ORDER BY s.submitted_at DESC, s.id DESC LIMIT 1`).get(found.finding_id);
-    const parsed = readFrontMatter(found.markdown);
-    const bytes = Buffer.from(prior?.content ?? parsed.body);
-    let report = null;
-    if (bytes.length <= MAX_SAME_ROOT_REPORT_BYTES) {
-      try { report = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-      catch { /* An invalid canonical report cannot establish the same root cause. */ }
-    }
-    return { management_id: managementId, title: found.title, file_path: parsed.data.file_path ?? null,
-      report };
-  }
-  let report = null;
-  if (dataDir) {
-    const artifact = listHistoryArtifacts(db, managementId).find(item => item.kind === 'report');
-    if (artifact) {
-      let opened;
-      try {
-        opened = openHistoryArtifact(db, dataDir, managementId, artifact.id);
-        if (opened.size <= MAX_SAME_ROOT_REPORT_BYTES) {
-          const bytes = opened.content ?? fs.readFileSync(opened.fd);
-          if (bytes.length === opened.size) report = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-        }
-      } catch { report = null; }
-      finally { if (opened?.fd !== undefined) fs.closeSync(opened.fd); }
-    }
-  }
-  return { management_id: managementId, title: found.title, file_path: null, report };
+function duplicateReferenceStamp(db) {
+  return JSON.stringify(db.prepare(`SELECT management_id, revision FROM registry_history
+    UNION ALL SELECT management_id, revision FROM finding_registry
+      WHERE management_id IS NOT NULL AND superseded_by IS NULL
+    ORDER BY management_id`).all());
 }
 
 export function initializeSubmissions(db) {
@@ -152,6 +122,10 @@ export function initializeSubmissions(db) {
     CREATE TABLE IF NOT EXISTS verifier_workers (
       worker_id TEXT PRIMARY KEY, target_commit TEXT NOT NULL,
       current_submission_id TEXT, started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS duplicate_workers (
+      worker_id TEXT PRIMARY KEY, current_submission_id TEXT,
+      started_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS primitive_reviews (
       finding_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
@@ -183,6 +157,13 @@ export function initializeSubmissions(db) {
   if (!columns.has('last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN last_activity_at TEXT');
   if (!columns.has('origin')) db.exec("ALTER TABLE submissions ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'");
   if (!columns.has('accepted_json')) db.exec('ALTER TABLE submissions ADD COLUMN accepted_json TEXT');
+  if (!columns.has('duplicate_data_json')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_data_json TEXT');
+  if (!columns.has('duplicate_review_json')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_review_json TEXT');
+  if (!columns.has('duplicate_attempts')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_attempts INTEGER NOT NULL DEFAULT 0');
+  if (!columns.has('duplicate_claimed_at')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_claimed_at TEXT');
+  if (!columns.has('duplicate_last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_last_activity_at TEXT');
+  if (!columns.has('duplicate_retry_after')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_retry_after TEXT');
+  if (!columns.has('duplicate_reference_stamp')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_reference_stamp TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
   const primitiveColumns = new Set(db.prepare('PRAGMA table_info(primitive_reviews)').all().map(column => column.name));
   if (!primitiveColumns.has('retry_after')) db.exec('ALTER TABLE primitive_reviews ADD COLUMN retry_after TEXT');
@@ -195,9 +176,13 @@ export function listVerificationQueue(db) {
   const fields = `id AS submission_id, agent_id, origin,
     CASE WHEN origin = 'manual_upload' THEN json_extract(metadata_json, '$.reporter') END AS reporter,
     project, title, status, reason, submitted_at,
-    claimed_at, completed_at, attempts, management_id,
+    CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_claimed_at ELSE claimed_at END AS claimed_at,
+    completed_at, CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_attempts ELSE attempts END AS attempts,
+    management_id,
     json_extract(metadata_json, '$.existing_management_id') AS existing_management_id,
-    phase, phase_updated_at, last_activity_at,
+    json_extract(duplicate_review_json, '$.matched_management_id') AS matched_management_id,
+    phase, phase_updated_at,
+    CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_last_activity_at ELSE last_activity_at END AS last_activity_at,
     json_extract(metadata_json, '$.repo_commit') AS target_commit`;
   const rows = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('pending', 'processing') ORDER BY submitted_at, id`).all();
   const activityCutoff = Date.now() - WORKER_ONLINE_MS;
@@ -211,8 +196,9 @@ export function listVerificationQueue(db) {
     else if (row.status === 'pending') { item.position = pending.length + 1; pending.push(item); }
   }
   const blocked = db.prepare(`SELECT ${fields} FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')
+    AND duplicate_data_json IS NULL
     ORDER BY completed_at DESC, id DESC`).all().map(row => ({ ...row, stale: false, position: null }));
-  const blockedCount = db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')").get().count;
+  const blockedCount = blocked.length;
   const onlineCutoff = Date.now() - WORKER_ONLINE_MS;
   const processingIds = new Set(active.map(row => row.submission_id));
   const recent = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
@@ -259,8 +245,36 @@ export function listVerificationQueue(db) {
       started_at: row.started_at, last_seen_at: row.last_seen_at,
       status: online ? current ? 'busy' : 'idle' : 'offline' });
   }
+  const duplicatePending = db.prepare(`SELECT ${fields} FROM submissions WHERE status = 'duplicate_pending'
+    ORDER BY submitted_at, id`).all().map((row, index) =>
+    ({ ...row, phase: 'duplicate_queued', stale: false, position: index + 1 }));
+  const duplicateActive = db.prepare(`SELECT ${fields} FROM submissions WHERE status = 'duplicate_processing'
+    ORDER BY duplicate_claimed_at, id`).all().map(row => ({ ...row, phase: 'duplicate_review',
+      stale: !Number.isFinite(Date.parse(row.last_activity_at || '')) ||
+        Date.parse(row.last_activity_at) < onlineCutoff, position: null }));
+  const duplicateErrors = db.prepare(`SELECT ${fields} FROM submissions
+    WHERE status IN ('duplicate_error', 'duplicate_needs_review')
+    ORDER BY completed_at DESC, id DESC`).all().map(row =>
+    ({ ...row, phase: 'duplicate_review', stale: false, position: null }));
+  const duplicateWorkerRows = db.prepare(`SELECT worker_id, current_submission_id, started_at, last_seen_at
+    FROM duplicate_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC, worker_id LIMIT 10`).all(recent);
+  const anyDuplicateOnline = duplicateWorkerRows.some(row => Date.parse(row.last_seen_at) >= onlineCutoff);
+  for (const row of (anyDuplicateOnline ? duplicateWorkerRows.filter(item => Date.parse(item.last_seen_at) >= onlineCutoff)
+    : duplicateWorkerRows.slice(0, 1))) {
+    const online = Date.parse(row.last_seen_at) >= onlineCutoff;
+    const current = online && duplicateActive.some(item => item.submission_id === row.current_submission_id)
+      ? row.current_submission_id : null;
+    workers.push({ ...row, role: 'duplicate', target_commit: null,
+      current_submission_id: current, current_finding_id: null, current_management_id: null,
+      current_title: current ? duplicateActive.find(item => item.submission_id === current)?.title : null,
+      pending_count: duplicatePending.length,
+      status: online ? current ? 'busy' : 'idle' : 'offline' });
+  }
   return { counts: { processing: active.length, pending: pending.length, blocked: blockedCount },
     active, pending, blocked, blocked_has_more: false, workers,
+    duplicate: { pending: duplicatePending, active: duplicateActive, errors: duplicateErrors,
+      counts: { pending: duplicatePending.length, processing: duplicateActive.length,
+        error: duplicateErrors.length } },
     primitive: { pending: primitivePending, active: primitiveActive, errors: primitiveErrors,
       counts: { pending: primitiveCounts.pending || 0, processing: primitiveCounts.processing || 0,
         complete: primitiveCounts.complete || 0, error: primitiveCounts.error || 0 } } };
@@ -310,7 +324,7 @@ export function submitSubmission(db, input, agentId, origin = 'agent') {
     if (existingManagementId && !findExistingManagementId(db, existingManagementId)) {
       invalid('Existing verified knfsd finding not found', 404);
     }
-    const backlog = db.prepare("SELECT COUNT(*) AS total, SUM(agent_id = ?) AS own FROM submissions WHERE status IN ('pending', 'processing')").get(agentId);
+    const backlog = db.prepare("SELECT COUNT(*) AS total, SUM(agent_id = ?) AS own FROM submissions WHERE status IN ('pending', 'processing', 'duplicate_pending', 'duplicate_processing')").get(agentId);
     if (backlog.total >= MAX_PENDING_TOTAL || backlog.own >= MAX_PENDING_PER_AGENT) invalid('Verification queue is full', 429);
     const stored = db.prepare('SELECT COALESCE(SUM(size), 0) AS bytes FROM submission_artifacts').get().bytes +
       db.prepare('SELECT COALESCE(SUM(length(CAST(report AS BLOB))), 0) AS bytes FROM submissions').get().bytes;
@@ -340,7 +354,7 @@ export function purgeFinishedSubmissions(db, cutoff = new Date().toISOString()) 
   db.exec('BEGIN IMMEDIATE');
   try {
     const { changes } = db.prepare(`DELETE FROM submissions
-      WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected')
+      WHERE status IN ('needs_evidence', 'needs_review', 'error', 'rejected', 'duplicate_error')
         AND (completed_at IS NULL OR completed_at <= ?)
         AND finding_id IS NULL AND management_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM finding_revision_audit a WHERE a.submission_id = submissions.id)`).run(cutoff);
@@ -374,10 +388,15 @@ export function getVerifiedArtifact(db, findingId, filename) {
 }
 
 export function retrySubmission(db, id) {
-  const row = db.prepare('SELECT status FROM submissions WHERE id = ?').get(id);
+  const row = db.prepare('SELECT status, duplicate_data_json FROM submissions WHERE id = ?').get(id);
   if (!row) invalid('Submission not found', 404);
-  if (!['error', 'needs_evidence', 'needs_review'].includes(row.status)) invalid('Submission cannot be retried', 409);
-  db.prepare("UPDATE submissions SET status = 'pending', reason = NULL, claimed_at = NULL, completed_at = NULL, lease_token = NULL, phase = NULL, phase_updated_at = NULL, last_activity_at = NULL WHERE id = ?").run(id);
+  if (!['error', 'needs_evidence', 'needs_review', 'duplicate_error', 'duplicate_needs_review'].includes(row.status)) invalid('Submission cannot be retried', 409);
+  const duplicateReady = !!row.duplicate_data_json && ['duplicate_needs_review', 'duplicate_error'].includes(row.status);
+  db.prepare(`UPDATE submissions SET status = ?, reason = NULL, completed_at = NULL, lease_token = NULL,
+    phase = ?, phase_updated_at = NULL, duplicate_claimed_at = NULL, duplicate_last_activity_at = NULL,
+    duplicate_retry_after = NULL, duplicate_attempts = ${duplicateReady ? '0' : 'duplicate_attempts'},
+    ${duplicateReady ? '' : 'claimed_at = NULL, last_activity_at = NULL, '}duplicate_review_json = NULL WHERE id = ?`)
+    .run(duplicateReady ? 'duplicate_pending' : 'pending', duplicateReady ? 'duplicate_queued' : null, id);
   return getSubmission(db, id);
 }
 
@@ -402,12 +421,9 @@ export function claimSubmission(db, targetCommit = null, dataDir = null) {
     const files = db.prepare('SELECT name, kind, content FROM submission_artifacts WHERE submission_id = ? ORDER BY ordinal').all(row.id)
       .map(file => ({ name: file.name, kind: file.kind, content_base64: Buffer.from(file.content).toString('base64') }));
     const metadata = JSON.parse(row.metadata_json);
-    const existingFinding = metadata.existing_management_id
-      ? existingFindingContext(db, metadata.existing_management_id, dataDir) : null;
     db.exec('COMMIT');
     return { submission_id: row.id, lease_token: leaseToken, agent_id: row.agent_id,
-      project: row.project, title: row.title, report: row.report, metadata, files,
-      ...(metadata.existing_management_id ? { existing_finding: existingFinding } : {}) };
+      project: row.project, title: row.title, report: row.report, metadata, files };
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
@@ -740,13 +756,14 @@ export function completeSubmission(db, id, result, leaseToken) {
   try {
     const row = db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
     if (!row) invalid('Submission not found', 404);
-    if (row.status === 'approved') { db.exec('COMMIT'); return getSubmission(db, id); }
+    if (['approved', 'duplicate_pending', 'duplicate_processing'].includes(row.status)) {
+      db.exec('COMMIT'); return getSubmission(db, id);
+    }
     if (row.status !== 'processing') invalid('Submission is not processing', 409);
     checkLease(row, leaseToken);
     const review = object(result.review, 'review');
     const run = object(result.reproduction, 'reproduction');
     const metadata = JSON.parse(row.metadata_json);
-    const existingManagementId = metadata.existing_management_id ?? review.same_root_cause?.management_id ?? null;
     if (!['likely', 'unlikely', 'uncertain'].includes(review.verdict)) invalid('Invalid static verdict');
     if (run.status !== 'not_run' || result.server_serial || run.observation || run.kernelCommit) invalid('Dynamic evidence is not accepted by the static screening route');
     const primaryAdmin = review.integrity?.admin_action_required;
@@ -763,12 +780,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       proof_review: review.proof_review && typeof review.proof_review === 'object'
         ? { verdict: review.proof_review.verdict,
           reason: reviewReason(review.proof_review.reason, 'independent review reason', 3000) } : null,
-      ...(existingManagementId ? { same_root_cause: {
-        verdict: ['same', 'different', 'uncertain'].includes(review.same_root_cause?.verdict)
-          ? review.same_root_cause.verdict : 'uncertain',
-        reason: typeof review.same_root_cause?.reason === 'string'
-          ? review.same_root_cause.reason.slice(0, 1000) : null,
-      } } : {}) };
+    };
     const reason = reviewReason(review.reason, 'review reason', 4096) || 'Static screening completed';
     if (adminActionRequired === true) {
       const adminReason = secondaryAdminAnchored ? review.proof_review.reason : review.integrity?.reason;
@@ -792,14 +804,6 @@ export function completeSubmission(db, id, result, leaseToken) {
     if (review.verdict !== 'likely') { const out = mark(db, id, 'needs_review', reason, summary); db.exec('COMMIT'); return out; }
     if (adminActionRequired !== false) {
       const out = mark(db, id, 'needs_review', 'Administrator action requirement is unresolved', summary);
-      db.exec('COMMIT'); return out;
-    }
-    if (review.same_root_cause && review.same_root_cause.verdict !== 'same') {
-      const out = mark(db, id, 'needs_review', 'Same-root comparison is unresolved', summary);
-      db.exec('COMMIT'); return out;
-    }
-    if (existingManagementId && review.same_root_cause?.verdict !== 'same') {
-      const out = mark(db, id, 'needs_review', 'Same root cause as the existing finding was not established', summary);
       db.exec('COMMIT'); return out;
     }
     const commit = value(metadata.repo_commit, 'repo_commit', 64);
@@ -866,24 +870,6 @@ export function completeSubmission(db, id, result, leaseToken) {
     }
     const anchor = review.grounding.evidence.find(item => item.path === filePath && item.text?.trim());
     const fingerprint = hash(`${commit}\0${filePath}\0${anchor.line}\0${anchor.text}`);
-    const existing = existingManagementId ? findExistingManagementId(db, existingManagementId) : null;
-    if (existingManagementId && !existing) {
-      const out = mark(db, id, 'needs_review', 'Existing managed finding is no longer available', summary);
-      db.exec('COMMIT'); return out;
-    }
-    const duplicate = db.prepare(`SELECT management_id FROM submissions
-      WHERE fingerprint = ? AND status = 'approved' AND (? IS NULL OR management_id <> ?)
-      LIMIT 1`).get(fingerprint, existingManagementId, existingManagementId);
-    if (duplicate) {
-      const out = mark(db, id, 'needs_review', `Possible duplicate of ${duplicate.management_id}; compare root cause before assigning another number`, summary);
-      db.exec('COMMIT'); return out;
-    }
-    if (!existing && db.prepare(`SELECT 1 FROM finding_registry r JOIN events e ON e.id = r.finding_id
-      WHERE e.repo_commit = ? AND e.scope_json = ? AND r.approved_at >= ? LIMIT 1`)
-      .get(commit, JSON.stringify([filePath]), row.claimed_at)) {
-      const out = mark(db, id, 'needs_review', 'Another finding in this source path was registered during screening; compare root causes before numbering', summary);
-      db.exec('COMMIT'); return out;
-    }
     const at = now();
     const access = privilege === 'Pre-auth' ? ['pre_auth'] : privilege === 'RPCSEC_GSS' ? ['rpcsec_gss'] :
       /AUTH_NONE|AUTH_NULL/i.test(privilege || '') ? ['auth_null'] : /AUTH_SYS|AUTH_UNIX/i.test(privilege || '') ? ['auth_unix'] : [];
@@ -927,6 +913,80 @@ export function completeSubmission(db, id, result, leaseToken) {
       kasan_summary: null,
       option: data.registry_option, privilege, nfs_version: nfsVersion,
       vulnerability_type: vulnerabilityType };
+    const insertArtifact = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
+    for (const [ordinal, role] of Object.keys(artifactFiles).entries()) {
+      const content = role === 'poc' ? artifacts.poc.source : artifacts[role].content;
+      const kind = role === 'reproduction' ? 'other' : role === 'log' ? 'log' : role === 'poc' ? 'poc' : 'report';
+      insertArtifact.run(id, 1000 + ordinal, artifactFiles[role], kind, hash(content), Buffer.byteLength(content), Buffer.from(content));
+    }
+    const { poc_source, evidence_log, ...stagedData } = data;
+    db.prepare(`UPDATE submissions SET status = 'duplicate_pending', reason = ?, fingerprint = ?,
+      verification_json = ?, accepted_json = ?, duplicate_data_json = ?, duplicate_review_json = NULL,
+      completed_at = NULL, lease_token = NULL, phase = 'duplicate_queued', phase_updated_at = ?,
+      duplicate_claimed_at = NULL, duplicate_last_activity_at = NULL, duplicate_retry_after = NULL,
+      duplicate_attempts = 0 WHERE id = ?`).run(reason, fingerprint, JSON.stringify(summary),
+      JSON.stringify(accepted), JSON.stringify(stagedData), at, id);
+    db.exec('COMMIT');
+    return getSubmission(db, id);
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function completeDuplicateReview(db, id, result, leaseToken) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) ||
+      !['duplicate', 'new', 'uncertain'].includes(result.verdict) ||
+      typeof result.reason !== 'string' || !result.reason.trim() || Buffer.byteLength(result.reason) > 3000 ||
+      /[\x00-\x08\x0b-\x1f\x7f]/.test(result.reason) ||
+      (result.verdict === 'duplicate' ? !/^[ABC]-\d{3,}$/.test(result.matched_management_id || '')
+        : result.matched_management_id != null)) invalid('Invalid duplicate review result');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+    if (!row) invalid('Submission not found', 404);
+    if (row.status === 'approved') { db.exec('COMMIT'); return getSubmission(db, id); }
+    if (row.status !== 'duplicate_processing') invalid('Submission is not in duplicate review', 409);
+    checkLease(row, leaseToken);
+    if (row.duplicate_reference_stamp !== duplicateReferenceStamp(db)) {
+      db.prepare(`UPDATE submissions SET status = 'duplicate_pending', reason = 'Registered findings changed during comparison',
+        lease_token = NULL, duplicate_claimed_at = NULL, duplicate_last_activity_at = NULL,
+        duplicate_retry_after = NULL, duplicate_attempts = MAX(0, duplicate_attempts - 1),
+        duplicate_reference_stamp = NULL, phase = 'duplicate_queued', phase_updated_at = ? WHERE id = ?`)
+        .run(now(), id);
+      db.exec('COMMIT'); return getSubmission(db, id);
+    }
+    const review = { verdict: result.verdict, matched_management_id: result.matched_management_id ?? null,
+      reason: result.reason.trim(), completed_at: now() };
+    const existingManagementId = review.verdict === 'duplicate' ? review.matched_management_id : null;
+    const existing = existingManagementId ? findExistingManagementId(db, existingManagementId) : null;
+    if (review.verdict === 'uncertain' || review.verdict === 'duplicate' && !existing) {
+      const reason = review.verdict === 'uncertain' ? review.reason :
+        `Matched finding ${existingManagementId} cannot be merged into a knfsd record; manual review required`;
+      db.prepare(`UPDATE submissions SET status = 'duplicate_needs_review', reason = ?, completed_at = ?, lease_token = NULL,
+        duplicate_review_json = ?, phase = 'duplicate_review', phase_updated_at = ? WHERE id = ?`)
+        .run(reason, review.completed_at, JSON.stringify(review), review.completed_at, id);
+      db.exec('COMMIT'); return getSubmission(db, id);
+    }
+    const staged = JSON.parse(row.duplicate_data_json);
+    const files = db.prepare(`SELECT ordinal, name, content FROM submission_artifacts
+      WHERE submission_id = ? AND ordinal BETWEEN 1000 AND 1003 ORDER BY ordinal`).all(id);
+    if (files.length !== 4 || files.some((file, index) => file.ordinal !== 1000 + index ||
+        file.name !== Object.values(artifactFiles)[index])) invalid('Canonical verification artifacts are missing', 409);
+    const artifacts = { report: { content: Buffer.from(files[0].content).toString('utf8') },
+      poc: { source: Buffer.from(files[1].content).toString('utf8') },
+      log: { content: Buffer.from(files[3].content).toString('utf8') } };
+    const data = { ...staged, poc_source: artifacts.poc.source, evidence_log: artifacts.log.content };
+    if (data.poc_sha256 !== hash(data.poc_source) || data.evidence_sha256 !== hash(data.evidence_log)) {
+      invalid('Canonical verification artifacts changed', 409);
+    }
+    validateRegistryMetadata(data);
+    const version = data.version_id;
+    const commit = data.repo_commit;
+    const title = data.title;
+    const filePath = data.file_path;
+    const privilege = data.registry_privilege;
+    const nfsVersion = data.registry_nfs_version;
+    const vulnerabilityType = data.registry_vulnerability_type;
+    const reason = row.reason;
+    const at = review.completed_at;
     let findingId;
     let managementId;
     let visibleRevision = true;
@@ -992,16 +1052,105 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.prepare('UPDATE finding_registry SET management_id = ?, number = ?, approved_at = ?, updated_at = ? WHERE finding_id = ?')
         .run(managementId, sequence.last_number, at, at, findingId);
     }
-    const insertArtifact = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
-    for (const [ordinal, role] of Object.keys(artifactFiles).entries()) {
-      const content = role === 'poc' ? artifacts.poc.source : artifacts[role].content;
-      const kind = role === 'reproduction' ? 'other' : role === 'log' ? 'log' : role === 'poc' ? 'poc' : 'report';
-      insertArtifact.run(id, 1000 + ordinal, artifactFiles[role], kind, hash(content), Buffer.byteLength(content), Buffer.from(content));
-    }
-    db.prepare("UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?, fingerprint = ?, verification_json = ?, accepted_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?")
-      .run(reason, findingId, managementId, fingerprint, JSON.stringify(summary), JSON.stringify(accepted), at, id);
+    db.prepare(`UPDATE submissions SET status = 'approved', reason = ?, finding_id = ?, management_id = ?,
+      duplicate_review_json = ?, completed_at = ?, lease_token = NULL, phase = 'complete',
+      phase_updated_at = ? WHERE id = ?`)
+      .run(reason, findingId, managementId, JSON.stringify(review), at, at, id);
     if (!existing) db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
       .run(findingId, at);
+    db.exec('COMMIT');
+    return getSubmission(db, id);
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function claimDuplicateReview(db, dataDir = null) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const stale = new Date(Date.now() - DUPLICATE_LEASE_MS).toISOString();
+    db.prepare(`UPDATE submissions SET status = 'duplicate_pending', reason = 'Duplicate review lease expired',
+      lease_token = NULL, duplicate_claimed_at = NULL, duplicate_last_activity_at = NULL,
+      duplicate_retry_after = NULL, phase = 'duplicate_queued', phase_updated_at = ?
+      WHERE status = 'duplicate_processing' AND COALESCE(duplicate_last_activity_at, duplicate_claimed_at, '') < ?
+        AND duplicate_attempts < 3`).run(now(), stale);
+    db.prepare(`UPDATE submissions SET status = 'duplicate_error', reason = 'Duplicate review lease expired after retries',
+      completed_at = ?, lease_token = NULL, duplicate_retry_after = NULL,
+      phase = 'duplicate_review', phase_updated_at = ?
+      WHERE status = 'duplicate_processing' AND COALESCE(duplicate_last_activity_at, duplicate_claimed_at, '') < ?
+        AND duplicate_attempts >= 3`).run(now(), now(), stale);
+    if (db.prepare("SELECT 1 FROM submissions WHERE status = 'duplicate_processing' LIMIT 1").get()) {
+      db.exec('COMMIT'); return null;
+    }
+    const row = db.prepare(`SELECT * FROM submissions WHERE status = 'duplicate_pending'
+      AND (duplicate_retry_after IS NULL OR duplicate_retry_after <= ?)
+      ORDER BY submitted_at, id LIMIT 1`).get(now());
+    if (!row) { db.exec('COMMIT'); return null; }
+    const staged = JSON.parse(row.duplicate_data_json);
+    const report = db.prepare(`SELECT content FROM submission_artifacts
+      WHERE submission_id = ? AND ordinal = 1000 AND name = 'report.md'`).get(row.id);
+    if (!report) invalid('Canonical verification report is missing', 409);
+    const leaseToken = randomBytes(32).toString('hex');
+    const at = now();
+    const references = listInternalDuplicateReferences(db, dataDir);
+    db.prepare(`UPDATE submissions SET status = 'duplicate_processing', lease_token = ?,
+      duplicate_attempts = duplicate_attempts + 1, duplicate_claimed_at = ?, duplicate_last_activity_at = ?,
+      duplicate_retry_after = NULL, duplicate_reference_stamp = ?, phase = 'duplicate_review', phase_updated_at = ? WHERE id = ?`)
+      .run(leaseToken, at, at, duplicateReferenceStamp(db), at, row.id);
+    const candidate = { submission_id: row.id, target: row.project, title: staged.title,
+      file_path: staged.file_path, code_refs: staged.code_refs,
+      report_excerpt: Buffer.from(report.content).subarray(0, 24_000).toString('utf8').replace(/\uFFFD$/, ''),
+      requested_management_id: JSON.parse(row.metadata_json).existing_management_id ?? null };
+    db.exec('COMMIT');
+    return { submission_id: row.id, lease_token: leaseToken, candidate, references };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function heartbeatDuplicateWorker(db, input) {
+  const workerId = input?.worker_id;
+  const submissionId = input?.submission_id ?? null;
+  if (typeof workerId !== 'string' || !/^[a-f0-9]{32}$/.test(workerId) ||
+      submissionId !== null && (typeof submissionId !== 'string' || !/^[a-f0-9]{64}$/.test(submissionId)) ||
+      submissionId === null && input?.lease_token != null) invalid('Invalid duplicate worker heartbeat');
+  const at = now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (submissionId !== null) {
+      const row = db.prepare('SELECT status, lease_token FROM submissions WHERE id = ?').get(submissionId);
+      if (row?.status !== 'duplicate_processing') invalid('Duplicate review is not processing', 409);
+      checkLease(row, input.lease_token);
+      db.prepare('UPDATE submissions SET duplicate_last_activity_at = ? WHERE id = ?').run(at, submissionId);
+    }
+    db.prepare(`INSERT INTO duplicate_workers(worker_id, current_submission_id, started_at, last_seen_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET
+      current_submission_id = excluded.current_submission_id, last_seen_at = excluded.last_seen_at`)
+      .run(workerId, submissionId, at, at);
+    db.prepare('DELETE FROM duplicate_workers WHERE last_seen_at < ?')
+      .run(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    db.exec('COMMIT');
+    return { worker_id: workerId, last_seen_at: at };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function failDuplicateReview(db, id, reason, leaseToken) {
+  const message = reviewReason(reason, 'duplicate review failure', 2000);
+  if (!message) invalid('Duplicate review failure reason is required');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = db.prepare('SELECT status, lease_token, duplicate_attempts FROM submissions WHERE id = ?').get(id);
+    if (!row) invalid('Submission not found', 404);
+    if (row.status !== 'duplicate_processing') invalid('Duplicate review is not processing', 409);
+    checkLease(row, leaseToken);
+    const at = now();
+    if (row.duplicate_attempts < 3) {
+      const retryAfter = new Date(Date.now() + row.duplicate_attempts * 60_000).toISOString();
+      db.prepare(`UPDATE submissions SET status = 'duplicate_pending', reason = ?, lease_token = NULL,
+        duplicate_claimed_at = NULL, duplicate_last_activity_at = NULL, duplicate_retry_after = ?,
+        phase = 'duplicate_queued', phase_updated_at = ? WHERE id = ?`)
+        .run(message, retryAfter, at, id);
+    } else {
+      db.prepare(`UPDATE submissions SET status = 'duplicate_error', reason = ?, completed_at = ?,
+        lease_token = NULL, duplicate_retry_after = NULL, phase = 'duplicate_review', phase_updated_at = ?
+        WHERE id = ?`).run(message, at, at, id);
+    }
     db.exec('COMMIT');
     return getSubmission(db, id);
   } catch (error) { db.exec('ROLLBACK'); throw error; }

@@ -4,8 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { HttpError, invalid } from './contract.mjs';
-import { claimPrimitiveReview, claimSubmission, completePrimitiveReview, completeSubmission,
-  failPrimitiveReview, failSubmission, heartbeatPrimitiveWorker, heartbeatWorker,
+import { claimDuplicateReview, claimPrimitiveReview, claimSubmission,
+  completeDuplicateReview, completePrimitiveReview, completeSubmission,
+  failDuplicateReview, failPrimitiveReview, failSubmission,
+  heartbeatDuplicateWorker, heartbeatPrimitiveWorker, heartbeatWorker,
   progressSubmission } from './submissions.mjs';
 import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplicateResult,
   recordInternalDuplicateResult } from './duplicate-registry.mjs';
@@ -121,6 +123,26 @@ export async function startVerifierIpc(db, socketPath, verifierUser = null, data
         const body = await inputJson(req);
         if (!/^[a-f0-9]{64}$/.test(body?.submission_id || '')) invalid('Invalid submission_id');
         return reply(res, 200, failSubmission(db, body.submission_id, body.reason, body.lease_token));
+      }
+      if (req.method === 'POST' && req.url === '/dedupe/claim') {
+        const body = await inputJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).join(',') !== 'worker_id' ||
+            !/^[a-f0-9]{32}$/.test(body.worker_id || '')) invalid('Invalid duplicate claim request');
+        return reply(res, 200, { job: claimDuplicateReview(db, dataDir) });
+      }
+      if (req.method === 'POST' && req.url === '/dedupe/heartbeat') {
+        return reply(res, 200, heartbeatDuplicateWorker(db, await inputJson(req)));
+      }
+      if (req.method === 'POST' && req.url === '/dedupe/complete') {
+        const body = await inputJson(req);
+        if (!/^[a-f0-9]{64}$/.test(body?.submission_id || '')) invalid('Invalid submission_id');
+        return reply(res, 200, completeDuplicateReview(db, body.submission_id, body.result, body.lease_token));
+      }
+      if (req.method === 'POST' && req.url === '/dedupe/fail') {
+        const body = await inputJson(req);
+        if (!/^[a-f0-9]{64}$/.test(body?.submission_id || '')) invalid('Invalid submission_id');
+        return reply(res, 200, failDuplicateReview(db, body.submission_id, body.reason, body.lease_token));
       }
       if (req.method === 'POST' && req.url === '/primitive/claim') {
         const body = await inputJson(req);

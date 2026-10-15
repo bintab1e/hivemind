@@ -93,6 +93,7 @@ button.coverage-agent-card:hover,button.coverage-agent-card.selected{border-colo
 .queue-badge.busy{border-color:#796347;color:#e9ca92;background:#3b3026}
 .queue-badge.idle{border-color:#35785e;color:#9be7bf;background:#1d3b32}
 .queue-badge.offline{border-color:#744858;color:#eda9ba;background:#3a2732}
+.queue-duplicate-board{border-bottom:1px solid #292e3b}
 .queue-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
 .queue-column{display:flex;flex-direction:column;min-width:0;border-right:1px solid #292e3b}
 .queue-column:last-child{border-right:0}

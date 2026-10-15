@@ -52,7 +52,7 @@ export function initializeDuplicateRegistry(db) {
 function excerpt(value) {
   const bytes = Buffer.isBuffer(value) || value instanceof Uint8Array
     ? Buffer.from(value) : Buffer.from(String(value ?? ''), 'utf8');
-  return bytes.subarray(0, maxExcerptBytes).toString('utf8').trim();
+  return bytes.subarray(0, maxExcerptBytes).toString('utf8').replace(/\uFFFD$/, '').trim();
 }
 
 function historicalReport(db, dataDir, managementId) {

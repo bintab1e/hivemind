@@ -166,13 +166,14 @@ test('independent challenge keeps the complete explanation for queue review', as
     `Independent static challenge did not confirm the claim: ${explanation}`);
 });
 
-test('uncertain same-root candidates stop automatic numbering', async t => {
+test('verifier leaves same-root comparison to the dedicated duplicate reviewer', async t => {
+  let compared = false;
   const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
-    reviewer, proofReviewer, candidateLookup: async () => ({ candidates: [{ management_id: 'A-005', title: 'old',
-      file_path: 'fs/nfsd/nfs4proc.c', report }], truncated: false }),
-    sameRootReviewer: async () => ({ verdict: 'uncertain', reason: 'Old report incomplete' }) });
-  assert.equal(result.review.same_root_cause.verdict, 'uncertain');
-  assert.equal(result.artifacts, undefined);
+    reviewer, proofReviewer, candidateLookup: async () => { compared = true; throw new Error('unexpected lookup'); },
+    sameRootReviewer: async () => { compared = true; throw new Error('unexpected comparison'); } });
+  assert.equal(compared, false);
+  assert.ok(result.artifacts?.report?.content);
+  assert.equal(result.review.same_root_cause, undefined);
 });
 
 test('two pooled workers claim compatible commits and report active target only while busy', async t => {
@@ -190,6 +191,7 @@ test('two pooled workers claim compatible commits and report active target only 
   assert.equal(calls.at(-1).body.target_commit, null);
   assert.equal(calls.find(call => call.endpoint === '/complete').body.result.reproduction.status, 'not_run');
   assert.equal(calls.find(call => call.endpoint === '/complete').body.result.review.normalized.logs[0].content, undefined);
+  assert.equal(calls.some(call => call.endpoint === '/same-root-candidates'), false);
 });
 
 for (const [status, expectedAttempts] of [[400, 1], [500, 3]]) {
