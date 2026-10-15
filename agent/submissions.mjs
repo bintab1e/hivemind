@@ -112,9 +112,11 @@ export async function buildSubmission(config, args, repoCommit) {
   if (!args.report?.trim() && !files.length) throw new Error('Add a report or at least one file');
   if (args.client_submission_id != null && (typeof args.client_submission_id !== 'string' || !submissionIdPattern.test(args.client_submission_id))) throw new Error('Invalid client_submission_id');
   if (args.metadata != null && (!args.metadata || typeof args.metadata !== 'object' || Array.isArray(args.metadata))) throw new Error('Invalid metadata');
-  if (args.metadata?.existing_management_id != null) throw new Error('Supply existing_management_id at the top level');
+  if (args.metadata?.existing_management_id != null || args.metadata?.existing_vulnerability_id != null) throw new Error('Supply existing vulnerability ID at the top level');
+  if (args.existing_vulnerability_id != null && (typeof args.existing_vulnerability_id !== 'string' || !/^(?:V-\d{6,}|A-\d{3,})$/.test(args.existing_vulnerability_id))) throw new Error('Invalid existing_vulnerability_id');
   if (args.existing_management_id != null && (typeof args.existing_management_id !== 'string' || !/^A-\d{3,}$/.test(args.existing_management_id))) throw new Error('Invalid existing_management_id');
-  const metadata = { ...(args.metadata || {}), ...(args.existing_management_id ? { existing_management_id: args.existing_management_id } : {}), version_id: config.version_id, track_id: config.track_id || null, repo_commit: repoCommit };
+  if (args.existing_vulnerability_id && args.existing_management_id) throw new Error('Use only one existing vulnerability ID');
+  const metadata = { ...(args.metadata || {}), ...(args.existing_vulnerability_id ? { existing_vulnerability_id: args.existing_vulnerability_id } : {}), ...(args.existing_management_id ? { existing_management_id: args.existing_management_id } : {}), version_id: config.version_id, track_id: config.track_id || null, repo_commit: repoCommit };
   if (Buffer.byteLength(JSON.stringify(metadata)) > 20_000) throw new Error('Metadata is too large');
   const attachments = await Promise.all(files.map(file => readAttachment(config, file)));
   if (new Set(attachments.map(file => file.name.toLowerCase())).size !== attachments.length) throw new Error('Duplicate attachment name');
@@ -224,7 +226,7 @@ export async function syncSubmissions(config, token) {
     }
     try {
       const result = await deliverSubmission(config, token, body, { file, hash: digest(encoded) });
-      console.log(`Submission delivered: ${body.client_submission_id} → ${result.submission_id} (${result.status})`);
+      console.log(`Submission delivered: ${body.client_submission_id} → ${result.submission_id} (${result.status})${result.vulnerability_id ? ` · ${result.vulnerability_id}` : ''}`);
     } catch (error) {
       if (!error.status || error.status >= 500 || error.status === 429) throw error;
       await rejectSubmission(config, body.client_submission_id, error);

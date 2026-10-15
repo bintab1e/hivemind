@@ -81,7 +81,8 @@ test('reinstall removes obsolete analysis instructions and keeps project guidanc
   assert.match(result, /submit_vulnerability/);
   assert.doesNotMatch(result, /queue_analysis/);
   assert.doesNotMatch(result, /공유할 가설/);
-  assert.match(result, /2 VM/);
+  assert.match(result, /Codex 정적 검토/);
+  assert.match(result, /existing_vulnerability_id/);
   assert.match(result, /기존 지침 유지/);
 });
 

@@ -8,17 +8,25 @@ import test from 'node:test';
 import { handleMessage } from './mcp-agent.mjs';
 import { buildSubmission, queueSubmission, syncSubmissions } from './submissions.mjs';
 
-test('strengthened submission carries a validated existing management ID', async () => {
+test('strengthened submission carries a validated vulnerability ID without accepting a nested or ambiguous reference', async () => {
   const config = { repo_root: '/unused', home: '/unused', version_id: '7.3-rc4', track_id: 'rc' };
-  const args = { report: 'Strengthened primitive evidence', existing_management_id: 'A-005' };
+  const args = { report: 'Strengthened primitive evidence', existing_vulnerability_id: 'V-000005' };
   const body = await buildSubmission(config, args, 'a'.repeat(40));
-  assert.equal(body.metadata.existing_management_id, 'A-005');
-  assert.equal(body.existing_management_id, undefined);
-  await assert.rejects(buildSubmission(config, { ...args, existing_management_id: 'B-005' }, 'a'.repeat(40)), /Invalid existing_management_id/);
-  await assert.rejects(buildSubmission(config, { ...args, metadata: { existing_management_id: 'A-999' } }, 'a'.repeat(40)), /top level/);
+  assert.equal(body.metadata.existing_vulnerability_id, 'V-000005');
+  assert.equal(body.existing_vulnerability_id, undefined);
+  assert.equal((await buildSubmission(config, { ...args, existing_vulnerability_id: 'A-005' }, 'a'.repeat(40))).metadata.existing_vulnerability_id, 'A-005');
+  for (const id of ['V-00005', 'V-000005x', 'B-005', 'A-05']) {
+    await assert.rejects(buildSubmission(config, { ...args, existing_vulnerability_id: id }, 'a'.repeat(40)), /Invalid existing_vulnerability_id/);
+  }
+  await assert.rejects(buildSubmission(config, { ...args, metadata: { existing_vulnerability_id: 'V-000999' } }, 'a'.repeat(40)), /top level/);
+  await assert.rejects(buildSubmission(config, { ...args, existing_management_id: 'A-005' }, 'a'.repeat(40)), /only one/);
+  const legacy = await buildSubmission(config, { report: 'Legacy', existing_management_id: 'A-005' }, 'a'.repeat(40));
+  assert.equal(legacy.metadata.existing_management_id, 'A-005');
+  await assert.rejects(buildSubmission(config, { report: 'Legacy', existing_management_id: 'B-005' }, 'a'.repeat(40)), /Invalid existing_management_id/);
+  await assert.rejects(buildSubmission(config, { report: 'Legacy', metadata: { existing_management_id: 'A-999' } }, 'a'.repeat(40)), /top level/);
 });
 
-test('result_dir includes nested evidence and keeps an existing management ID', async t => {
+test('result_dir includes nested evidence and keeps the vulnerability ID', async t => {
   const base = await mkdtemp(path.join(tmpdir(), 'hivemind-result-dir-'));
   t.after(() => rm(base, { recursive: true, force: true }));
   const repo = path.join(base, 'linux');
@@ -30,9 +38,9 @@ test('result_dir includes nested evidence and keeps an existing management ID', 
   await writeFile(path.join(resultDir, 'poc.c'), 'int main(void) { return 0; }\n');
   await writeFile(path.join(resultDir, 'evidence', 'kasan.log'), 'BUG: KASAN: read\n');
   const config = { repo_root: repo, home: path.join(base, 'runtime'), result_root: resultRoot, version_id: '7.3-rc7', track_id: 'rc' };
-  const args = { result_dir: path.basename(resultDir), existing_management_id: 'A-005' };
+  const args = { result_dir: path.basename(resultDir), existing_vulnerability_id: 'V-000005' };
   const body = await buildSubmission(config, args, 'a'.repeat(40));
-  assert.equal(body.metadata.existing_management_id, 'A-005');
+  assert.equal(body.metadata.existing_vulnerability_id, 'V-000005');
   assert.deepEqual(body.files.map(file => [file.name, file.kind]), [
     ['evidence__kasan.log', 'log'], ['poc.c', 'poc'], ['report.md', 'report'],
   ]);
@@ -72,7 +80,7 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
     received.push(body);
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = unavailable ? 503 : reject ? 413 : 202;
-    res.end(unavailable ? '{"error":"temporarily unavailable"}' : reject ? '{"error":"rejected"}' : JSON.stringify({ submission_id: `server-${received.length}`, status: 'pending', replayed: false }));
+    res.end(unavailable ? '{"error":"temporarily unavailable"}' : reject ? '{"error":"rejected"}' : JSON.stringify({ submission_id: `server-${received.length}`, vulnerability_id: 'V-000001', status: 'pending', replayed: false }));
   }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(base, { recursive: true, force: true }); });
@@ -87,6 +95,7 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
   const first = (await invoke(args)).result.structuredContent;
   assert.equal(first.delivered, true);
   assert.equal(first.status, 'pending');
+  assert.equal(first.vulnerability_id, 'V-000001');
   assert.equal(received[0].project, 'knfsd');
   assert.equal(received[0].metadata.repo_commit, commit);
   assert.equal(received[0].metadata.nfs_version, '4.1');
@@ -97,9 +106,11 @@ test('raw MCP submission accepts varied files without KASAN and retries with one
   assert.equal((await readdir(path.join(home, 'submissions', 'outbox', 'pc1'))).length, 0);
   const ack = JSON.parse(await readFile(path.join(home, 'submissions', 'ack', 'pc1', `${first.client_submission_id}.json`), 'utf8'));
   assert.equal(ack.result.submission_id, first.submission_id);
+  assert.equal(ack.result.vulnerability_id, first.vulnerability_id);
 
   const replay = (await invoke({ ...args, client_submission_id: first.client_submission_id })).result.structuredContent;
   assert.equal(replay.replayed, true);
+  assert.equal(replay.vulnerability_id, first.vulnerability_id);
   assert.equal(received.length, 1);
 
   unavailable = true;

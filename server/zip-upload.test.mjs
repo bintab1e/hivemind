@@ -89,6 +89,7 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   const accepted = JSON.parse(postedText);
   assert.equal(accepted.status, 'pending');
   assert.equal(accepted.replayed, false);
+  assert.match(accepted.vulnerability_id, /^V-\d{6,}$/);
   db.prepare("UPDATE submissions SET status = 'rejected', reason = 'PoC did not reproduce', completed_at = ? WHERE id = ?").run(new Date().toISOString(), accepted.submission_id);
   const retry = await fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth, body: JSON.stringify(input) });
   assert.equal(retry.status, 202);
@@ -96,6 +97,7 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   assert.equal(repeated.status, 'pending');
   assert.equal(repeated.replayed, false);
   assert.notEqual(repeated.submission_id, accepted.submission_id);
+  assert.notEqual(repeated.vulnerability_id, accepted.vulnerability_id);
   const row = db.prepare('SELECT agent_id, origin, report, metadata_json, status FROM submissions WHERE id = ?').get(repeated.submission_id);
   assert.equal(row.origin, 'manual_upload');
   assert.match(row.agent_id, /^web:/);
@@ -107,6 +109,7 @@ test('manual ZIP upload uses active kernel target and enters verifier queue with
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_registry').get().n, 0);
   const queue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
   assert.equal(queue.pending[0].submission_id, repeated.submission_id);
+  assert.equal(queue.pending[0].vulnerability_id, repeated.vulnerability_id);
   assert.equal(queue.pending[0].origin, 'manual_upload');
   assert.equal(queue.pending[0].reporter, '이진표');
   assert.equal(queue.blocked[0].submission_id, accepted.submission_id);
@@ -144,13 +147,29 @@ test('manual ZIP strengthening targets an existing management ID without changin
   const post = body => fetch(`${url}/api/submissions/upload`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
   const accepted = await post(input);
   assert.equal(accepted.status, 202, await accepted.clone().text());
-  const { submission_id: submissionId } = await accepted.json();
+  const { submission_id: submissionId, vulnerability_id: vulnerabilityId } = await accepted.json();
+  assert.match(vulnerabilityId, /^V-\d{6,}$/);
   const row = db.prepare('SELECT metadata_json, status, management_id FROM submissions WHERE id = ?').get(submissionId);
   assert.equal(JSON.parse(row.metadata_json).existing_management_id, 'A-005');
   assert.equal(row.status, 'pending');
   assert.equal(row.management_id, null);
   const queue = await (await fetch(`${url}/api/verification-queue`, { headers: auth })).json();
   assert.equal(queue.pending[0].existing_management_id, 'A-005');
+  assert.equal(queue.pending[0].vulnerability_id, vulnerabilityId);
+  const registry = await (await fetch(`${url}/api/registry`, { headers: auth })).json();
+  assert.equal(registry.findings.find(item => item.management_id === 'A-005').vulnerability_id, vulnerabilityId);
+  const viaV = await post({ ...input, existing_management_id: undefined,
+    existing_vulnerability_id: vulnerabilityId });
+  assert.equal(viaV.status, 202, await viaV.clone().text());
+  const followUp = await viaV.json();
+  assert.equal(followUp.vulnerability_id, vulnerabilityId);
+  assert.equal(db.prepare("SELECT json_extract(metadata_json, '$.existing_vulnerability_id') AS id FROM submissions WHERE id = ?")
+    .get(followUp.submission_id).id, vulnerabilityId);
+  const aliasNumber = Number(db.prepare("INSERT INTO finding_cases(project, management_id, created_at) VALUES ('knfsd', 'A-005', ?)")
+    .run(new Date().toISOString()).lastInsertRowid);
+  const withAlias = await (await fetch(`${url}/api/registry`, { headers: auth })).json();
+  assert.deepEqual(withAlias.findings.find(item => item.management_id === 'A-005').vulnerability_aliases,
+    [`V-${String(aliasNumber).padStart(6, '0')}`]);
   assert.equal(db.prepare("SELECT title FROM registry_history WHERE management_id = 'A-005'").get().title, 'Prior verified finding');
   assert.equal((await post({ ...input, existing_management_id: 'B-001' })).status, 400);
   assert.equal((await post({ ...input, existing_management_id: 'A-999' })).status, 404);

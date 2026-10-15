@@ -21,6 +21,20 @@ const now = () => new Date().toISOString();
 const commitPattern = /^[a-f0-9]{40,64}$/i;
 const nfsPath = /^(?:fs\/(?:nfsd|nfs|nfs_common|lockd|exportfs)\/|net\/sunrpc\/|drivers\/infiniband\/|include\/(?:linux\/sunrpc|uapi\/linux\/nfsd|rdma)\/)[a-zA-Z0-9_./+-]+$/;
 const existingIdPattern = /^A-\d{3,}$/;
+const vulnerabilityIdPattern = /^V-\d{6,}$/;
+const vulnerabilityId = id => `V-${String(id).padStart(6, '0')}`;
+function caseNumber(id) {
+  if (typeof id !== 'string' || !vulnerabilityIdPattern.test(id)) invalid('Invalid existing_vulnerability_id');
+  const number = Number(id.slice(2));
+  if (!Number.isSafeInteger(number) || number < 1 || vulnerabilityId(number) !== id) invalid('Invalid existing_vulnerability_id');
+  return number;
+}
+const caseForManagement = (db, managementId) => db.prepare(
+  'SELECT id, project, management_id FROM finding_cases WHERE management_id = ? ORDER BY id LIMIT 1',
+).get(managementId);
+const caseForId = (db, id) => db.prepare(
+  'SELECT id, project, management_id FROM finding_cases WHERE id = ?',
+).get(id);
 const privilegedCTriggerOps = new Set(['mount', 'umount', 'umount2', 'init_module', 'finit_module',
   'delete_module', 'reboot', 'kexec_load', 'setns', 'unshare', 'pivot_root', 'chroot']);
 const privilegedShellTriggerOps = new Set(['mount', 'umount', 'exportfs', 'modprobe', 'insmod',
@@ -102,12 +116,18 @@ function duplicateReferenceStamp(db) {
 
 export function initializeSubmissions(db) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS finding_cases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
+      management_id TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS finding_cases_management ON finding_cases(management_id, id);
     CREATE TABLE IF NOT EXISTS submissions (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, client_submission_id TEXT,
       project TEXT NOT NULL, title TEXT, report TEXT, metadata_json TEXT NOT NULL,
       raw_sha256 TEXT NOT NULL, status TEXT NOT NULL, reason TEXT,
       submitted_at TEXT NOT NULL, claimed_at TEXT, completed_at TEXT,
       attempts INTEGER NOT NULL DEFAULT 0, finding_id TEXT, management_id TEXT,
+      case_id INTEGER REFERENCES finding_cases(id),
       verification_json TEXT, lease_token TEXT, fingerprint TEXT,
       origin TEXT NOT NULL DEFAULT 'agent',
       UNIQUE(agent_id, client_submission_id)
@@ -164,7 +184,29 @@ export function initializeSubmissions(db) {
   if (!columns.has('duplicate_last_activity_at')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_last_activity_at TEXT');
   if (!columns.has('duplicate_retry_after')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_retry_after TEXT');
   if (!columns.has('duplicate_reference_stamp')) db.exec('ALTER TABLE submissions ADD COLUMN duplicate_reference_stamp TEXT');
+  if (!columns.has('case_id')) db.exec('ALTER TABLE submissions ADD COLUMN case_id INTEGER REFERENCES finding_cases(id)');
   db.exec('CREATE INDEX IF NOT EXISTS submissions_fingerprint ON submissions(fingerprint, status)');
+  db.exec('CREATE INDEX IF NOT EXISTS submissions_case ON submissions(case_id, submitted_at)');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const createCase = db.prepare('INSERT INTO finding_cases(project, management_id, created_at) VALUES (?, ?, ?)');
+    const registered = db.prepare(`SELECT management_id, target AS project, COALESCE(approved_at, updated_at) AS created_at
+      FROM finding_registry WHERE management_id IS NOT NULL AND superseded_by IS NULL
+      UNION ALL SELECT management_id, target AS project, imported_at AS created_at FROM registry_history
+      ORDER BY management_id`).all();
+    for (const row of registered) {
+      if (!caseForManagement(db, row.management_id)) createCase.run(row.project, row.management_id, row.created_at || now());
+    }
+    const attach = db.prepare('UPDATE submissions SET case_id = ? WHERE id = ?');
+    for (const row of db.prepare(`SELECT id, project, management_id, metadata_json, submitted_at
+      FROM submissions WHERE case_id IS NULL ORDER BY submitted_at, id`).all()) {
+      const requested = JSON.parse(row.metadata_json).existing_management_id;
+      const existing = caseForManagement(db, row.management_id || requested);
+      const caseId = existing?.id ?? Number(createCase.run(row.project, null, row.submitted_at).lastInsertRowid);
+      attach.run(caseId, row.id);
+    }
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
   const primitiveColumns = new Set(db.prepare('PRAGMA table_info(primitive_reviews)').all().map(column => column.name));
   if (!primitiveColumns.has('retry_after')) db.exec('ALTER TABLE primitive_reviews ADD COLUMN retry_after TEXT');
   db.prepare(`INSERT OR IGNORE INTO primitive_reviews (finding_id, status, requested_at)
@@ -173,13 +215,15 @@ export function initializeSubmissions(db) {
 }
 
 export function listVerificationQueue(db) {
-  const fields = `id AS submission_id, agent_id, origin,
+  const fields = `id AS submission_id,
+    CASE WHEN case_id IS NOT NULL THEN printf('V-%06d', case_id) END AS vulnerability_id, agent_id, origin,
     CASE WHEN origin = 'manual_upload' THEN json_extract(metadata_json, '$.reporter') END AS reporter,
     project, title, status, reason, submitted_at,
     CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_claimed_at ELSE claimed_at END AS claimed_at,
     completed_at, CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_attempts ELSE attempts END AS attempts,
     management_id,
     json_extract(metadata_json, '$.existing_management_id') AS existing_management_id,
+    json_extract(metadata_json, '$.existing_vulnerability_id') AS existing_vulnerability_id,
     json_extract(duplicate_review_json, '$.matched_management_id') AS matched_management_id,
     phase, phase_updated_at,
     CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_last_activity_at ELSE last_activity_at END AS last_activity_at,
@@ -289,10 +333,14 @@ export function submitSubmission(db, input, agentId, origin = 'agent') {
   const report = value(input.report, 'report', MAX_REPORT_BYTES);
   const metadata = object(input.metadata, 'metadata');
   const existingManagementId = metadata.existing_management_id;
+  const existingVulnerabilityId = metadata.existing_vulnerability_id;
   if (existingManagementId != null &&
       (typeof existingManagementId !== 'string' || !existingIdPattern.test(existingManagementId))) {
     invalid('Invalid existing_management_id');
   }
+  if (existingVulnerabilityId != null && typeof existingVulnerabilityId !== 'string') invalid('Invalid existing_vulnerability_id');
+  if (existingVulnerabilityId?.startsWith('V-')) caseNumber(existingVulnerabilityId);
+  else if (existingVulnerabilityId != null && !existingIdPattern.test(existingVulnerabilityId)) invalid('Invalid existing_vulnerability_id');
   const metadataJson = JSON.stringify(metadata);
   if (Buffer.byteLength(metadataJson) > 20_000) invalid('Metadata too large', 413);
   if (!Array.isArray(input.files) || input.files.length > MAX_FILES) invalid('Invalid files');
@@ -315,32 +363,55 @@ export function submitSubmission(db, input, agentId, origin = 'agent') {
   const id = hash(`${agentId}\0${clientId || digest}`);
   db.exec('BEGIN IMMEDIATE');
   try {
-    const existing = db.prepare('SELECT raw_sha256, status, origin FROM submissions WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT raw_sha256, status, origin, case_id FROM submissions WHERE id = ?').get(id);
     if (existing) {
       if (existing.raw_sha256 !== digest || existing.origin !== origin) invalid('client_submission_id was reused with different content', 409);
       db.exec('COMMIT');
-      return { submission_id: id, status: existing.status, replayed: true };
+      return { submission_id: id, vulnerability_id: vulnerabilityId(existing.case_id), status: existing.status, replayed: true };
     }
-    if (existingManagementId && !findExistingManagementId(db, existingManagementId)) {
+    const managementReference = existingVulnerabilityId?.startsWith('A-')
+      ? existingVulnerabilityId : existingManagementId;
+    if (managementReference && !findExistingManagementId(db, managementReference)) {
       invalid('Existing verified knfsd finding not found', 404);
+    }
+    let requestedCase = existingVulnerabilityId?.startsWith('V-')
+      ? caseForId(db, caseNumber(existingVulnerabilityId))
+      : existingVulnerabilityId ? caseForManagement(db, existingVulnerabilityId)
+        : existingManagementId ? caseForManagement(db, existingManagementId) : null;
+    if (!requestedCase && managementReference && !existingVulnerabilityId?.startsWith('V-')) {
+      db.prepare('INSERT INTO finding_cases(project, management_id, created_at) VALUES (?, ?, ?)')
+        .run(input.project, managementReference, now());
+      requestedCase = caseForManagement(db, managementReference);
+    }
+    if ((existingVulnerabilityId || existingManagementId) && !requestedCase) invalid('Existing vulnerability not found', 404);
+    if (requestedCase && (requestedCase.project !== input.project || existingManagementId &&
+      requestedCase.management_id !== existingManagementId)) invalid('Existing vulnerability does not match the target', 409);
+    if (existingVulnerabilityId?.startsWith('A-') && requestedCase.management_id !== existingVulnerabilityId) {
+      invalid('Existing vulnerability does not match the management number', 409);
     }
     const backlog = db.prepare("SELECT COUNT(*) AS total, SUM(agent_id = ?) AS own FROM submissions WHERE status IN ('pending', 'processing', 'duplicate_pending', 'duplicate_processing')").get(agentId);
     if (backlog.total >= MAX_PENDING_TOTAL || backlog.own >= MAX_PENDING_PER_AGENT) invalid('Verification queue is full', 429);
     const stored = db.prepare('SELECT COALESCE(SUM(size), 0) AS bytes FROM submission_artifacts').get().bytes +
       db.prepare('SELECT COALESCE(SUM(length(CAST(report AS BLOB))), 0) AS bytes FROM submissions').get().bytes;
     if (stored + total > MAX_STORED_BYTES) invalid('Submission storage is full', 507);
+    const submittedAt = now();
+    const caseId = requestedCase?.id ?? Number(db.prepare(
+      'INSERT INTO finding_cases(project, management_id, created_at) VALUES (?, NULL, ?)',
+    ).run(input.project, submittedAt).lastInsertRowid);
     db.prepare(`INSERT INTO submissions
-      (id, agent_id, client_submission_id, project, title, report, metadata_json, raw_sha256, status, submitted_at, origin)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`).run(id, agentId, clientId, input.project, title, report, metadataJson, digest, now(), origin);
+      (id, agent_id, client_submission_id, project, title, report, metadata_json, raw_sha256, status, submitted_at, origin, case_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(id, agentId, clientId, input.project, title, report, metadataJson, digest, submittedAt, origin, caseId);
     const insert = db.prepare('INSERT INTO submission_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)');
     for (const file of files) insert.run(id, file.ordinal, file.name, file.kind, file.sha256, file.bytes.length, file.bytes);
     db.exec('COMMIT');
-    return { submission_id: id, status: 'pending', replayed: false };
+    return { submission_id: id, vulnerability_id: vulnerabilityId(caseId), status: 'pending', replayed: false };
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
 export function listSubmissions(db, agentId = null) {
-  const sql = `SELECT id AS submission_id, agent_id, project, title, status, reason,
+  const sql = `SELECT id AS submission_id,
+    CASE WHEN case_id IS NOT NULL THEN printf('V-%06d', case_id) END AS vulnerability_id,
+    agent_id, project, title, status, reason,
     submitted_at, completed_at, management_id FROM submissions`;
   return agentId
     ? db.prepare(`${sql} WHERE agent_id = ? ORDER BY submitted_at DESC LIMIT 200`).all(agentId)
@@ -364,7 +435,10 @@ export function purgeFinishedSubmissions(db, cutoff = new Date().toISOString()) 
 }
 
 export function getSubmission(db, id, agentId = null) {
-  const row = db.prepare('SELECT id AS submission_id, agent_id, project, title, status, reason, submitted_at, completed_at, management_id, finding_id FROM submissions WHERE id = ?').get(id);
+  const row = db.prepare(`SELECT id AS submission_id,
+    CASE WHEN case_id IS NOT NULL THEN printf('V-%06d', case_id) END AS vulnerability_id,
+    agent_id, project, title, status, reason, submitted_at, completed_at, management_id, finding_id
+    FROM submissions WHERE id = ?`).get(id);
   if (!row || agentId && row.agent_id !== agentId) invalid('Submission not found', 404);
   return row;
 }
@@ -950,11 +1024,17 @@ export function completeDuplicateReview(db, id, result, leaseToken) {
     }
     const review = { verdict: result.verdict, matched_management_id: result.matched_management_id ?? null,
       reason: result.reason.trim(), completed_at: now() };
+    const linkedCase = caseForId(db, row.case_id);
+    if (!linkedCase || linkedCase.project !== row.project) invalid('Vulnerability case is missing or mismatched', 409);
     const existingManagementId = review.verdict === 'duplicate' ? review.matched_management_id : null;
     const existing = existingManagementId ? findExistingManagementId(db, existingManagementId) : null;
-    if (review.verdict === 'uncertain' || review.verdict === 'duplicate' && !existing) {
-      const reason = review.verdict === 'uncertain' ? review.reason :
-        `Matched finding ${existingManagementId} cannot be merged into a knfsd record; manual review required`;
+    const linkedMismatch = linkedCase.management_id &&
+      (review.verdict !== 'duplicate' || existingManagementId !== linkedCase.management_id);
+    if (review.verdict === 'uncertain' || review.verdict === 'duplicate' && !existing || linkedMismatch) {
+      const reason = linkedMismatch
+        ? `Vulnerability ${vulnerabilityId(linkedCase.id)} is linked to ${linkedCase.management_id}; the duplicate result needs manual review before registration`
+        : review.verdict === 'uncertain' ? review.reason
+          : `Matched finding ${existingManagementId} cannot be merged into a knfsd record; manual review required`;
       db.prepare(`UPDATE submissions SET status = 'duplicate_needs_review', reason = ?, completed_at = ?, lease_token = NULL,
         duplicate_review_json = ?, phase = 'duplicate_review', phase_updated_at = ? WHERE id = ?`)
         .run(reason, review.completed_at, JSON.stringify(review), review.completed_at, id);
@@ -1053,6 +1133,7 @@ export function completeDuplicateReview(db, id, result, leaseToken) {
       duplicate_review_json = ?, completed_at = ?, lease_token = NULL, phase = 'complete',
       phase_updated_at = ? WHERE id = ?`)
       .run(reason, findingId, managementId, JSON.stringify(review), at, at, id);
+    db.prepare('UPDATE finding_cases SET management_id = ? WHERE id = ?').run(managementId, linkedCase.id);
     if (!existing) db.prepare("INSERT INTO primitive_reviews(finding_id, status, requested_at) VALUES (?, 'pending', ?)")
       .run(findingId, at);
     db.exec('COMMIT');
@@ -1094,11 +1175,12 @@ export function claimDuplicateReview(db, dataDir = null) {
       duplicate_attempts = duplicate_attempts + 1, duplicate_claimed_at = ?, duplicate_last_activity_at = ?,
       duplicate_retry_after = NULL, duplicate_reference_stamp = ?, phase = 'duplicate_review', phase_updated_at = ? WHERE id = ?`)
       .run(leaseToken, at, at, duplicateReferenceStamp(db), at, row.id);
+    const linkedCase = caseForId(db, row.case_id);
     const candidate = { submission_id: row.id, target: row.project, title: staged.title,
       file_path: staged.file_path, code_refs: staged.code_refs,
       report_excerpt: Buffer.from(report.content).subarray(0, 24_000).toString('utf8').replace(/\uFFFD$/, ''),
       poc_excerpt: Buffer.from(poc?.content ?? '').subarray(0, 12_000).toString('utf8').replace(/\uFFFD$/, ''),
-      requested_management_id: JSON.parse(row.metadata_json).existing_management_id ?? null };
+      requested_management_id: linkedCase?.management_id ?? JSON.parse(row.metadata_json).existing_management_id ?? null };
     db.exec('COMMIT');
     return { submission_id: row.id, lease_token: leaseToken, candidate, references };
   } catch (error) { db.exec('ROLLBACK'); throw error; }

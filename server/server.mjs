@@ -426,6 +426,18 @@ function findingAccessWithHistory(allEvents, event, data) {
 
 const claimStatus = status => ['retired', 'stale'].includes(status) ? status : 'active';
 
+function vulnerabilityIds(db) {
+  const byManagementId = new Map();
+  for (const row of db.prepare(`SELECT management_id, id FROM finding_cases
+    WHERE management_id IS NOT NULL ORDER BY id`).all()) {
+    const id = `V-${String(row.id).padStart(6, '0')}`;
+    const record = byManagementId.get(row.management_id);
+    if (record) record.aliases.push(id);
+    else byManagementId.set(row.management_id, { id, aliases: [] });
+  }
+  return byManagementId;
+}
+
 function dashboard(db, requested = {}) {
   const versions = versionRows(db);
   const tracks = trackRows(db);
@@ -667,10 +679,14 @@ function callTool(db, agentId, name, args) {
       const { versionId, commit } = selectedVersion(db, args);
       const managementIds = new Map(db.prepare('SELECT finding_id, management_id FROM finding_registry WHERE management_id IS NOT NULL')
         .all().map(row => [row.finding_id, row.management_id]));
+      const cases = vulnerabilityIds(db);
       const findings = dashboard(db, { version_id: versionId, repo_commit: commit }).findings
-        .map(item => ({ ...item, management_id: managementIds.get(item.event_id) ?? null }));
+        .map(item => { const managementId = managementIds.get(item.event_id) ?? null;
+          const identity = cases.get(managementId);
+          return { ...item, management_id: managementId, vulnerability_id: identity?.id ?? null,
+            vulnerability_aliases: identity?.aliases ?? [] }; });
       for (const item of findings) logExposure(db, agentId, item.hypothesis_id, 'summary');
-      return { findings, note: '제출자가 2VM 재현 자료와 함께 보고한 항목입니다. 영향 표시는 제출자의 검증 기록입니다.' };
+      return { findings, note: '제출 자료와 정적 검토를 바탕으로 등록한 항목입니다. 영향 표시는 제출자의 검증 기록입니다.' };
     }
     default: invalid('Unknown tool', 404);
   }
@@ -835,7 +851,12 @@ export async function startServer(options = {}) {
         return send(res, 200, response);
       }
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return send(res, 200, dashboard(db, Object.fromEntries(url.searchParams)));
-      if (req.method === 'GET' && url.pathname === '/api/registry') return send(res, 200, { findings: listRegistry(db), sequences: registrySequences(db) });
+      if (req.method === 'GET' && url.pathname === '/api/registry') {
+        const cases = vulnerabilityIds(db);
+        return send(res, 200, { findings: listRegistry(db).map(item => ({ ...item,
+          vulnerability_id: cases.get(item.management_id)?.id ?? null,
+          vulnerability_aliases: cases.get(item.management_id)?.aliases ?? [] })), sequences: registrySequences(db) });
+      }
       if (req.method === 'GET' && url.pathname === '/api/submissions') return send(res, 200, { submissions: listSubmissions(db) });
       if (req.method === 'GET' && url.pathname === '/api/submissions/upload-targets') return send(res, 200, { targets: uploadedTargets(db) });
       if (req.method === 'POST' && url.pathname === '/api/submissions/upload') {

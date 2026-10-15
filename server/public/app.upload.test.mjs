@@ -3,13 +3,14 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-test('manual ZIP form submits to the verifier queue and shows its receipt', async () => {
+test('manual ZIP form submits with a vulnerability ID and shows the ID with its receipt', async () => {
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   for (const id of ['zip-submit-form', 'zip-title', 'zip-reporter', 'zip-existing-id', 'zip-target', 'zip-file', 'zip-submit-result']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /id="open-zip-submit"/);
+  assert.match(html, /name="existing_vulnerability_id"/);
   assert.match(html, /<dialog id="zip-submit-dialog"[\s\S]*?<form id="zip-submit-form"[\s\S]*?<\/form>\s*<\/dialog>/);
   assert.ok(html.indexOf('id="zip-submit-dialog"') > html.indexOf('</main>'));
   assert.doesNotMatch(html, /id="uploaded-panel"/);
@@ -46,7 +47,7 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
     api: async (path, options) => {
       calls.push({ path, options });
       if (path === '/api/submissions/upload-targets') return { json: async () => ({ targets }) };
-      if (path === '/api/submissions/upload') return { json: async () => ({ submission_id: 'd'.repeat(64), status: 'pending' }) };
+      if (path === '/api/submissions/upload') return { json: async () => ({ submission_id: 'd'.repeat(64), vulnerability_id: 'V-000001', status: 'pending' }) };
       throw new Error(`Unexpected URL: ${path}`);
     },
   };
@@ -76,24 +77,33 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
     project: 'knfsd', title: 'UAF in NFS', reporter: '연구원', track_id: 'rc', zip_base64: zip.toString('base64'),
   });
   assert.match(nodes.get('zip-submit-result').children[0].textContent, /검증 대기/);
-  assert.equal(nodes.get('zip-submit-result').children[1].textContent, 'd'.repeat(64));
-  assert.equal(nodes.get('zip-submit-result').children[2].href, '?view=queue');
+  assert.equal(nodes.get('zip-submit-result').children[2].textContent, 'V-000001');
+  assert.equal(nodes.get('zip-submit-result').children[5].textContent, 'd'.repeat(64));
+  assert.equal(nodes.get('zip-submit-result').children[6].href, '?view=queue');
   const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 
   nodes.get('zip-title').value = 'UAF with stronger primitive';
   nodes.get('zip-reporter').value = '연구원';
-  nodes.get('zip-existing-id').value = 'A-043';
+  nodes.get('zip-existing-id').value = 'V-000001';
   nodes.get('zip-target').value = 'rc';
   nodes.get('zip-file').files = [{ name: 'evidence.zip', size: zip.length, arrayBuffer: async () => Uint8Array.from(zip).buffer }];
   await context.upload.submitZip({ preventDefault() {} });
-  assert.equal(JSON.parse(calls.filter(call => call.path === '/api/submissions/upload')[1].options.body).existing_management_id, 'A-043');
+  assert.equal(JSON.parse(calls.filter(call => call.path === '/api/submissions/upload')[1].options.body).existing_vulnerability_id, 'V-000001');
+
+  nodes.get('zip-title').value = 'legacy management number';
+  nodes.get('zip-reporter').value = '연구원';
+  nodes.get('zip-existing-id').value = 'a-043';
+  nodes.get('zip-target').value = 'rc';
+  nodes.get('zip-file').files = [{ name: 'evidence.zip', size: zip.length, arrayBuffer: async () => Uint8Array.from(zip).buffer }];
+  await context.upload.submitZip({ preventDefault() {} });
+  assert.equal(JSON.parse(calls.filter(call => call.path === '/api/submissions/upload')[2].options.body).existing_vulnerability_id, 'A-043');
 
   nodes.get('zip-title').value = 'invalid revision';
   nodes.get('zip-reporter').value = '연구원';
   nodes.get('zip-existing-id').value = 'A-43';
   await context.upload.submitZip({ preventDefault() {} });
-  assert.match(text(nodes.get('zip-submit-result')), /A-001 형식/);
-  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 2);
+  assert.match(text(nodes.get('zip-submit-result')), /V-000001 또는 A-001 형식/);
+  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 3);
 
   nodes.get('zip-title').value = 'too large';
   nodes.get('zip-reporter').value = '연구원';
@@ -102,7 +112,7 @@ test('manual ZIP form submits to the verifier queue and shows its receipt', asyn
   nodes.get('zip-file').files = [{ name: 'too-large.zip', size: 8_000_001 }];
   await context.upload.submitZip({ preventDefault() {} });
   assert.match(text(nodes.get('zip-submit-result')), /8 MB 이하/);
-  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 2);
+  assert.equal(calls.filter(call => call.path === '/api/submissions/upload').length, 3);
   targets = [];
   await context.upload.loadUploadTargets();
   assert.equal(nodes.get('zip-submit-button').disabled, true);

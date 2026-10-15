@@ -10,14 +10,15 @@ import { buildSubmission, deliverSubmission, queueSubmission, rejectSubmission }
 
 const run = promisify(execFile);
 const localTools = [
-  { name: 'submit_vulnerability', description: 'knfsd 취약점 후보를 서버 검증 대기열에 제출한다. 새 분석은 report.md(표준 5개 섹션), poc.c, reproduction.md 또는 reproduce.sh, 실제 KASAN/KCSAN .log를 첨부한다. 원본이 다른 형식이어도 서버 검증 에이전트가 정규화하며, 2VM 재현 전에는 취약점으로 확정되지 않는다.', inputSchema: {
+  { name: 'submit_vulnerability', description: 'knfsd 취약점 후보를 서버 검증 대기열에 제출한다. 첫 제출 응답의 vulnerability_id를 보관하고, 같은 취약점을 보강할 때 반드시 existing_vulnerability_id로 전달한다. 새 분석은 report.md(표준 5개 섹션), poc.c, reproduction.md 또는 reproduce.sh, 실제 KASAN/KCSAN .log를 첨부한다.', inputSchema: {
     type: 'object', additionalProperties: false,
     properties: {
       project: { type: 'string', enum: ['knfsd'], description: '현재 지원 대상은 knfsd뿐이다.' },
       title: { type: 'string', maxLength: 300, description: '영향받는 기능, 원인, 결과를 담은 짧고 중립적인 제목. 서버가 근거에 맞게 정규화한다.' },
-      existing_management_id: { type: 'string', pattern: '^A-\\d{3,}$', description: '이미 승인된 동일 knfsd 취약점의 프리미티브·PoC를 강화해 다시 제출할 때 기존 관리 번호(예: A-005). 새 취약점이면 생략한다. 기존 기록은 서버 재검증·승인 전까지 바뀌지 않는다.' },
+      existing_vulnerability_id: { type: 'string', pattern: '^(V-\\d{6,}|A-\\d{3,})$', description: '같은 취약점을 보강할 때 첫 제출 응답의 고유번호(예: V-000001)를 반드시 전달한다. 이미 승인된 기존 건은 관리번호(예: A-005)도 허용한다. 새 취약점이면 생략한다.' },
+      existing_management_id: { type: 'string', pattern: '^A-\\d{3,}$', description: '이전 에이전트와의 호환용 기존 관리번호. 새 제출에는 existing_vulnerability_id를 사용한다.' },
       report: { type: 'string', description: '원본 분석 보고서. report.md로 files에 첨부하면 생략한다.' },
-      metadata: { type: 'object', description: '분석 PC에서 직접 확인한 조건과 주장. 최종 체크·분류는 서버 2VM 검증 결과로 결정한다.', properties: {
+      metadata: { type: 'object', description: '분석 PC에서 직접 확인한 조건과 주장. 최종 체크·분류는 서버의 정적 검토 결과로 결정한다.', properties: {
         file_path: { type: 'string', description: '커널 체크아웃 기준 상대 경로' },
         code_refs: { type: 'array', items: { type: 'string' }, description: '커널 소스의 경로와 함수·줄 번호' },
         options: { type: 'string', description: '필요한 NFS 옵션' },

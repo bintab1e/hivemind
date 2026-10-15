@@ -28,7 +28,7 @@
         <div class="stat-strip" id="finding-stats"></div>
         <div class="stat-strip" id="finding-status-stats" hidden></div>
         <div class="toolbar">
-          <label class="search-field"><span class="visually-hidden">취약점 검색</span><span aria-hidden="true">⌕</span><input id="finding-search" type="search" placeholder="관리번호, 취약점명, 담당자 검색" autocomplete="off"></label>
+          <label class="search-field"><span class="visually-hidden">취약점 검색</span><span aria-hidden="true">⌕</span><input id="finding-search" type="search" placeholder="취약점 ID, 관리번호, 취약점명, 담당자 검색" autocomplete="off"></label>
           <label class="select-field">대상 <select id="finding-target"><option value="">전체</option></select></label>
           <label class="select-field">제보 여부 <select id="finding-report-status"><option value="">전체</option></select></label>
           <label class="select-field">권한 구분 <select id="finding-privilege"><option value="">전체</option></select></label>
@@ -86,7 +86,7 @@
       <div class="zip-submit-fields">
         <label>취약점 명 <input id="zip-title" name="title" type="text" maxlength="300" required autocomplete="off" placeholder="취약점 명"></label>
         <label>제보자 표시명 <input id="zip-reporter" name="reporter" type="text" maxlength="100" required autocomplete="name" placeholder="이름 또는 팀 내 식별자"></label>
-        <label>기존 관리번호 (보강 제출 시) <input id="zip-existing-id" name="existing_management_id" type="text" maxlength="20" pattern="A-[0-9]{3,}" autocomplete="off" placeholder="예: A-043"></label>
+        <label>기존 취약점 ID (보강 제출 시) <input id="zip-existing-id" name="existing_vulnerability_id" type="text" maxlength="20" pattern="(?:[Vv]-[0-9]{6,}|[Aa]-[0-9]{3,})" autocomplete="off" placeholder="예: V-000001 또는 A-043"></label>
         <label>대상 커널 <select id="zip-target" name="track_id" required disabled><option value="">불러오는 중</option></select></label>
         <label>증거 ZIP <input id="zip-file" name="archive" type="file" accept=".zip,application/zip" required></label>
         <button id="zip-submit-button" type="submit" disabled>검증 큐에 제출</button>

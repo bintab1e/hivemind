@@ -41,8 +41,8 @@ test('verification queue shows real worker and job stages, with empty and error 
         { role: 'primitive', worker_id: 'primitive-1', status: 'busy', current_finding_id: 'finding-5', current_management_id: 'A-043', current_title: 'new bug', pending_count: 2, last_seen_at: '2026-10-13T00:00:00Z' },
         { role: 'duplicate', worker_id: 'duplicate-1', status: 'busy', current_submission_id: 'run-5', pending_count: 2, last_seen_at: '2026-10-13T00:00:00Z' },
       ],
-      active: [{ submission_id: 'run-1', project: 'knfsd', title: 'active bug', agent_id: 'agent-1', status: 'processing', phase: 'qemu_reproduction', phase_updated_at: '2026-10-13T00:00:00Z', target_commit: 'abc123' }],
-      pending: [{ submission_id: 'run-2', project: 'knfsd', title: 'pending bug', agent_id: 'web:opaque', origin: 'manual_upload', reporter: '연구원', existing_management_id: 'A-043', position: 1, submitted_at: '2026-10-13T00:00:00Z', target_commit: 'def456' }],
+      active: [{ submission_id: 'run-1', vulnerability_id: 'V-000002', project: 'knfsd', title: 'active bug', agent_id: 'agent-1', status: 'processing', phase: 'qemu_reproduction', phase_updated_at: '2026-10-13T00:00:00Z', target_commit: 'abc123' }],
+      pending: [{ submission_id: 'run-2', vulnerability_id: 'V-000001', project: 'knfsd', title: 'pending bug', agent_id: 'web:opaque', origin: 'manual_upload', reporter: '연구원', existing_vulnerability_id: 'V-000001', position: 1, submitted_at: '2026-10-13T00:00:00Z', target_commit: 'def456' }],
       blocked: [
         { submission_id: 'run-3', project: 'knfsd', title: 'blocked bug', agent_id: 'agent-3', status: 'needs_evidence', reason: longReason, target_commit: 'abc123' },
         { submission_id: 'run-4', project: 'knfsd', title: 'rejected bug', agent_id: 'agent-4', status: 'rejected', reason: 'PoC 재현 실패', target_commit: 'abc123' },
@@ -107,7 +107,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.match(text(elements.get('queue-active')), /active bug agent-1/);
   assert.doesNotMatch(text(elements.get('queue-active')), /2VM PoC 재현|abc123|run-1/);
   assert.match(text(elements.get('queue-pending')), /직접 제출 · 연구원/);
-  assert.doesNotMatch(text(elements.get('queue-pending')), /def456|순서|A-043/);
+  assert.doesNotMatch(text(elements.get('queue-pending')), /def456|순서|V-000001/);
   assert.match(text(elements.get('queue-blocked')), /blocked bug agent-3/);
   assert.doesNotMatch(text(elements.get('queue-blocked')), /KASAN 증거 부족|반려|PoC 재현 실패/);
   assert.match(text(elements.get('queue-stats')), /반려 · 보완 · 오류/);
@@ -129,6 +129,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.equal(elements.get('queue-detail-title').textContent, 'active bug');
   assert.match(text(elements.get('queue-detail-facts')), /2VM PoC 재현/);
   assert.match(text(elements.get('queue-detail-facts')), /abc123|run-1/);
+  assert.match(text(elements.get('queue-detail-facts')), /취약점 ID V-000002/);
   state.queue.active[0].phase = 'trace_review';
   context.renderQueue();
   assert.equal(elements.get('queue-detail').open, true);
@@ -137,7 +138,9 @@ test('verification queue shows real worker and job stages, with empty and error 
   elements.get('queue-detail').close();
   elements.get('queue-pending').children[0].click();
   assert.match(elements.get('queue-detail-subtitle').textContent, /직접 제출 · 연구원/);
-  assert.match(text(elements.get('queue-detail-facts')), /def456|제출 순서|보강 대상 관리번호|A-043/);
+  assert.match(text(elements.get('queue-detail-facts')), /def456|제출 순서/);
+  assert.match(text(elements.get('queue-detail-facts')), /취약점 ID V-000001/);
+  assert.match(text(elements.get('queue-detail-facts')), /보강 대상 취약점 ID V-000001/);
   elements.get('queue-detail').close();
   elements.get('queue-blocked').children[0].click();
   assert.match(text(elements.get('queue-detail-facts')), /KASAN 증거 부족|증거 보완 필요/);

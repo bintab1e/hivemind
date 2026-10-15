@@ -9,6 +9,7 @@ test('MCP advertises raw submissions and rejects obsolete direct finding tools',
   const names = listed.result.tools.map(tool => tool.name);
   assert(names.includes('submit_vulnerability'));
   const submission = listed.result.tools.find(tool => tool.name === 'submit_vulnerability').inputSchema.properties;
+  assert.equal(submission.existing_vulnerability_id.pattern, '^(V-\\d{6,}|A-\\d{3,})$');
   assert.equal(submission.existing_management_id.pattern, '^A-\\d{3,}$');
   assert.equal(submission.result_dir.type, 'string');
   assert(!names.includes('queue_finding'));

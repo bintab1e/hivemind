@@ -468,7 +468,7 @@ function filteredFindings(findings) {
   const selectedFilters = findingFilters.map(([id, key]) => [key, $(id).value]).filter(([, value]) => value);
   const filtered = findings.filter(item =>
     matchesFindingFilters(item, selectedFilters) &&
-    (!search || `${findingColumns.map(([key]) => item[key] || '').join(' ')} ${previousFinding(item)?.management_id || ''} ${item.file_path || ''} ${item.agent_id} ${agentName(item.agent_id)} ${(item.code_refs || []).join(' ')}`.toLowerCase().includes(search))
+    (!search || `${findingColumns.map(([key]) => item[key] || '').join(' ')} ${item.vulnerability_id || ''} ${(item.vulnerability_aliases || []).join(' ')} ${previousFinding(item)?.management_id || ''} ${item.file_path || ''} ${item.agent_id} ${agentName(item.agent_id)} ${(item.code_refs || []).join(' ')}`.toLowerCase().includes(search))
   );
   filtered.sort((a, b) => {
     if (state.findingSortKey === 'management_id' && !a.management_id !== !b.management_id) return a.management_id ? -1 : 1;
@@ -812,9 +812,12 @@ function openFinding(finding, tab = 'report') {
   loadFindingRevisions(finding);
   $('detail-title').textContent = finding.title;
   const displayDate = finding.origin === 'history' ? finding.found_date || '—' : when(finding.created_at || finding.found_date);
-  $('detail-subtitle').textContent = `${finding.management_id || '관리번호 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
+  $('detail-subtitle').textContent = `${[finding.vulnerability_id, finding.management_id].filter(Boolean).join(' · ') || '취약점 ID 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
   clear($('detail-summary'));
   $('detail-summary').scrollTop = 0;
+  if (finding.vulnerability_id) $('detail-summary').append(detailFact('취약점 ID', finding.vulnerability_id));
+  if (finding.vulnerability_aliases?.length) $('detail-summary').append(
+    detailFact('병합된 접수 ID', finding.vulnerability_aliases.join(', ')));
   $('detail').querySelector('.detail-tabs').hidden = false;
   if (finding.origin === 'history') {
     const verification = finding.latest_verification;
@@ -1030,6 +1033,7 @@ function renderQueueDetail(row) {
   $('queue-detail-subtitle').textContent = `${row.project || '대상 미입력'} · ${queueSubmitter(row) || '제보자 미입력'}`;
   const facts = $('queue-detail-facts');
   clear(facts);
+  if (row.vulnerability_id) facts.append(detailFact('취약점 ID', row.vulnerability_id));
   const phase = row.status?.startsWith('duplicate_') || row.phase ? queuePhaseLabel(row)
     : row.status === 'processing' ? '검증 중' : '—';
   facts.append(
@@ -1043,6 +1047,7 @@ function renderQueueDetail(row) {
     detailFact('대상 커밋', row.target_commit),
     detailFact('접수 ID', row.submission_id),
   );
+  if (row.existing_vulnerability_id) facts.append(detailFact('보강 대상 취약점 ID', row.existing_vulnerability_id));
   if (row.existing_management_id) facts.append(detailFact('보강 대상 관리번호', row.existing_management_id));
   if (row.matched_management_id) facts.append(detailFact('동일 취약점 관리번호', row.matched_management_id));
   if (row.management_id) facts.append(detailFact('관리번호', row.management_id));
@@ -1190,12 +1195,13 @@ async function openZipDialog() {
   catch (error) { uploadMessage(`대상 커널 조회 실패: ${error.message}`, true); }
 }
 
-function uploadMessage(message, error = false, submissionId = '') {
+function uploadMessage(message, error = false, submissionId = '', vulnerabilityId = '') {
   const result = $('zip-submit-result');
   result.className = `zip-submit-result${error ? ' error' : ''}`;
   result.replaceChildren(element('span', '', message));
+  if (vulnerabilityId) result.append(element('span', '', '취약점 ID '), element('code', '', vulnerabilityId), element('span', '', ' · '));
   if (submissionId) {
-    result.append(element('code', '', submissionId));
+    result.append(element('span', '', '접수 ID '), element('code', '', submissionId));
     const link = element('a', '', '검증 큐에서 보기 ↗');
     link.href = '?view=queue';
     result.append(link);
@@ -1231,9 +1237,9 @@ async function submitZip(event) {
   if (zipSubmitting) return;
   const title = $('zip-title').value.trim();
   const reporter = $('zip-reporter').value.trim();
-  const existingManagementId = $('zip-existing-id').value.trim().toUpperCase();
+  const existingVulnerabilityId = $('zip-existing-id').value.trim().toUpperCase();
   if (!title || !reporter) return uploadMessage('취약점 명과 제보자 표시명을 입력해 주세요.', true);
-  if (existingManagementId && !/^A-\d{3,}$/.test(existingManagementId)) return uploadMessage('기존 관리번호는 A-001 형식으로 입력해 주세요.', true);
+  if (existingVulnerabilityId && !/^(?:V-\d{6,}|A-\d{3,})$/.test(existingVulnerabilityId)) return uploadMessage('기존 취약점 ID는 V-000001 또는 A-001 형식으로 입력해 주세요.', true);
   const file = $('zip-file').files?.[0];
   if (!file || !/\.zip$/i.test(file.name)) return uploadMessage('ZIP 파일을 선택해 주세요.', true);
   if (!file.size || file.size > 8_000_000) return uploadMessage('ZIP은 8 MB 이하의 비어 있지 않은 파일이어야 합니다.', true);
@@ -1249,11 +1255,11 @@ async function submitZip(event) {
     const response = await api('/api/submissions/upload', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project: 'knfsd', title, reporter, track_id: trackId, zip_base64: zipBase64,
-        ...(existingManagementId ? { existing_management_id: existingManagementId } : {}) }),
+        ...(existingVulnerabilityId ? { existing_vulnerability_id: existingVulnerabilityId } : {}) }),
     }).then(result => result.json());
     if (!/^[a-f0-9]{64}$/.test(response.submission_id || '')) throw new Error('접수 번호를 확인할 수 없습니다. 검증 큐를 확인해 주세요.');
     $('zip-submit-form').reset();
-    uploadMessage(`${uploadStatusLabels[response.status] || response.status || '접수됨'} · 접수 ID `, false, response.submission_id);
+    uploadMessage(`${uploadStatusLabels[response.status] || response.status || '접수됨'} · `, false, response.submission_id, response.vulnerability_id);
   } catch (error) { uploadMessage(error.message || String(error), true); }
   finally {
     zipSubmitting = false;

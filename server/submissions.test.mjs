@@ -8,7 +8,7 @@ import { hash, readFrontMatter } from './contract.mjs';
 import { importHistoryArtifacts } from './history-artifacts.mjs';
 import { claimDuplicateReview, claimPrimitiveReview, claimSubmission, completeDuplicateReview,
   completePrimitiveReview, completeSubmission, failDuplicateReview, failPrimitiveReview,
-  getVerifiedArtifact, heartbeatWorker,
+  getVerifiedArtifact, heartbeatWorker, initializeSubmissions,
   listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, retrySubmission,
   submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
@@ -463,6 +463,66 @@ test('the same rooted enhancement retains one management ID and its earlier revi
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_revision_audit WHERE management_id = ?').get(first.management_id).n, 1);
   assert.equal(getVerifiedArtifact(db, next.finding_id, 'report.md').toString(), report);
+});
+
+test('a first submission issues a lasting vulnerability ID for pending and purged follow-ups', t => {
+  const db = setup(t);
+  const input = raw('first-case');
+  const first = submitSubmission(db, input, 'analyst');
+  assert.match(first.vulnerability_id, /^V-\d{6,}$/);
+  assert.equal(first.management_id, undefined);
+  assert.equal(submitSubmission(db, input, 'analyst').vulnerability_id, first.vulnerability_id);
+  db.prepare("UPDATE submissions SET status = 'rejected', completed_at = ? WHERE id = ?")
+    .run('2026-10-14T20:00:00.000Z', first.submission_id);
+  assert.equal(purgeFinishedSubmissions(db, '2026-10-14T21:00:00.000Z').deleted, 1);
+  const enhanced = submitSubmission(db, raw('enhanced-case',
+    { existing_vulnerability_id: first.vulnerability_id }), 'analyst');
+  assert.equal(enhanced.vulnerability_id, first.vulnerability_id);
+  assert.equal(listVerificationQueue(db).pending[0].vulnerability_id, first.vulnerability_id);
+  assert.equal(listVerificationQueue(db).pending[0].existing_vulnerability_id, first.vulnerability_id);
+  assert.equal(approve(db, enhanced.submission_id).management_id, 'A-043');
+  assert.equal(db.prepare('SELECT management_id FROM finding_cases WHERE id = ?')
+    .get(Number(first.vulnerability_id.slice(2))).management_id, 'A-043');
+  assert.throws(() => submitSubmission(db, raw('unknown-case',
+    { existing_vulnerability_id: 'V-999999' }), 'analyst'), /Existing vulnerability not found/);
+});
+
+test('a cited vulnerability never becomes a new number or a different finding without review', t => {
+  const db = setup(t);
+  const firstReceipt = submitSubmission(db, raw('first-case'), 'analyst');
+  const first = approve(db, firstReceipt.submission_id);
+  const independent = approve(db, submit(db, 'independent-case'));
+  const id = firstReceipt.vulnerability_id;
+  const unlinked = approve(db, submit(db, 'unexpected-new', { existing_vulnerability_id: id }));
+  assert.equal(unlinked.status, 'duplicate_needs_review');
+  assert.equal(unlinked.management_id, null);
+  assert.match(unlinked.reason, /linked to A-043/);
+  const wrong = approve(db, submit(db, 'wrong-match', { existing_vulnerability_id: id }),
+    verdict(), sameFinding(independent.management_id));
+  assert.equal(wrong.status, 'duplicate_needs_review');
+  assert.equal(wrong.management_id, null);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 44);
+  const merged = approve(db, submit(db, 'same-case', { existing_vulnerability_id: id }),
+    verdict(), sameFinding(first.management_id));
+  assert.equal(merged.status, 'approved');
+  assert.equal(merged.management_id, first.management_id);
+  assert.equal(merged.vulnerability_id, id);
+  assert.equal(db.prepare("SELECT last_number FROM registry_sequences WHERE target = 'knfsd'").get().last_number, 44);
+});
+
+test('legacy approved revisions backfill to one vulnerability ID', t => {
+  const db = setup(t);
+  const first = approve(db, submit(db, 'legacy-first'));
+  approve(db, submit(db, 'legacy-second', { existing_management_id: first.management_id }),
+    verdict(), sameFinding(first.management_id));
+  db.prepare('UPDATE submissions SET case_id = NULL WHERE management_id = ?').run(first.management_id);
+  db.prepare('DELETE FROM finding_cases WHERE management_id = ?').run(first.management_id);
+  initializeSubmissions(db);
+  const cases = db.prepare("SELECT DISTINCT case_id FROM submissions WHERE management_id = ?")
+    .all(first.management_id);
+  assert.equal(cases.length, 1);
+  assert.equal(db.prepare('SELECT management_id FROM finding_cases WHERE id = ?').get(cases[0].case_id).management_id,
+    first.management_id);
 });
 
 test('an uncertain metadata field in a strengthening submission preserves existing registry values', t => {

@@ -52,12 +52,17 @@ test('finding detail appends only available primitive review under the existing 
   `, context);
 
   const finding = {
-    title: 'Example', management_id: 'A-043', target: 'knfsd', created_at: '2026-10-13T00:00:00Z',
+    title: 'Example', vulnerability_id: 'V-000001', management_id: 'A-043', target: 'knfsd', created_at: '2026-10-13T00:00:00Z',
     owner: 'analyst', report_status: '미제보', agent_id: 'agent-1', file_path: 'fs/nfsd/example.c',
     privilege: 'AUTH_SYS', vm_environment: '2VM', review_summary: '기존 정적 검토\n재현 확인',
     primitive_review_status: 'complete',
     primitive_review_summary: 'Controlled Read 가능성 검토가 필요합니다. 추가 실험을 권장합니다.',
   };
+  context.openFinding(finding);
+  assert.match(elements.get('detail-subtitle').textContent, /V-000001 · A-043/);
+  assert.equal(elements.get('detail-summary').children[0].children[1].textContent, 'V-000001');
+  context.openFinding({ ...finding, vulnerability_aliases: ['V-000010'] });
+  assert.equal(elements.get('detail-summary').children[1].children[1].textContent, 'V-000010');
   context.openFinding(finding);
   const review = elements.get('detail-summary').children.find(item => item.className.includes('review-summary'));
   assert.ok(review);
@@ -119,6 +124,7 @@ test('finding detail appends only available primitive review under the existing 
     matched_management_id: 'B-021',
   } });
   const internalMatch = elements.get('detail-summary').children.find(item => item.children[0]?.textContent === '내부 취약점 중복 검사');
+  assert.equal(elements.get('detail-summary').children[0].children[1].textContent, 'V-000001');
   assert.ok(internalMatch);
   assert.equal(internalMatch.children[1].textContent, '2026-10-13T03:00:00Z');
   assert.equal(internalMatch.children[2].textContent, 'B-021');
