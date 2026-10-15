@@ -158,6 +158,17 @@ test('source-reference paths also identify material uncertainty', async () => {
   assert.match(held.reason, /A-001/);
 });
 
+test('historical reports without path metadata still hold same-source uncertainty', async () => {
+  const old = { ...reference('A-001', 'knfsd',
+    'The flaw is in fs/nfsd/nfs4state.c, but the exact operation is unresolved.'),
+    file_path: null, code_refs: [] };
+  const held = await reviewSubmittedDuplicateWithCodex(candidate, [old], {
+    runner: async () => ({ reviews: [review('A-001', 'uncertain')] }),
+  });
+  assert.equal(held.verdict, 'uncertain');
+  assert.match(held.reason, /A-001/);
+});
+
 test('invalid comparison quotes produce a specific hold rather than a contradictory difference', async () => {
   const held = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001')], {
     runner: async () => ({ reviews: [review('A-001', 'different', null)] }),

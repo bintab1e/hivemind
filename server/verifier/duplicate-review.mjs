@@ -49,7 +49,9 @@ function causalSection(report) {
 }
 
 function sourcePaths(row) {
-  return [row.file_path, ...row.code_refs].flatMap(value => {
+  const cited = [...causalSection(row.report_excerpt).matchAll(/\b(?:fs|net|drivers|include)\/[A-Za-z0-9_./+-]+\.[ch]\b/g)]
+    .map(match => match[0]);
+  return [row.file_path, ...row.code_refs, ...cited].flatMap(value => {
     const match = /^([A-Za-z0-9_./+-]+\.[ch])(?::\d+(?::\d+)?)?$/.exec(value || '');
     return match ? [match[1].replace(/^\.\//, '')] : [];
   });
