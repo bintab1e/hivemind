@@ -310,11 +310,26 @@ test('valid long static-review reasons are stored without failing completion', t
   assert.equal(summary.proof_review.reason, explanation.trim());
 });
 
-test('overlong option metadata is held instead of turning a completed review into an error', t => {
+test('reviewed options keep build settings and short NFS features, omitting runtime prose', t => {
+  for (const [name, rawOption, expected] of [
+    ['build', 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y; listener on TCP port 2049', 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y'],
+    ['feature', 'RPC/RDMA', 'RPC/RDMA'],
+    ['runtime', 'iWARP listener on TCP port 20049; max_block_size=1048576', null],
+  ]) {
+    const db = setup(t);
+    const result = verdict();
+    result.review.normalized.options = rawOption;
+    const completed = approve(db, submit(db, name), result);
+    assert.equal(completed.status, 'approved', name);
+    assert.equal(listRegistry(db).find(row => row.management_id === completed.management_id).option, expected, name);
+  }
+});
+
+test('overlong build option metadata is held instead of turning a completed review into an error', t => {
   const db = setup(t);
   const id = submit(db, 'long-option');
   const result = verdict();
-  result.review.normalized.options = 'pNFS '.repeat(60);
+  result.review.normalized.options = Array.from({ length: 20 }, (_, index) => `CONFIG_NFSD_FEATURE_${index}=y`).join(', ');
   const held = approve(db, id, result);
   assert.equal(held.status, 'needs_review');
   assert.match(held.reason, /option metadata/i);

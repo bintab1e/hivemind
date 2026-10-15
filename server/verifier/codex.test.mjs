@@ -479,6 +479,21 @@ test('canonicalizes common permission and NFS version aliases, rejecting ambiguo
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'report_format');
 });
 
+test('keeps build settings and concise NFS features out of option prose', async t => {
+  const build = structuredClone(answer);
+  build.normalized.options = 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y, CONFIG_SUNRPC_XPRT_RDMA=y; iWARP listener on TCP port 20049';
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, build)))).normalized.options,
+    'CONFIG_NFSD=y, CONFIG_NFSD_V4=y, CONFIG_SUNRPC_XPRT_RDMA=y');
+  for (const feature of ['pNFS SCSI', 'LOCALIO', 'RPCSEC_GSS/Kerberos', 'RPC/RDMA', 'NFSv4.2 xattr', 'pNFS DS']) {
+    const named = structuredClone(answer);
+    named.normalized.options = feature;
+    assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, named)))).normalized.options, feature);
+  }
+  const prose = structuredClone(answer);
+  prose.normalized.options = 'KNFSD iWARP listener on TCP port 20049; max_block_size=1048576';
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, prose)))).normalized.options, null);
+});
+
 test('identifies invalid output stage without retaining model text', async t => {
   const extra = structuredClone(answer);
   extra.normalized.extra = 'PRIVATE_EVIDENCE';

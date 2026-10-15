@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { hash, invalid, isStandaloneUserspacePoc, readFrontMatter } from './contract.mjs';
 import { registerFinding, validateRegistryMetadata } from './registry.mjs';
 import { listHistoryArtifacts, openHistoryArtifact } from './history-artifacts.mjs';
+import { normalizeRegistryOption } from './registry-option.mjs';
 
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 2_000_000;
@@ -891,7 +892,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.trim() && ref.length <= 300).slice(0, 30) : [];
     if (!codeRefs.length) codeRefs.push(`${filePath}:${anchor.line}`);
     let registryOption;
-    try { registryOption = value(normalized.options, 'options', 200); }
+    try { registryOption = value(normalizeRegistryOption(normalized.options), 'options', 200); }
     catch (error) {
       if (error.status !== 400) throw error;
       const out = mark(db, id, 'needs_review', 'Static finding option metadata exceeds the registry limit or is invalid', summary);
