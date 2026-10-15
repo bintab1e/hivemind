@@ -91,13 +91,8 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.match(text(duplicateCard), /duplicate in progress/);
   assert.match(text(duplicateCard), /대기 2건/);
   assert.doesNotMatch(text(duplicateCard), /커널/);
-  const primitiveBoard = elements.get('queue-workers').children[4];
-  assert.match(text(primitiveBoard), /대기 · 2건/);
-  assert.match(text(primitiveBoard), /A-044 next candidate/);
-  assert.match(text(primitiveBoard), /진행 중 · 1건/);
-  assert.match(text(primitiveBoard), /A-043 new bug/);
-  assert.match(text(primitiveBoard), /오류 · 1건/);
-  assert.match(text(primitiveBoard), /A-041 review failed 검토 작업 중단/);
+  assert.equal(elements.get('queue-workers').children.length, 4);
+  assert.doesNotMatch(text(elements.get('queue-workers')), /검토 작업 중단|review failed/);
   assert.match(text(elements.get('queue-workers')), /최신 RC · 7\.3-rc7/);
   state.queue.workers[0].target_commit = null;
   context.renderQueue();

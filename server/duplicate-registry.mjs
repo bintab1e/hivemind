@@ -6,6 +6,7 @@ const eligibleStatuses = new Set(['미제보', '제보 중']);
 const verdicts = new Set(['duplicate', 'no_match', 'uncertain', 'error']);
 const evidenceKinds = new Set(['mail', 'branch']);
 const maxExcerptBytes = 24_000;
+const maxPocBytes = 12_000;
 
 export function initializeDuplicateRegistry(db) {
   db.exec(`
@@ -49,30 +50,49 @@ export function initializeDuplicateRegistry(db) {
   `);
 }
 
-function excerpt(value) {
+function excerpt(value, limit = maxExcerptBytes) {
   const bytes = Buffer.isBuffer(value) || value instanceof Uint8Array
     ? Buffer.from(value) : Buffer.from(String(value ?? ''), 'utf8');
-  return bytes.subarray(0, maxExcerptBytes).toString('utf8').replace(/\uFFFD$/, '').trim();
+  return bytes.subarray(0, limit).toString('utf8').replace(/\uFFFD$/, '').trim();
 }
 
-function historicalReport(db, dataDir, managementId) {
-  if (!dataDir) return '';
-  const report = listHistoryArtifacts(db, managementId).find(item => item.kind === 'report');
-  if (!report) return '';
+function historicalText(db, dataDir, managementId, artifact, limit) {
+  if (!dataDir || !artifact) return '';
   let opened;
   try {
-    opened = openHistoryArtifact(db, dataDir, managementId, report.id);
-    const buffer = Buffer.alloc(Math.min(opened.size, maxExcerptBytes));
+    opened = openHistoryArtifact(db, dataDir, managementId, artifact.id);
+    const buffer = Buffer.alloc(Math.min(opened.size, limit));
     const count = opened.content
       ? opened.content.copy(buffer, 0, 0, buffer.length)
       : fs.readSync(opened.fd, buffer, 0, buffer.length, 0);
-    return excerpt(buffer.subarray(0, count));
+    const text = excerpt(buffer.subarray(0, count), limit);
+    return text.includes('\0') ? '' : text;
   } catch (error) {
     if (error.status === 404 || error.code === 'ENOENT') return '';
     throw error;
   } finally {
     if (opened?.fd !== undefined) fs.closeSync(opened.fd);
   }
+}
+
+function historicalReport(db, dataDir, managementId) {
+  if (!dataDir) return '';
+  return historicalText(db, dataDir, managementId,
+    listHistoryArtifacts(db, managementId).find(item => item.kind === 'report'), maxExcerptBytes);
+}
+
+function historicalPoc(db, dataDir, managementId) {
+  if (!dataDir) return '';
+  let result = '';
+  for (const item of listHistoryArtifacts(db, managementId)) {
+    if (item.kind !== 'poc' || !/\.(?:c|h|sh|py|md|txt)$/i.test(item.original_name || item.name)) continue;
+    const remaining = maxPocBytes - Buffer.byteLength(result);
+    if (remaining < 200) break;
+    const label = `--- ${String(item.original_name || item.name).slice(0, 100)} ---\n`;
+    const body = historicalText(db, dataDir, managementId, item, remaining - Buffer.byteLength(label) - 2);
+    if (body) result += `${label}${body}\n`;
+  }
+  return result.trim();
 }
 
 function liveReport(db, findingId, markdown) {
@@ -83,6 +103,14 @@ function liveReport(db, findingId, markdown) {
   if (artifact) return excerpt(artifact.excerpt);
   try { return excerpt(readFrontMatter(markdown).body); }
   catch { return ''; }
+}
+
+function livePoc(db, findingId) {
+  const artifact = db.prepare(`SELECT substr(a.content, 1, ?) AS excerpt
+    FROM submission_artifacts a JOIN submissions s ON s.id = a.submission_id
+    WHERE s.finding_id = ? AND s.status = 'approved' AND a.ordinal = 1001 AND a.name = 'poc.c'
+    ORDER BY s.submitted_at DESC, s.id DESC LIMIT 1`).get(maxPocBytes, findingId);
+  return artifact ? excerpt(artifact.excerpt, maxPocBytes) : '';
 }
 
 function liveMetadata(markdown) {
@@ -102,6 +130,7 @@ function duplicateRows(db, dataDir, all) {
     ORDER BY management_id`).all().map(row => ({
     ...row, row_id: `history:${row.management_id}`, file_path: null, code_refs: [],
     report_excerpt: historicalReport(db, dataDir, row.management_id),
+    poc_excerpt: historicalPoc(db, dataDir, row.management_id),
   }));
   const live = db.prepare(`SELECT r.management_id, COALESCE(r.title_override, e.title) AS title,
     r.target, r.report_status, r.option, r.privilege, r.nfs_version, r.vulnerability_type,
@@ -111,7 +140,7 @@ function duplicateRows(db, dataDir, all) {
       ${all ? '' : "AND r.report_status IN ('미제보', '제보 중')"} ORDER BY r.management_id`).all().map(row => {
     const { finding_id: findingId, markdown, ...record } = row;
     return { ...record, row_id: findingId, ...liveMetadata(markdown),
-      report_excerpt: liveReport(db, findingId, markdown) };
+      report_excerpt: liveReport(db, findingId, markdown), poc_excerpt: livePoc(db, findingId) };
   });
   return [...history, ...live];
 }

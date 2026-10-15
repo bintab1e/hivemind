@@ -12,6 +12,7 @@ import { listDuplicateCandidates, listInternalDuplicateReferences, recordDuplica
 const findingId = 'a'.repeat(64);
 const submissionId = 'b'.repeat(64);
 const historicalArtifactId = 'c'.repeat(64);
+const historicalPocId = 'e'.repeat(64);
 const kernelCommit = 'd'.repeat(40);
 const checkedAt = '2026-10-13T06:00:00.000Z';
 const lore = 'https://lore.kernel.org/linux-nfs/20261013-example%40example.org/';
@@ -39,6 +40,11 @@ function fixture(t, existing = null) {
   db.prepare(`INSERT INTO history_artifacts (id, management_id, kind, name, sha256, size, imported_at)
     VALUES (?, 'A-001', 'report', 'report.md', 'hash', ?, ?)`)
     .run(historicalArtifactId, Buffer.byteLength(report), checkedAt);
+  const oldPoc = '#include <stdio.h>\nint main(void) { puts("old PoC"); return 0; }\n';
+  fs.writeFileSync(path.join(dataDir, 'history-artifacts', historicalPocId), oldPoc);
+  db.prepare(`INSERT INTO history_artifacts (id, management_id, kind, name, sha256, size, imported_at)
+    VALUES (?, 'A-001', 'poc', 'poc.c', 'hash', ?, ?)`)
+    .run(historicalPocId, Buffer.byteLength(oldPoc), checkedAt);
   const markdown = `---\nschema_version: 1\nkind: finding\nfile_path: fs/nfsd/nfs4proc.c\ncode_refs:\n  - fs/nfsd/nfs4proc.c:123\n---\nUncurated event body with private PoC`;
   db.prepare(`INSERT INTO events
     (id, agent_id, source_path, sha256, kind, version_id, repo_commit, title, scope_json, created_at, received_at, markdown)
@@ -57,6 +63,11 @@ function fixture(t, existing = null) {
     (submission_id, ordinal, name, kind, sha256, size, content)
     VALUES (?, 1000, 'report.md', 'report', 'hash', ?, ?)`)
     .run(submissionId, Buffer.byteLength(canonical), Buffer.from(canonical));
+  const livePoc = '#include <stdio.h>\nint main(void) { puts("new PoC"); return 0; }\n';
+  db.prepare(`INSERT INTO submission_artifacts
+    (submission_id, ordinal, name, kind, sha256, size, content)
+    VALUES (?, 1001, 'poc.c', 'poc', 'hash', ?, ?)`)
+    .run(submissionId, Buffer.byteLength(livePoc), Buffer.from(livePoc));
   return { db, dataDir };
 }
 
@@ -73,7 +84,7 @@ function internalResult(rowId, revision = 0, overrides = {}) {
     matched_management_id: 'A-001', checked_at: checkedAt, ...overrides };
 }
 
-test('daily candidates cover historical and registered findings without exposing raw PoC', t => {
+test('daily candidates include bounded canonical and historical PoC evidence', t => {
   const { db, dataDir } = fixture(t);
   const candidates = listDuplicateCandidates(db, dataDir);
   assert.deepEqual(candidates.map(item => item.row_id), ['history:A-001', 'history:A-003', 'history:B-001', findingId]);
@@ -83,6 +94,8 @@ test('daily candidates cover historical and registered findings without exposing
   assert.equal(candidates[3].file_path, 'fs/nfsd/nfs4proc.c');
   assert.deepEqual(candidates[3].code_refs, ['fs/nfsd/nfs4proc.c:123']);
   assert.match(candidates[3].report_excerpt, /Observed in 2 VM/);
+  assert.match(candidates[0].poc_excerpt, /old PoC/);
+  assert.match(candidates[3].poc_excerpt, /new PoC/);
   assert.doesNotMatch(JSON.stringify(candidates), /private PoC/);
 });
 
@@ -95,6 +108,8 @@ test('internal references include all A/B/C registry rows, including reported fi
       ['A-001', '미제보'], ['B-021', '제보 완료'], ['C-001', '제보 완료'], ['A-043', '미제보'],
     ]);
   assert.doesNotMatch(JSON.stringify(references), /private PoC/);
+  assert.match(references.find(row => row.management_id === 'A-001').poc_excerpt, /old PoC/);
+  assert.match(references.find(row => row.management_id === 'A-043').poc_excerpt, /new PoC/);
 });
 
 test('confirmed internal duplicate changes only the later eligible row and records separate audit', t => {

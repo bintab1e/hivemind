@@ -450,25 +450,25 @@ function checkedPoc(db, submissionId, normalized) {
 function supportedStaticProof(db, submissionId, review, poc) {
   const checks = review.proof_review?.checks;
   if (!['supports', 'uncertain'].includes(review.proof_review?.verdict) || !checks ||
-      checks.flaw !== 'supported' || checks.admin_action !== 'supported' ||
-      !['reachability', 'poc', 'log', 'defenses']
+      checks.admin_action !== 'supported' ||
+      !['reachability', 'flaw', 'poc', 'log', 'defenses']
         .every(name => ['supported', 'uncertain'].includes(checks[name]))) return false;
   const proof = review.proof;
   const evidence = review.grounding?.evidence;
   if (!proof || !Array.isArray(evidence)) return false;
   const sourceAnchor = anchor => anchor && typeof anchor.path === 'string' &&
-    Number.isInteger(anchor.line) && typeof anchor.explanation === 'string' && anchor.explanation.trim().length >= 16 &&
+    Number.isInteger(anchor.line) && typeof anchor.explanation === 'string' && anchor.explanation.trim() &&
     evidence.some(line => line.path === anchor.path && line.line === anchor.line &&
       typeof line.text === 'string' && line.text.trim());
   if (!['entry', 'flaw', 'impact', 'defenses'].every(name => sourceAnchor(proof[name])) ||
       proof.flaw.path !== review.normalized?.file_path ||
       proof.entry.path === proof.flaw.path && proof.entry.line === proof.flaw.line) return false;
   if (!Number.isInteger(proof.poc?.line) || typeof proof.poc.explanation !== 'string' ||
-      proof.poc.explanation.trim().length < 16 || !poc.source.split(/\r?\n/)[proof.poc.line - 1]?.trim()) return false;
+      !proof.poc.explanation.trim() || !poc.source.split(/\r?\n/)[proof.poc.line - 1]?.trim()) return false;
   const logIndex = review.normalized?.logs?.[0]?.source_index;
   if (!Number.isInteger(logIndex) || proof.log?.index !== logIndex ||
       !Number.isInteger(proof.log.line) || typeof proof.log.explanation !== 'string' ||
-      proof.log.explanation.trim().length < 16) return false;
+      !proof.log.explanation.trim()) return false;
   const submittedLog = db.prepare('SELECT content FROM submission_artifacts WHERE submission_id = ? AND ordinal = ?')
     .get(submissionId, logIndex);
   return Boolean(submittedLog && utf8(submittedLog.content)?.split(/\r?\n/)[proof.log.line - 1]?.trim());
@@ -820,7 +820,6 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     const normalized = object(review.normalized, 'normalized finding');
-    const title = canonicalTitle(normalized.title);
     let filePath;
     try { filePath = value(normalized.file_path, 'file_path', 300); }
     catch (error) {
@@ -828,20 +827,15 @@ export function completeSubmission(db, id, result, leaseToken) {
       const out = mark(db, id, 'needs_review', 'Static finding source path is invalid', summary);
       db.exec('COMMIT'); return out;
     }
+    const title = canonicalTitle(normalized.title) || `NFS source flaw in ${filePath}`.slice(0, 300);
     const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
     const preAuth = normalized.pre_auth;
-    const preAuthMode = preAuth != null && normalized.nfs_version == null;
-    const versionedMode = preAuth == null && !!nfsVersion;
-    const privilege = canonicalPermission(normalized.permission);
+    const preAuthMode = preAuth != null && nfsVersion == null;
+    const reportedPrivilege = canonicalPermission(normalized.permission);
+    const privilege = preAuthMode ? 'Pre-auth' : reportedPrivilege === 'Pre-auth' ? null : reportedPrivilege;
     const vulnerabilityType = canonicalVulnerabilityType(normalized.vulnerability_type);
     const metadataIssues = [];
-    if (!title) metadataIssues.push('title');
     if (!filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..')) metadataIssues.push('source path');
-    if (!preAuthMode && !versionedMode) metadataIssues.push('NFS version or pre-auth reachability');
-    if (!privilege || preAuthMode && privilege !== 'Pre-auth' || versionedMode && privilege === 'Pre-auth') {
-      metadataIssues.push('permission');
-    }
-    if (!vulnerabilityType) metadataIssues.push('vulnerability type');
     if (metadataIssues.length) {
       const out = mark(db, id, 'needs_review', `Static finding metadata needs correction: ${metadataIssues.join(', ')}`, summary);
       db.exec('COMMIT'); return out;
@@ -883,13 +877,8 @@ export function completeSubmission(db, id, result, leaseToken) {
     const codeRefs = Array.isArray(normalized.code_refs)
       ? normalized.code_refs.filter(ref => typeof ref === 'string' && ref.trim() && ref.length <= 300).slice(0, 30) : [];
     if (!codeRefs.length) codeRefs.push(`${filePath}:${anchor.line}`);
-    let registryOption;
-    try { registryOption = value(normalizeRegistryOption(normalized.options), 'options', 200); }
-    catch (error) {
-      if (error.status !== 400) throw error;
-      const out = mark(db, id, 'needs_review', 'Static finding option metadata exceeds the registry limit or is invalid', summary);
-      db.exec('COMMIT'); return out;
-    }
+    const option = normalizeRegistryOption(normalized.options);
+    const registryOption = typeof option === 'string' && option.length <= 4000 ? option : null;
     const data = {
       schema_version: 1, kind: 'finding', version_id: version, repo_commit: commit, title,
       file_path: filePath, scope: [filePath], code_refs: codeRefs,
@@ -897,7 +886,7 @@ export function completeSubmission(db, id, result, leaseToken) {
       vm_environment: `Submitted environment only; no server VM execution, kernel ${commit}`,
       verified_impacts: [], claimed_impacts: Array.isArray(normalized.claimed_impacts) ? normalized.claimed_impacts : [],
       access_requirements: access,
-      impact: `제출 자료의 정적 검토 결과: ${vulnerabilityType}. 서버 재현은 수행하지 않았습니다.`,
+      impact: `제출 자료의 정적 검토 결과: ${vulnerabilityType || '소스 기반 결함 후보'}. 서버 재현은 수행하지 않았습니다.`,
       reproduction_command: 'cc -o poc poc.c',
       poc_source: poc.source, poc_sha256: hash(poc.source), evidence_log: artifacts.log.content,
       evidence_sha256: hash(artifacts.log.content),
@@ -1026,7 +1015,8 @@ export function completeDuplicateReview(db, id, result, leaseToken) {
           db.prepare(`UPDATE finding_reviews SET provider = 'codex_static', status = 'complete',
             verdict = 'likely', summary = ?, requested_at = ?, completed_at = ? WHERE finding_id = ?`)
             .run(reason, row.submitted_at, at, findingId);
-          const updates = Object.entries(fields).filter(([field]) => field !== 'title' && !overrides.has(field));
+          const updates = Object.entries(fields).filter(([field, value]) =>
+            field !== 'title' && value !== null && !overrides.has(field));
           const setters = [...updates.map(([field]) => `${field} = ?`), 'updated_at = ?', 'revision = revision + 1'];
           db.prepare(`UPDATE finding_registry SET ${setters.join(', ')} WHERE finding_id = ?`)
             .run(...updates.map(([, value]) => value), at, findingId);
@@ -1034,7 +1024,8 @@ export function completeDuplicateReview(db, id, result, leaseToken) {
             claimed_at = NULL, completed_at = NULL, last_activity_at = NULL, lease_token = NULL,
             retry_after = NULL, attempts = 0, worker_id = NULL WHERE finding_id = ?`).run(at, findingId);
         } else {
-          const updates = Object.entries(fields).filter(([field]) => !overrides.has(field));
+          const updates = Object.entries(fields).filter(([field, value]) =>
+            value !== null && !overrides.has(field));
           const setters = [...updates.map(([field]) => `${field} = ?`), 'updated_at = ?', 'revision = revision + 1'];
           db.prepare(`UPDATE registry_history SET ${setters.join(', ')} WHERE management_id = ?`)
             .run(...updates.map(([, value]) => value), at, managementId);
@@ -1094,6 +1085,8 @@ export function claimDuplicateReview(db, dataDir = null) {
     const report = db.prepare(`SELECT content FROM submission_artifacts
       WHERE submission_id = ? AND ordinal = 1000 AND name = 'report.md'`).get(row.id);
     if (!report) invalid('Canonical verification report is missing', 409);
+    const poc = db.prepare(`SELECT content FROM submission_artifacts
+      WHERE submission_id = ? AND ordinal = 1001 AND name = 'poc.c'`).get(row.id);
     const leaseToken = randomBytes(32).toString('hex');
     const at = now();
     const references = listInternalDuplicateReferences(db, dataDir);
@@ -1104,6 +1097,7 @@ export function claimDuplicateReview(db, dataDir = null) {
     const candidate = { submission_id: row.id, target: row.project, title: staged.title,
       file_path: staged.file_path, code_refs: staged.code_refs,
       report_excerpt: Buffer.from(report.content).subarray(0, 24_000).toString('utf8').replace(/\uFFFD$/, ''),
+      poc_excerpt: Buffer.from(poc?.content ?? '').subarray(0, 12_000).toString('utf8').replace(/\uFFFD$/, ''),
       requested_management_id: JSON.parse(row.metadata_json).existing_management_id ?? null };
     db.exec('COMMIT');
     return { submission_id: row.id, lease_token: leaseToken, candidate, references };

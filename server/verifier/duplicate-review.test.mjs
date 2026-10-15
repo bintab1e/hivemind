@@ -62,6 +62,29 @@ test('title alone or invented causal quote cannot confirm a duplicate', () => {
   assert.doesNotMatch(ungroundedDifference[0].reason, /다른 결함/);
 });
 
+test('a legacy report without a Root cause heading can still ground the same flaw', async () => {
+  const old = { ...reference('A-001'), report_excerpt: `# Historical analysis\n\n${earlierCause}` };
+  const result = await reviewSubmittedDuplicateWithCodex(candidate, [old], {
+    runner: async prompt => {
+      assert.match(prompt, /Historical analysis/);
+      return { reviews: [review('A-001', 'same')] };
+    },
+  });
+  assert.equal(result.verdict, 'duplicate');
+  assert.equal(result.matched_management_id, 'A-001');
+});
+
+test('a long matching title without root-cause or PoC evidence cannot justify merging', async () => {
+  const title = 'NFS callback client reference release with a long matching description';
+  const result = await reviewSubmittedDuplicateWithCodex(
+    { ...candidate, title, report_excerpt: title },
+    [{ ...reference('A-001'), title, report_excerpt: title }], {
+      runner: async () => ({ reviews: [review('A-001', 'same', { ...comparison,
+        candidate_quote: title, reference_quote: title })] }),
+    });
+  assert.equal(result.verdict, 'new');
+});
+
 test('available A references are compared in bounded batches', async () => {
   const references = Array.from({ length: 9 }, (_, i) => reference(`A-${String(i + 1).padStart(3, '0')}`));
   let calls = 0;
@@ -79,12 +102,11 @@ test('available A references are compared in bounded batches', async () => {
   assert.equal(calls, 3);
 });
 
-test('material uncertainty and multiple same-project matches wait with management IDs', async () => {
+test('uncertain comparisons do not block registration, but multiple proven matches wait', async () => {
   const uncertain = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001')], {
     runner: async () => ({ reviews: [review('A-001', 'uncertain')] }),
   });
-  assert.equal(uncertain.verdict, 'uncertain');
-  assert.match(uncertain.reason, /A-001/);
+  assert.equal(uncertain.verdict, 'new');
   const multiple = await reviewSubmittedDuplicateWithCodex(candidate,
     [reference('A-001'), reference('A-002')], {
       runner: async () => ({ reviews: [review('A-001', 'same'), review('A-002', 'same')] }),
@@ -95,8 +117,7 @@ test('material uncertainty and multiple same-project matches wait with managemen
   const missing = await reviewSubmittedDuplicateWithCodex(candidate,
     [{ ...reference('A-001'), report_excerpt: '' }],
     { runner: async () => { throw new Error('not called'); } });
-  assert.equal(missing.verdict, 'uncertain');
-  assert.match(missing.reason, /A-001: 기존 취약점의 분석 보고서가 없습니다/);
+  assert.equal(missing.verdict, 'new');
 });
 
 test('unrelated missing reports and cross-project findings do not veto a new knfsd finding', async () => {
@@ -120,7 +141,7 @@ test('unrelated missing reports and cross-project findings do not veto a new knf
   assert.equal(cross.verdict, 'new');
 });
 
-test('a grounded same-project match merges despite unrelated gaps, but a material gap holds', async () => {
+test('a grounded same-project match merges despite sparse or uncertain other records', async () => {
   const unrelated = { ...reference('A-002'), file_path: null, code_refs: [], report_excerpt: '' };
   const merge = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001'), unrelated], {
     runner: async () => ({ reviews: [review('A-001', 'same')] }),
@@ -128,56 +149,50 @@ test('a grounded same-project match merges despite unrelated gaps, but a materia
   assert.equal(merge.verdict, 'duplicate');
   assert.equal(merge.matched_management_id, 'A-001');
   const material = { ...reference('A-002'), report_excerpt: '' };
-  const hold = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001'), material], {
+  const withSparseReference = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001'), material], {
     runner: async () => ({ reviews: [review('A-001', 'same')] }),
   });
-  assert.equal(hold.verdict, 'uncertain');
-  assert.match(hold.reason, /A-001/);
-  assert.match(hold.reason, /A-002: 기존 취약점의 분석 보고서가 없습니다/);
+  assert.equal(withSparseReference.verdict, 'duplicate');
+  assert.equal(withSparseReference.matched_management_id, 'A-001');
 });
 
-test('shared root-cause identifier makes a different-path uncertainty material', async () => {
+test('shared root-cause identifier alone does not block registration', async () => {
   const old = { ...reference('A-001'), file_path: 'fs/nfsd/other.c',
     code_refs: ['fs/nfsd/other.c:12'], report_excerpt: reference('A-001').report_excerpt
       .replace('nfsd4_process_open2', 'nfsd4_process_open2()') };
   const withFunction = { ...candidate, report_excerpt: candidate.report_excerpt
     .replace('nfsd4_process_open2', 'nfsd4_process_open2()') };
-  const held = await reviewSubmittedDuplicateWithCodex(withFunction, [old], {
+  const result = await reviewSubmittedDuplicateWithCodex(withFunction, [old], {
     runner: async () => ({ reviews: [review('A-001', 'uncertain')] }),
   });
-  assert.equal(held.verdict, 'uncertain');
-  assert.match(held.reason, /A-001/);
+  assert.equal(result.verdict, 'new');
 });
 
-test('source-reference paths also identify material uncertainty', async () => {
+test('shared source file alone does not block registration', async () => {
   const old = { ...reference('A-001', 'knfsd',
     'different_function releases an unrelated request after its final use.'),
     file_path: null, code_refs: ['fs/nfsd/nfs4state.c:99'] };
-  const held = await reviewSubmittedDuplicateWithCodex({ ...candidate, file_path: null }, [old], {
+  const result = await reviewSubmittedDuplicateWithCodex({ ...candidate, file_path: null }, [old], {
     runner: async () => ({ reviews: [review('A-001', 'uncertain')] }),
   });
-  assert.equal(held.verdict, 'uncertain');
-  assert.match(held.reason, /A-001/);
+  assert.equal(result.verdict, 'new');
 });
 
-test('historical reports without path metadata still hold same-source uncertainty', async () => {
+test('historical reports with a shared path but uncertain cause do not block registration', async () => {
   const old = { ...reference('A-001', 'knfsd',
     'The flaw is in fs/nfsd/nfs4state.c, but the exact operation is unresolved.'),
     file_path: null, code_refs: [] };
-  const held = await reviewSubmittedDuplicateWithCodex(candidate, [old], {
+  const result = await reviewSubmittedDuplicateWithCodex(candidate, [old], {
     runner: async () => ({ reviews: [review('A-001', 'uncertain')] }),
   });
-  assert.equal(held.verdict, 'uncertain');
-  assert.match(held.reason, /A-001/);
+  assert.equal(result.verdict, 'new');
 });
 
-test('invalid comparison quotes produce a specific hold rather than a contradictory difference', async () => {
-  const held = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001')], {
+test('invalid comparison quotes cannot justify a match or block registration', async () => {
+  const result = await reviewSubmittedDuplicateWithCodex(candidate, [reference('A-001')], {
     runner: async () => ({ reviews: [review('A-001', 'different', null)] }),
   });
-  assert.equal(held.verdict, 'uncertain');
-  assert.match(held.reason, /A-001: 양쪽 보고서의 원인 인용/);
-  assert.doesNotMatch(held.reason, /다른 결함/);
+  assert.equal(result.verdict, 'new');
 });
 
 test('grounded same cause in an inactive record is held with its ID', async () => {
@@ -189,18 +204,32 @@ test('grounded same cause in an inactive record is held with its ID', async () =
   assert.match(held.reason, /A-001.*중복·철회/);
 });
 
-test('requested enhancement is held when its old report is unavailable', async () => {
+test('requested enhancement hint cannot block registration when evidence is unavailable', async () => {
   const old = { ...reference('A-001'), file_path: null, code_refs: [], report_excerpt: '' };
   const held = await reviewSubmittedDuplicateWithCodex(
     { ...candidate, requested_management_id: 'A-001' }, [old], {
       runner: async () => { throw new Error('no comparable reports'); },
     });
-  assert.equal(held.verdict, 'uncertain');
-  assert.match(held.reason, /A-001: 기존 취약점의 분석 보고서가 없습니다/);
+  assert.equal(held.verdict, 'new');
   const absent = await reviewSubmittedDuplicateWithCodex(
-    { ...candidate, requested_management_id: 'A-999' }, [old]);
-  assert.equal(absent.verdict, 'uncertain');
-  assert.match(absent.reason, /A-999/);
+    { ...candidate, requested_management_id: 'A-999' }, [old],
+    { runner: async () => { throw new Error('not called'); } });
+  assert.equal(absent.verdict, 'new');
+});
+
+test('a sparse report can still ground a same-root comparison in both PoCs', async () => {
+  const poc = 'static int nfsd4_process_open2(void) { put_client_ref(client); return use_client(client); }';
+  const newFinding = { ...candidate, report_excerpt: 'Short report.', poc_excerpt: poc };
+  const old = { ...reference('A-001'), report_excerpt: 'Short report.', poc_excerpt: poc };
+  const result = await reviewSubmittedDuplicateWithCodex(newFinding, [old], {
+    runner: async prompt => {
+      assert.match(prompt, /put_client_ref\(client\)/);
+      return { reviews: [review('A-001', 'same', { ...comparison,
+        candidate_quote: poc, reference_quote: poc })] };
+    },
+  });
+  assert.equal(result.verdict, 'duplicate');
+  assert.equal(result.matched_management_id, 'A-001');
 });
 
 test('submitter management-ID hint cannot force a merge', async () => {

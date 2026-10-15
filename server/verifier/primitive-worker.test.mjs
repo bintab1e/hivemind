@@ -20,7 +20,7 @@ const job = { finding_id: findingId, lease_token: leaseToken, management_id: 'A-
 test('primitive worker configuration and identity are stable per service', () => {
   assert.deepEqual(primitiveConfiguration({ HIVEMIND_VERIFIER_SOCKET: config.socketPath,
     HIVEMIND_CODEX_CLI: config.cliPath, HIVEMIND_PRIMITIVE_WORK_ROOT: config.workRoot,
-    HIVEMIND_PRIMITIVE_KERNEL_SOURCES: config.sourceDirs.join(':') }), config);
+    HIVEMIND_PRIMITIVE_KERNEL_SOURCES: config.sourceDirs.join(path.delimiter) }), config);
   assert.throws(() => primitiveConfiguration({}), /not_configured/);
   assert.match(primitiveWorkerId(config, 'host-a'), /^[a-f0-9]{32}$/);
   assert.equal(primitiveWorkerId(config, 'host-a'), primitiveWorkerId({ ...config }, 'host-a'));

@@ -103,7 +103,7 @@ export function validateEvent(input) {
     required(data.impact, 'impact', 1000);
     required(data.vm_environment, 'vm_environment', 2000);
     if (data.registry_report_status !== undefined) invalid('registry_report_status is administrator-managed');
-    for (const [key, max] of Object.entries({ registry_target: 32, registry_option: 200, registry_privilege: 200, registry_report_project: 200, registry_owner: 100, registry_nfs_version: 100, registry_vulnerability_type: 200, registry_methodology: 100, registry_found_date: 10, registry_exploit: 100, registry_cve: 32 })) {
+    for (const [key, max] of Object.entries({ registry_target: 32, registry_option: 4000, registry_privilege: 200, registry_report_project: 200, registry_owner: 100, registry_nfs_version: 100, registry_vulnerability_type: 200, registry_methodology: 100, registry_found_date: 10, registry_exploit: 100, registry_cve: 32 })) {
       if (data[key] !== undefined && (typeof data[key] !== 'string' || !data[key].trim() || data[key].length > max || /[\x00-\x1f\x7f]/.test(data[key]))) invalid(`Invalid ${key}`);
     }
     if (data.registry_target !== undefined && data.registry_target !== 'knfsd') invalid('Invalid registry_target');

@@ -345,14 +345,14 @@ function validateResult(parsed, submission, trustedSource) {
     if (!line || !line.text.trim()) throw new CodexReviewError('ungrounded_output', { validation_stage: 'source_evidence' });
     return { path: item.path, line: item.line, text: line.text };
   });
-  const options = normalizeRegistryOption(field(answer.options, 500, false, 'metadata'));
+  const options = typeof answer.options === 'string' && answer.options.length > 4000 ? null
+    : normalizeRegistryOption(field(answer.options, 4000, false, 'metadata'));
   const rawPermission = field(answer.permission, 200, false, 'metadata');
   const permission = rawPermission && /^(?:AUTH_NONE|AUTH_NULL)$/i.test(rawPermission) ? 'AUTH_NONE'
     : rawPermission && /^(?:AUTH_SYS|AUTH_UNIX)$/i.test(rawPermission) ? 'AUTH_SYS'
       : rawPermission && /^RPCSEC_GSS(?:\/Kerberos)?$/i.test(rawPermission) ? 'RPCSEC_GSS' : rawPermission;
   const rawVersion = field(answer.nfs_version, 200, false, 'metadata');
   const versionMatch = rawVersion && /^(?:NFSv)?(3|4(?:\.0|\.1|\.2)?)$/i.exec(rawVersion);
-  if (rawVersion && !versionMatch) throw invalidOutput('metadata');
   const nfsVersion = versionMatch ? versionMatch[1] === '4.0' ? '4' : versionMatch[1] : null;
   const rawType = field(answer.vulnerability_type, 200, false, 'metadata');
   const vulnerabilityType = rawType && [...new Set(rawType.split(/[,;]/).map(part => {
@@ -361,7 +361,6 @@ function validateResult(parsed, submission, trustedSource) {
   }).filter(Boolean))].join(', ');
   if (rawType && !vulnerabilityType) throw invalidOutput('metadata');
   const foundDate = field(answer.found_date, 10, false, 'metadata');
-  const parsedDate = foundDate ? Date.parse(`${foundDate}T00:00:00Z`) : null;
   if (!Array.isArray(answer.claimed_impacts) || answer.claimed_impacts.length > impactTypes.size || new Set(answer.claimed_impacts).size !== answer.claimed_impacts.length || answer.claimed_impacts.some(value => !impactTypes.has(value))) throw invalidOutput('metadata');
   if (!Array.isArray(answer.log_file_indexes) || answer.log_file_indexes.length > 5 || new Set(answer.log_file_indexes).size !== answer.log_file_indexes.length || answer.log_file_indexes.some(index => !Number.isInteger(index) || index < 0 || index >= submission.files.length)) throw invalidOutput('logs');
   let buildCommand = field(answer.build_command, 1000, false, 'poc');
@@ -377,7 +376,7 @@ function validateResult(parsed, submission, trustedSource) {
   } else if (answer.poc_language !== null || buildCommand !== null || runCommand !== null) {
     throw invalidOutput('poc');
   }
-  if (parsed.verdict === 'likely' && (!title || !report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output', { validation_stage: 'likely_grounding' });
+  if (parsed.verdict === 'likely' && (!report || !poc || !filePath || !evidence.some(item => item.path === filePath))) throw new CodexReviewError('ungrounded_output', { validation_stage: 'likely_grounding' });
   if (parsed.verdict === 'likely' && !answer.code_refs.length) throw invalidOutput('source_refs');
   if (parsed.verdict === 'likely' && !evidence.some(item => item.path === filePath && rootCause.includes(item.text.trim()))) {
     throw new CodexReviewError('ungrounded_output', { validation_stage: 'report_source' });
@@ -587,6 +586,8 @@ Untrusted submission JSON:
 <submission>
 ${serialized}
 </submission>
+
+Decision rule: this is a plausibility and integrity screen, not a demand for a polished submission or dynamic proof. If a specific faulty operation and violated invariant are visible in trusted source, prefer likely when no concrete counterexample, indispensable attacker-side administrator operation, injected fault, or modified-kernel trigger defeats that base flaw. A short report, basic original C PoC, incomplete reproduction recipe, or sparse/non-correlating submitted log limits what can be claimed about reachability and impact; do not classify those weaknesses as a heuristic shortcut, fabrication, or a reason by themselves to withhold the source-grounded base flaw. Record uncertainty in the report and claimed impacts. Never invent missing source, PoC, or log evidence.
 `;
   let retryHint = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -618,7 +619,7 @@ Decide whether the report's PARTICULAR base vulnerability follows from the shown
 
 For admin_action_required=true, include admin_trigger with file_index, line, and operation anchored to a distinct privileged operation in an ORIGINAL submitted C PoC or .sh trigger script. Client connect_reserved()/bind() and sudo used only to run that client PoC are not valid evidence. Without a separate anchored operation use admin_action_required=null and an uncertain verdict, not refutes. For false or null set admin_trigger=null.
 
-Return supports when flaw and admin_action are supported, admin_action_required is false, and no check is contradicted; reachability, PoC/log correlation, or defenses may remain uncertain if the visible source still establishes a plausible base flaw. Return refutes if admin_action_required is true, a confirmed artificial trigger is indispensable, or a concrete contradiction defeats the base flaw; otherwise uncertain. A submitted log is not proof of server reproduction. Explain the decisive evidence or gap briefly. Output only the specified JSON schema.
+Return supports when the first review grounds a plausible base flaw in trusted source, admin_action is supported, admin_action_required is false, and no check is contradicted. An excerpt limit may leave your flaw check uncertain without defeating that grounded flaw; reachability, PoC/log correlation, or defenses may also remain uncertain. A short report, basic C PoC, or weak log correlation is a limitation, not a contradiction. Return refutes if admin_action_required is true, a confirmed artificial trigger is indispensable, or a concrete contradiction defeats the base flaw; otherwise uncertain. A submitted log is not proof of server reproduction. Explain the decisive evidence or gap briefly. Output only the specified JSON schema.
 
 Trusted kernel source JSON:
 <trusted-source>
@@ -653,7 +654,7 @@ ${JSON.stringify({ verdict: review.verdict, reason: review.reason, integrity: re
       checks.admin_action !== (parsed.admin_action_required === true ? 'contradicted'
         : parsed.admin_action_required === null ? 'uncertain' : 'supported') ||
       parsed.verdict === 'supports' && (parsed.admin_action_required !== false ||
-        checks.flaw !== 'supported' || keys.some(key => checks[key] === 'contradicted')) ||
+        keys.some(key => checks[key] === 'contradicted')) ||
       parsed.admin_action_required === true && parsed.verdict !== 'refutes' ||
       parsed.admin_action_required === null && parsed.verdict === 'supports') {
     throw invalidOutput('proof_review');

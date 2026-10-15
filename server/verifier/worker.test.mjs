@@ -89,10 +89,19 @@ test('grounded base flaw proceeds despite uncertain ancillary path or log correl
   assert.equal(result.artifacts.log.content, log);
 });
 
-test('independent core uncertainty or concrete contradiction still holds approval', async t => {
+test('independent excerpt uncertainty alone does not block a grounded flaw', async t => {
+  const result = await processSubmissionJob(job, { config: config(t), reviewer,
+    sourceLoader: async () => trustedSource,
+    proofReviewer: async () => ({ ...await proofReviewer(), verdict: 'uncertain',
+      reason: 'The excerpt cannot establish every caller, but no defeating condition is visible.',
+      checks: { reachability: 'uncertain', flaw: 'uncertain', poc: 'uncertain',
+        log: 'uncertain', defenses: 'uncertain', admin_action: 'supported' } }) });
+  assert.equal(result.review.verdict, 'likely');
+  assert.ok(result.artifacts);
+});
+
+test('concrete contradiction still holds approval', async t => {
   for (const [verdict, checks] of [
-    ['uncertain', { reachability: 'supported', flaw: 'uncertain', poc: 'supported', log: 'supported',
-      defenses: 'supported', admin_action: 'supported' }],
     ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'contradicted', log: 'supported',
       defenses: 'supported', admin_action: 'supported' }],
     ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'contradicted',

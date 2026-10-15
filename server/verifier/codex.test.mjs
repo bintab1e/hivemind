@@ -63,6 +63,15 @@ const answer = {
   },
 };
 
+test('a short submitted report and basic original C PoC do not fail static normalization', async t => {
+  const sparse = { ...submission, report: '입력 경계가 의심됩니다.' };
+  const reviewed = await reviewSubmissionWithCodex(sparse, options(fakeCli(t, answer,
+    { type: 'turn.completed' }, 0, 'A short report, basic original C PoC')));
+  assert.equal(reviewed.verdict, 'likely');
+  assert.equal(reviewed.normalized.poc.source, submission.files[1].content);
+  assert.match(reviewed.normalized.report, /^## Summary/m);
+});
+
 function fakeCli(t, result, event = { type: 'turn.completed' }, delayMs = 0, marker = '<submission>') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-verifier-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -401,6 +410,10 @@ test('independent proof review supports a grounded flaw despite ancillary uncert
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(limited.verdict, 'supports');
   assert.equal(limited.checks.defenses, 'uncertain');
+  const limitedFlaw = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
+    { ...ancillaryUncertainty, checks: { ...ancillaryUncertainty.checks, flaw: 'uncertain' } },
+    { type: 'turn.completed' }, 0, 'A short report')));
+  assert.equal(limitedFlaw.checks.flaw, 'uncertain');
   const uncertain = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'uncertain', reason: 'Missing guard context.', admin_action_required: false,
       admin_trigger: null, checks: ancillaryUncertainty.checks },
@@ -429,8 +442,6 @@ test('independent proof review supports a grounded flaw despite ancillary uncert
     { verdict: 'supports', reason: 'Missing assessment.', admin_action_required: false,
       admin_trigger: null, checks: { ...checks, admin_action: 'uncertain' } },
     { verdict: 'supports', reason: 'Missing flag.', admin_trigger: null, checks },
-    { verdict: 'supports', reason: 'The base flaw is not established.', admin_action_required: false,
-      admin_trigger: null, checks: { ...checks, flaw: 'uncertain' } },
     { verdict: 'supports', reason: 'A guard defeats the flaw.', admin_action_required: false,
       admin_trigger: null, checks: { ...checks, defenses: 'contradicted' } },
   ]) {
@@ -460,7 +471,7 @@ test('fills omitted C PoC command hints and requires a C PoC for a likely verdic
   await assert.rejects(reviewSubmissionWithCodex(pythonOnly, options(fakeCli(t, missingPoc))), error => error.code === 'ungrounded_output');
 });
 
-test('canonicalizes common permission and NFS version aliases, rejecting ambiguous versions and unstructured reports', async t => {
+test('canonicalizes common permission and NFS version aliases, leaving ambiguous versions unknown', async t => {
   const aliases = structuredClone(answer);
   aliases.normalized.title = '  NFSv4   COMPOUND  boundary out-of-bounds read  ';
   aliases.normalized.permission = 'AUTH_UNIX';
@@ -471,8 +482,8 @@ test('canonicalizes common permission and NFS version aliases, rejecting ambiguo
     ['NFSv4 COMPOUND boundary out-of-bounds read', 'AUTH_SYS', '4.2', 'Race, UAF']);
   const ambiguous = structuredClone(answer);
   ambiguous.normalized.nfs_version = '4.1, 4.2';
-  await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, ambiguous))),
-    error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'metadata');
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, ambiguous)))).normalized.nfs_version,
+    null);
   const unstructured = structuredClone(answer);
   unstructured.normalized.report = '## Summary\nOnly one section.';
   await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, unstructured))),
@@ -500,6 +511,15 @@ test('keeps build settings and concise NFS features out of option prose', async 
   const prose = structuredClone(answer);
   prose.normalized.options = 'KNFSD iWARP listener on TCP port 20049; max_block_size=1048576';
   assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, prose)))).normalized.options, null);
+  const fullBuild = structuredClone(answer);
+  fullBuild.normalized.options = Array.from({ length: 25 }, (_, index) =>
+    `CONFIG_NFSD_FEATURE_${index}=y`).join(', ');
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, fullBuild)))).normalized.options,
+    fullBuild.normalized.options);
+  const oversized = structuredClone(answer);
+  oversized.normalized.options = 'CONFIG_NFSD_FEATURE=y, '.repeat(200);
+  assert.equal((await reviewSubmissionWithCodex(submission, options(fakeCli(t, oversized)))).normalized.options,
+    null);
 });
 
 test('identifies invalid output stage without retaining model text', async t => {

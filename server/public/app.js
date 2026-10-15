@@ -260,7 +260,7 @@ function registryCsv(findings) {
   return `\uFEFF${[header, ...rows].map(row => row.map(registryCsvCell).join(',')).join('\r\n')}\r\n`;
 }
 const editableFindingColumns = findingColumns.filter(([key]) => !['management_id', 'target'].includes(key));
-const editLimits = { title: 300, option: 200, privilege: 200, report_project: 200, owner: 100, nfs_version: 100, vulnerability_type: 200, methodology: 100, found_date: 10, exploit: 100, cve: 32 };
+const editLimits = { title: 300, option: 4000, privilege: 200, report_project: 200, owner: 100, nfs_version: 100, vulnerability_type: 200, methodology: 100, found_date: 10, exploit: 100, cve: 32 };
 const reportStatuses = ['미제보', '제보 중', '제보 완료', '중복', '철회'];
 
 function syncFindingEditControls() {
@@ -1139,29 +1139,6 @@ function renderVerificationQueue() {
     if (!primitive && !duplicateWorker && targetCommit) card.append(element('div', 'queue-worker-meta', `커널 ${targetCommit}`));
     card.append(element('div', 'queue-worker-meta', `마지막 응답 ${when(worker.last_seen_at)}`));
     $('queue-workers').append(card);
-  }
-  if (queue.primitive) {
-    const board = element('section', 'queue-primitive-board');
-    board.setAttribute('aria-label', '프리미티브 추가 검토 현황');
-    board.append(element('strong', 'queue-primitive-title', '프리미티브 추가 검토'));
-    const columns = element('div', 'queue-primitive-columns');
-    for (const [key, label, count] of [
-      ['pending', '대기', queue.primitive.counts.pending],
-      ['active', '진행 중', queue.primitive.counts.processing],
-      ['errors', '오류', queue.primitive.counts.error],
-    ]) {
-      const column = element('section', 'queue-primitive-column');
-      column.append(element('h3', '', `${label} · ${number(count)}건`));
-      for (const row of queue.primitive[key]) {
-        const item = element('div', 'queue-primitive-item');
-        item.append(element('strong', '', row.management_id || row.finding_id.slice(0, 12)), element('span', '', row.title || '제목 없음'));
-        if (key === 'errors' && row.summary) item.append(element('small', '', row.summary));
-        column.append(item);
-      }
-      columns.append(column);
-    }
-    board.append(columns);
-    $('queue-workers').append(board);
   }
   renderQueueList('queue-active', active, '현재 검증 중인 신규 제출이 없습니다.');
   renderQueueList('queue-pending', pending, '검증을 기다리는 신규 제출이 없습니다.');

@@ -8,7 +8,7 @@ const agentOwners = new Map([
   ['minsu', '김민수'], ['jiwoong', '위지웅'],
 ]);
 const editable = {
-  option: 200, privilege: 200, report_project: 200,
+  option: 4000, privilege: 200, report_project: 200,
   report_status: 32, owner: 100, nfs_version: 100,
   vulnerability_type: 200, methodology: 100, found_date: 10,
   exploit: 100, cve: 32,

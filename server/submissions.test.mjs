@@ -7,7 +7,8 @@ import { openDatabase, setActiveTrack } from './server.mjs';
 import { hash, readFrontMatter } from './contract.mjs';
 import { importHistoryArtifacts } from './history-artifacts.mjs';
 import { claimDuplicateReview, claimPrimitiveReview, claimSubmission, completeDuplicateReview,
-  completeSubmission, failDuplicateReview, getVerifiedArtifact, heartbeatWorker,
+  completePrimitiveReview, completeSubmission, failDuplicateReview, failPrimitiveReview,
+  getVerifiedArtifact, heartbeatWorker,
   listVerificationQueue, listVerifiedArtifacts, purgeFinishedSubmissions, retrySubmission,
   submitSubmission } from './submissions.mjs';
 import { listRegistry } from './registry.mjs';
@@ -117,7 +118,7 @@ test('grounded review corrects submitted NFS version and preserves a proven pre-
   assert.equal(row.nfs_version, null);
 });
 
-test('authorization bypass is a supported finding type while unknown types get a specific hold reason', t => {
+test('authorization bypass is normalized while unknown types remain unset', t => {
   const db = setup(t);
   const valid = verdict();
   valid.review.normalized.vulnerability_type = 'Access Control Bypass';
@@ -128,25 +129,25 @@ test('authorization bypass is a supported finding type while unknown types get a
 
   const invalid = verdict();
   invalid.review.normalized.vulnerability_type = 'Unknown Bypass';
-  const held = approve(db, submit(db, 'unknown-type'), invalid);
-  assert.equal(held.status, 'needs_review');
-  assert.match(held.reason, /vulnerability type/);
-  assert.doesNotMatch(held.reason, /title|source path|permission/);
+  const reviewed = approve(db, submit(db, 'unknown-type'), invalid);
+  assert.equal(reviewed.status, 'approved');
+  assert.equal(listRegistry(db).find(row => row.management_id === reviewed.management_id).vulnerability_type,
+    null);
 });
 
-test('static metadata hold names only the unresolved fields', t => {
+test('formatting or missing optional metadata does not hold a source-grounded flaw', t => {
   const db = setup(t);
-  for (const [label, change, expected] of [
-    ['title', finding => { finding.normalized.title = 'short'; }, /title/],
-    ['NFS version', finding => { finding.normalized.nfs_version = null; }, /NFS version or pre-auth reachability/],
-    ['permission', finding => { finding.normalized.permission = null; }, /permission/],
+  for (const [label, change, field, expected] of [
+    ['title', finding => { finding.normalized.title = 'short'; }, 'title',
+      'NFS source flaw in fs/nfsd/nfs4proc.c'],
+    ['NFS version', finding => { finding.normalized.nfs_version = null; }, 'nfs_version', null],
+    ['permission', finding => { finding.normalized.permission = null; }, 'privilege', null],
   ]) {
     const result = verdict();
     change(result.review);
-    const held = approve(db, submit(db, `bad-${label.replaceAll(' ', '-')}`), result);
-    assert.equal(held.status, 'needs_review');
-    assert.match(held.reason, expected);
-    assert.doesNotMatch(held.reason, /vulnerability type|source path/);
+    const reviewed = approve(db, submit(db, `bad-${label.replaceAll(' ', '-')}`), result);
+    assert.equal(reviewed.status, 'approved');
+    assert.equal(listRegistry(db).find(row => row.management_id === reviewed.management_id)[field], expected);
   }
 });
 
@@ -164,6 +165,7 @@ test('static screening stages evidence without registering or numbering the find
   const job = claimDuplicateReview(db);
   assert.equal(job.submission_id, id);
   assert.equal(job.candidate.title, 'NFS request length error');
+  assert.equal(job.candidate.poc_excerpt, poc);
   assert.equal(listVerificationQueue(db).duplicate.active[0].submission_id, id);
   assert.equal(completeDuplicateReview(db, id,
     { verdict: 'new', matched_management_id: null, reason: 'No matching root cause or entry path' },
@@ -256,6 +258,11 @@ test('plausible grounded flaw is accepted despite unresolved ancillary proof che
   uncertainLog.review.proof_review = { ...proofReview, verdict: 'uncertain', checks: { ...proofReview.checks,
     log: 'uncertain' } };
   assert.equal(approve(db, submit(db, 'uncertain-log'), uncertainLog).status, 'approved');
+
+  const uncertainFlaw = verdict();
+  uncertainFlaw.review.proof_review = { ...proofReview, verdict: 'uncertain', checks: { ...proofReview.checks,
+    flaw: 'uncertain', poc: 'uncertain', log: 'uncertain' } };
+  assert.equal(approve(db, submit(db, 'uncertain-secondary-excerpt'), uncertainFlaw).status, 'approved');
 
   const contradictedId = submit(db, 'ancillary-contradicted');
   const contradicted = verdict();
@@ -414,15 +421,15 @@ test('reviewed options keep build settings and short NFS features, omitting runt
   }
 });
 
-test('overlong build option metadata is held instead of turning a completed review into an error', t => {
+test('long build option metadata stays visible without blocking a source-grounded flaw', t => {
   const db = setup(t);
   const id = submit(db, 'long-option');
   const result = verdict();
-  result.review.normalized.options = Array.from({ length: 20 }, (_, index) => `CONFIG_NFSD_FEATURE_${index}=y`).join(', ');
-  const held = approve(db, id, result);
-  assert.equal(held.status, 'needs_review');
-  assert.match(held.reason, /option metadata/i);
-  assert.equal(held.management_id, null);
+  const options = Array.from({ length: 20 }, (_, index) => `CONFIG_NFSD_FEATURE_${index}=y`).join(', ');
+  result.review.normalized.options = options;
+  const reviewed = approve(db, id, result);
+  assert.equal(reviewed.status, 'approved');
+  assert.equal(listRegistry(db).find(row => row.management_id === reviewed.management_id).option, options);
 });
 
 test('invalid source-path metadata is held instead of failing result delivery', t => {
@@ -456,6 +463,24 @@ test('the same rooted enhancement retains one management ID and its earlier revi
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_revision_audit WHERE management_id = ?').get(first.management_id).n, 1);
   assert.equal(getVerifiedArtifact(db, next.finding_id, 'report.md').toString(), report);
+});
+
+test('an uncertain metadata field in a strengthening submission preserves existing registry values', t => {
+  const db = setup(t);
+  const firstReview = verdict();
+  firstReview.review.normalized.options = 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y';
+  const first = approve(db, submit(db, 'first-with-options'), firstReview);
+  const secondReview = verdict();
+  Object.assign(secondReview.review.normalized, { options: null, permission: null,
+    nfs_version: null, vulnerability_type: null });
+  const second = approve(db, submit(db, 'second-without-options',
+    { existing_management_id: first.management_id }), secondReview, sameFinding(first.management_id));
+  const record = listRegistry(db).find(row => row.management_id === first.management_id);
+  assert.equal(second.management_id, first.management_id);
+  assert.equal(record.option, 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y');
+  assert.equal(record.privilege, 'AUTH_SYS');
+  assert.equal(record.nfs_version, '4.2');
+  assert.equal(record.vulnerability_type, 'OOB Read');
 });
 
 test('the static verifier does not receive an existing report; duplicate worker receives the reference', t => {
@@ -629,6 +654,20 @@ test('primitive follow-up sees submitted evidence as static-only and no verified
   assert.equal(job.evidence_status, 'submitted_static');
   assert.deepEqual(job.verified_impacts, []);
   assert.equal(job.kasan_log, log);
+});
+
+test('primitive opinions and failures cannot change approved findings', t => {
+  for (const outcome of ['complete', 'fail']) {
+    const db = setup(t);
+    const approved = approve(db, submit(db, `primitive-${outcome}`));
+    const job = claimPrimitiveReview(db, 'f'.repeat(32), [commit]);
+    if (outcome === 'complete') completePrimitiveReview(db, approved.finding_id, '추가 검토 방향입니다.', job.lease_token);
+    else failPrimitiveReview(db, approved.finding_id, 'Opinion generation unavailable', job.lease_token);
+    assert.equal(db.prepare('SELECT status FROM submissions WHERE id = ?').get(approved.submission_id).status,
+      'approved');
+    assert.equal(db.prepare('SELECT finding_id FROM finding_registry WHERE management_id = ?')
+      .get(approved.management_id).finding_id, approved.finding_id);
+  }
 });
 
 test('legacy approved KASAN log downloads remain available', t => {
