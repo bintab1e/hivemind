@@ -203,7 +203,7 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
         !['reachability', 'poc', 'log', 'defenses']
           .every(name => ['supported', 'uncertain'].includes(checks?.[name]))) {
       review.verdict = 'uncertain';
-      review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`.slice(0, 1000);
+      review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`;
       return { review, reproduction: notRun };
     }
     if (submission.metadata.existing_management_id) {

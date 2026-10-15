@@ -40,15 +40,7 @@ function reviewReason(input, name, maxLength) {
   if (typeof input !== 'string' || input.length > maxLength || input.includes('\0') || !input.trim()) {
     invalid(`Invalid ${name}`);
   }
-  let clipped = '';
-  let bytes = 0;
-  for (const character of input.trim()) {
-    const size = Buffer.byteLength(character);
-    if (bytes + size > 1000) break;
-    clipped += character;
-    bytes += size;
-  }
-  return clipped.trimEnd();
+  return input.trim();
 }
 
 function object(input, name) {
@@ -478,7 +470,7 @@ function frontMatter(data, report) {
 
 function mark(db, id, status, reason, summary) {
   db.prepare('UPDATE submissions SET status = ?, reason = ?, verification_json = ?, completed_at = ?, lease_token = NULL WHERE id = ?')
-    .run(status, String(reason).slice(0, 1000), JSON.stringify(summary), now(), id);
+    .run(status, String(reason), JSON.stringify(summary), now(), id);
   return getSubmission(db, id);
 }
 
@@ -768,14 +760,15 @@ export function completeSubmission(db, id, result, leaseToken) {
       integrity: review.integrity?.verdict ?? 'uncertain',
       admin_action_required: adminActionRequired,
       proof_review: review.proof_review && typeof review.proof_review === 'object'
-        ? { verdict: review.proof_review.verdict, reason: String(review.proof_review.reason || '').slice(0, 1000) } : null,
+        ? { verdict: review.proof_review.verdict,
+          reason: reviewReason(review.proof_review.reason, 'independent review reason', 3000) } : null,
       ...(existingManagementId ? { same_root_cause: {
         verdict: ['same', 'different', 'uncertain'].includes(review.same_root_cause?.verdict)
           ? review.same_root_cause.verdict : 'uncertain',
         reason: typeof review.same_root_cause?.reason === 'string'
           ? review.same_root_cause.reason.slice(0, 1000) : null,
       } } : {}) };
-    const reason = reviewReason(review.reason, 'review reason', 3000) || 'Static screening completed';
+    const reason = reviewReason(review.reason, 'review reason', 4096) || 'Static screening completed';
     if (adminActionRequired === true) {
       const adminReason = secondaryAdminAnchored ? review.proof_review.reason : review.integrity?.reason;
       const out = mark(db, id, 'rejected', reviewReason(adminReason, 'administrator action reason', 3000)

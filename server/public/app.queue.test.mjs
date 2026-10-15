@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 test('verification queue shows real worker and job stages, with empty and error states', () => {
+  const longReason = `KASAN 증거 부족\n${'확인할 근거와 예외 조건을 모두 표시합니다. '.repeat(60)}`;
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const start = source.indexOf('const queuePhaseLabels =');
@@ -40,7 +41,7 @@ test('verification queue shows real worker and job stages, with empty and error 
       active: [{ submission_id: 'run-1', project: 'knfsd', title: 'active bug', agent_id: 'agent-1', status: 'processing', phase: 'qemu_reproduction', phase_updated_at: '2026-10-13T00:00:00Z', target_commit: 'abc123' }],
       pending: [{ submission_id: 'run-2', project: 'knfsd', title: 'pending bug', agent_id: 'web:opaque', origin: 'manual_upload', reporter: '연구원', existing_management_id: 'A-043', position: 1, submitted_at: '2026-10-13T00:00:00Z', target_commit: 'def456' }],
       blocked: [
-        { submission_id: 'run-3', project: 'knfsd', title: 'blocked bug', agent_id: 'agent-3', status: 'needs_evidence', reason: 'KASAN 증거 부족', target_commit: 'abc123' },
+        { submission_id: 'run-3', project: 'knfsd', title: 'blocked bug', agent_id: 'agent-3', status: 'needs_evidence', reason: longReason, target_commit: 'abc123' },
         { submission_id: 'run-4', project: 'knfsd', title: 'rejected bug', agent_id: 'agent-4', status: 'rejected', reason: 'PoC 재현 실패', target_commit: 'abc123' },
       ],
       primitive: {
@@ -118,6 +119,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   elements.get('queue-detail').close();
   elements.get('queue-blocked').children[0].click();
   assert.match(text(elements.get('queue-detail-facts')), /KASAN 증거 부족|증거 보완 필요/);
+  assert.equal(elements.get('queue-detail-facts').children.at(-1).children[1].textContent, longReason);
   elements.get('queue-detail').close();
   state.queue.active[0].phase = null;
   context.renderQueue();

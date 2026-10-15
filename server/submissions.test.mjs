@@ -276,15 +276,14 @@ test('valid long static-review reasons are stored without failing completion', t
   approvedResult.review.reason = '검증'.repeat(600);
   const approved = approve(db, approvedId, approvedResult);
   assert.equal(approved.status, 'approved');
-  assert.ok(Buffer.byteLength(approved.reason) <= 1000);
-  assert.ok(approved.reason.startsWith('검증'));
+  assert.equal(approved.reason, approvedResult.review.reason);
 
   const suspectId = submit(db, 'long-integrity-reason');
   const suspectResult = verdict({ integrity: 'suspect' });
   suspectResult.review.integrity.reason = 'Admin-only trigger is absent from the claimed attack path. '.repeat(30);
   const rejected = approve(db, suspectId, suspectResult);
   assert.equal(rejected.status, 'rejected');
-  assert.ok(Buffer.byteLength(rejected.reason) <= 1000);
+  assert.equal(rejected.reason, suspectResult.review.integrity.reason.trim());
 
   const adminInput = raw('long-admin-reason');
   adminInput.files[0] = artifact('source.c', 'poc', 'int main(void) { return mount("x", "y", "z", 0, 0); }\n');
@@ -295,7 +294,20 @@ test('valid long static-review reasons are stored without failing completion', t
   adminResult.review.integrity.reason = '관리자 권한이 필요한 마운트 작업입니다. '.repeat(60);
   const adminRejected = approve(db, adminId, adminResult);
   assert.equal(adminRejected.status, 'rejected');
-  assert.ok(Buffer.byteLength(adminRejected.reason) <= 1000);
+  assert.equal(adminRejected.reason, adminResult.review.integrity.reason.trim());
+
+  const challengedId = submit(db, 'long-independent-reason');
+  const challengedResult = verdict();
+  const explanation = '소스 경로의 전제 조건을 확인해야 합니다. '.repeat(65);
+  challengedResult.review.verdict = 'uncertain';
+  challengedResult.review.proof_review = { ...proofReview, verdict: 'refutes', reason: explanation };
+  challengedResult.review.reason = `Independent static challenge did not confirm the claim: ${explanation}`;
+  const challenged = approve(db, challengedId, challengedResult);
+  assert.equal(challenged.status, 'needs_review');
+  assert.equal(challenged.reason, challengedResult.review.reason.trim());
+  const summary = JSON.parse(db.prepare('SELECT verification_json FROM submissions WHERE id = ?')
+    .get(challengedId).verification_json);
+  assert.equal(summary.proof_review.reason, explanation.trim());
 });
 
 test('overlong option metadata is held instead of turning a completed review into an error', t => {

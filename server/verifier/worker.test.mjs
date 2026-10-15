@@ -157,6 +157,15 @@ test('missing proof or independent contradiction prevents canonical promotion', 
   assert.equal(contradicted.artifacts, undefined);
 });
 
+test('independent challenge keeps the complete explanation for queue review', async t => {
+  const explanation = '소스의 전제 조건과 반례를 다시 확인해야 합니다. '.repeat(65);
+  const result = await processSubmissionJob(job, { config: config(t), reviewer,
+    sourceLoader: async () => trustedSource,
+    proofReviewer: async () => ({ ...await proofReviewer(), verdict: 'refutes', reason: explanation }) });
+  assert.equal(result.review.reason,
+    `Independent static challenge did not confirm the claim: ${explanation}`);
+});
+
 test('uncertain same-root candidates stop automatic numbering', async t => {
   const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
     reviewer, proofReviewer, candidateLookup: async () => ({ candidates: [{ management_id: 'A-005', title: 'old',
