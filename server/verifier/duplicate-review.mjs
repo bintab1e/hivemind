@@ -4,7 +4,7 @@ import { runStructuredCodex } from './codex.mjs';
 const outputSchema = fileURLToPath(new URL('./duplicate-review.schema.json', import.meta.url));
 const idPattern = /^[ABC]-\d{3,}$/;
 const targets = new Set(['knfsd', 'NFS-Ganesha', 'libnfs']);
-const batchSize = 8;
+const batchSize = 4;
 const maxReferences = 2000;
 
 function validText(value, max, required = true) {
@@ -149,7 +149,7 @@ export async function reviewSubmittedDuplicateWithCodex(candidateInput, referenc
       'Previously managed A/B/C findings:', JSON.stringify(available),
     ].join('\n\n');
     const response = await runner(prompt, outputSchema, { cliPath: options.cliPath,
-      workRoot: options.workRoot, timeoutMs: 180_000 });
+      workRoot: options.workRoot, timeoutMs: 300_000 });
     reviews.push(...validateDuplicateBatch(response, candidate, available));
   }
   const byId = new Map(references.map(row => [row.management_id, row]));

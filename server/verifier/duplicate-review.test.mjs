@@ -66,15 +66,17 @@ test('available A references are compared in bounded batches', async () => {
   const references = Array.from({ length: 9 }, (_, i) => reference(`A-${String(i + 1).padStart(3, '0')}`));
   let calls = 0;
   const result = await reviewSubmittedDuplicateWithCodex(candidate, references, {
-    runner: async prompt => {
+    runner: async (prompt, schema, settings) => {
       calls++;
+      assert.equal(settings.timeoutMs, 300_000);
       const ids = [...prompt.matchAll(/"management_id":"(A-\d{3})"/g)].map(match => match[1]);
+      assert.ok(ids.length <= 4);
       return { reviews: ids.map(id => review(id, 'different')) };
     },
   });
   assert.equal(result.verdict, 'new');
   assert.equal(result.matched_management_id, null);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
 test('material uncertainty and multiple same-project matches wait with management IDs', async () => {
