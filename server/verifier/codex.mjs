@@ -128,22 +128,37 @@ export async function loadTrustedKernelSource(sourceDir, expectedCommit, submiss
     const lines = content.split(/\r?\n/);
     const centers = new Set();
     const symbols = new Map();
+    const addRange = (startText, endText) => {
+      const start = Number(startText);
+      if (start < 1 || start > lines.length) return;
+      centers.add(start);
+      const end = Number(endText);
+      if (end >= start && end <= lines.length) {
+        centers.add(Math.floor((start + end) / 2));
+        centers.add(end);
+      }
+    };
     for (const ref of references) {
-      for (let at = ref.indexOf(name); at >= 0; at = ref.indexOf(name, at + name.length)) {
-        const suffix = ref.slice(at + name.length, at + name.length + 256);
-        const number = /^:(\d{1,7})(?:-(\d{1,7}))?\b/.exec(suffix);
+      for (const match of ref.matchAll(sourcePathPattern)) {
+        if (match[0] !== name) continue;
+        const suffix = ref.slice(match.index + name.length, match.index + name.length + 512);
+        const nextPath = [...suffix.matchAll(sourcePathPattern)][0]?.index;
+        const local = nextPath == null ? suffix : suffix.slice(0, nextPath);
+        let rest = local;
+        const number = /^:(\d{1,7})(?:-(\d{1,7}))?\b/.exec(rest);
         if (number) {
-          const start = Number(number[1]);
-          if (start >= 1 && start <= lines.length) {
-            centers.add(start);
-            const end = Number(number[2]);
-            if (end >= start && end <= lines.length) {
-              centers.add(Math.floor((start + end) / 2));
-              centers.add(end);
-            }
+          addRange(number[1], number[2]);
+          rest = rest.slice(number[0].length);
+          let extra;
+          while ((extra = /^,\s*(\d{1,7})(?:-(\d{1,7}))?\b/.exec(rest))) {
+            addRange(extra[1], extra[2]);
+            rest = rest.slice(extra[0].length);
           }
         }
-        const symbol = /^[#:](?!\d)([A-Za-z_][A-Za-z_0-9]{2,})\b/.exec(suffix);
+        for (const sameFile of local.matchAll(/(?:같은\s*파일|same\s+file)\s*:\s*(\d{1,7})(?:-(\d{1,7}))?\b/gi)) {
+          addRange(sameFile[1], sameFile[2]);
+        }
+        const symbol = /^[#:](?!\d)([A-Za-z_][A-Za-z_0-9]{2,})\b/.exec(local);
         if (symbol) {
           if (!symbols.has(symbol[1])) symbols.set(symbol[1], lines.findIndex(line => line.includes(symbol[1])) + 1);
           const center = symbols.get(symbol[1]);

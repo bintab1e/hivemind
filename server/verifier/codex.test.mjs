@@ -833,6 +833,37 @@ test('keeps both ends of cited source ranges amid competing references', async t
   }
 });
 
+test('keeps comma-separated and same-file ranges from a report within the source budget', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-kernel-report-citations-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const transport = 'net/sunrpc/xprtrdma/svc_rdma_transport.c';
+  const driver = 'drivers/infiniband/core/iwcm.c';
+  for (const name of [transport, driver]) {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Array.from({ length: 1100 }, (_, index) => `int line_${index + 1};`).join('\n'));
+  }
+  const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  run('init', '-q');
+  run('config', 'user.name', 'Test');
+  run('config', 'user.email', 'test@example.invalid');
+  run('add', '.');
+  run('commit', '-qm', 'fixture');
+  const commit = run('rev-parse', 'HEAD');
+  const report = `${transport}:316-326,257-271 and (같은 파일:223-230). ` +
+    `${transport}:316-326,120-126 and (same file:900-905). ` +
+    `${driver}:50 (같은 파일:700-705).`;
+  const source = await loadTrustedKernelSource(dir, commit, { report });
+  const transportLines = new Set(source.files.find(file => file.path === transport).lines.map(line => line.number));
+  const driverLines = new Set(source.files.find(file => file.path === driver).lines.map(line => line.number));
+  assert.ok(source.files.every(file => file.lines.length <= 400));
+  for (const line of [120, 126, 223, 230, 257, 271, 316, 326, 900, 905]) {
+    assert.ok(transportLines.has(line), `missing ${transport}:${line}`);
+  }
+  for (const line of [50, 700, 705]) assert.ok(driverLines.has(line), `missing ${driver}:${line}`);
+  assert.equal(transportLines.has(700), false);
+});
+
 test('loads pinned NFS and RDMA driver files across a multi-file call path', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-rdma-source-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
