@@ -110,6 +110,28 @@ function comparisonGrounded(comparison, candidate, reference) {
     comparison.defenses.trim().length >= 12;
 }
 
+function sameRootComparisonGrounded(comparison, candidate, reference) {
+  if (!strongSameRootSignal(candidate, reference)) return false;
+  const keys = ['reachable_path', 'faulty_operation', 'violated_invariant', 'defenses',
+    'candidate_quote', 'reference_quote'];
+  if (!comparison || typeof comparison !== 'object' || Array.isArray(comparison) ||
+      Object.keys(comparison).sort().join(',') !== [...keys].sort().join(',') ||
+      keys.some(key => !validTextChars(comparison[key], 600)) ||
+      comparison.reachable_path.trim().length < 12 ||
+      comparison.faulty_operation.trim().length < 8 ||
+      comparison.violated_invariant.trim().length < 8 ||
+      comparison.defenses.trim().length < 12 ||
+      comparison.candidate_quote.trim().length < 24 ||
+      comparison.reference_quote.trim().length < 24) return false;
+  const referenceIds = rootIdentifiers(reference.report_excerpt);
+  const sharedIds = [...rootIdentifiers(candidate.report_excerpt)]
+    .filter(name => referenceIds.has(name));
+  const causalDetails = `${comparison.faulty_operation} ${comparison.violated_invariant}`;
+  return sharedIds.filter(name => causalDetails.includes(name)).length >= 2 &&
+    sharedIds.some(name => comparison.candidate_quote.includes(name)) &&
+    sharedIds.some(name => comparison.reference_quote.includes(name));
+}
+
 export function validateDuplicateBatch(result, candidate, references) {
   const parsed = result?.parsed ?? result;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
@@ -128,7 +150,8 @@ export function validateDuplicateBatch(result, candidate, references) {
     seen.add(row.management_id);
     const reference = byId.get(row.management_id);
     const ungrounded = row.verdict !== 'uncertain' &&
-      !comparisonGrounded(row.comparison, candidate, reference);
+      !comparisonGrounded(row.comparison, candidate, reference) &&
+      !(row.verdict === 'same' && sameRootComparisonGrounded(row.comparison, candidate, reference));
     reviews.push({ management_id: row.management_id,
       verdict: ungrounded ? 'uncertain' : row.verdict,
       reason: ungrounded ? '양쪽 보고서·PoC의 원인 인용 또는 도달 경로 비교 근거가 일치하지 않습니다.'

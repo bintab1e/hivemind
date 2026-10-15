@@ -258,6 +258,34 @@ test('identical PoC and overlapping causal source anchors trigger a focused dupl
   assert.equal(result.matched_management_id, 'A-044');
 });
 
+test('a grounded same-root verdict survives a model paraphrase of its causal quotes', async () => {
+  const poc = 'int main(void) { return run_read_chunks_and_check_rc_page_count(); }';
+  const cause = 'svc_rdma_recvfrom omits inline bytes so rc_page_count exceeds rc_pages before svc_rdma_clear_rqst_pages clears pointers.';
+  const newFinding = { ...candidate, file_path: 'net/sunrpc/xprtrdma/svc_rdma_rw.c',
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1148'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: `${poc}\n` };
+  const old = { ...reference('A-044'), file_path: newFinding.file_path,
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1147-1149'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+  let calls = 0;
+  const result = await reviewSubmittedDuplicateWithCodex(newFinding, [old], {
+    runner: async () => {
+      calls++;
+      return { reviews: [review('A-044', 'same', {
+        reachable_path: 'The same RPC-over-RDMA Read-list reaches svc_rdma_recvfrom.',
+        faulty_operation: 'svc_rdma_clear_rqst_pages indexes rc_pages with excessive rc_page_count.',
+        violated_invariant: 'rc_page_count must stay within the rc_pages allocation.',
+        defenses: 'The Read length check does not include inline data in either report.',
+        candidate_quote: 'The candidate says rc_page_count exceeds the available rc_pages entries.',
+        reference_quote: 'The reference also says rc_page_count exceeds its rc_pages allocation.',
+      })] };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.verdict, 'duplicate');
+  assert.equal(result.matched_management_id, 'A-044');
+});
+
 test('unresolved high-risk same-root signal does not silently register a new finding', async () => {
   const poc = 'int main(void) { return run_read_chunks_and_check_rc_page_count(); }';
   const cause = 'The Read-list budget omits inline bytes, then rc_page_count exceeds rc_pages before svc_rdma_clear_rqst_pages writes the pointers.';
