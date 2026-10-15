@@ -85,7 +85,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.doesNotMatch(text(primitiveCard), /커널|대상 커밋 없음/);
   assert.equal(elements.get('queue-worker-count').textContent, '4개');
   const duplicateCard = elements.get('queue-workers').children[3];
-  assert.match(text(duplicateCard), /중복 검토/);
+  assert.match(text(duplicateCard), /중복 검토 에이전트/);
   assert.match(text(duplicateCard), /duplicate in progress/);
   assert.match(text(duplicateCard), /대기 2건/);
   assert.doesNotMatch(text(duplicateCard), /커널/);

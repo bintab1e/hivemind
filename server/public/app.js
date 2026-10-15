@@ -1123,7 +1123,7 @@ function renderVerificationQueue() {
       .find(row => row.submission_id === worker.current_submission_id);
     const targetCommit = current?.target_commit || worker.target_commit;
     const track = (state.data?.tracks || []).find(item => item.repo_commit === targetCommit);
-    const target = primitive ? '프리미티브 검토' : duplicateWorker ? '중복 검토'
+    const target = primitive ? '프리미티브 검토' : duplicateWorker ? '중복 검토 에이전트'
       : track ? `${track.label || track.track_id} · ${track.version_id}`
         : targetCommit ? `커밋 ${targetCommit.slice(0, 12)}` : '공용 검증 에이전트';
     head.append(element('strong', 'queue-worker-target', target));
