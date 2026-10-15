@@ -441,8 +441,9 @@ function checkedPoc(db, submissionId, normalized) {
 function supportedStaticProof(db, submissionId, review, poc) {
   const checks = review.proof_review?.checks;
   if (review.proof_review?.verdict !== 'supports' || !checks ||
-      !['reachability', 'flaw', 'poc', 'log', 'defenses', 'admin_action']
-        .every(name => checks[name] === 'supported')) return false;
+      checks.flaw !== 'supported' || checks.admin_action !== 'supported' ||
+      !['reachability', 'poc', 'log', 'defenses']
+        .every(name => ['supported', 'uncertain'].includes(checks[name]))) return false;
   const proof = review.proof;
   const evidence = review.grounding?.evidence;
   if (!proof || !Array.isArray(evidence)) return false;

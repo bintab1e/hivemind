@@ -78,6 +78,32 @@ test('static screening preserves original C/log and never invokes a VM', async t
   assert.doesNotMatch(result.artifacts.report.content, /서버 VM에서.*관찰/);
 });
 
+test('grounded base flaw proceeds when only ancillary static checks remain uncertain', async t => {
+  const result = await processSubmissionJob(job, { config: config(t), reviewer,
+    sourceLoader: async () => trustedSource,
+    proofReviewer: async () => ({ ...await proofReviewer(),
+      reason: 'The flaw is supported; the submitted log does not independently prove this path.',
+      checks: { reachability: 'uncertain', flaw: 'supported', poc: 'uncertain',
+        log: 'uncertain', defenses: 'uncertain', admin_action: 'supported' } }) });
+  assert.equal(result.review.verdict, 'likely');
+  assert.equal(result.artifacts.log.content, log);
+});
+
+test('independent flaw uncertainty or a contradicted prerequisite still holds approval', async t => {
+  for (const checks of [
+    { reachability: 'supported', flaw: 'uncertain', poc: 'supported', log: 'supported',
+      defenses: 'supported', admin_action: 'supported' },
+    { reachability: 'contradicted', flaw: 'supported', poc: 'supported', log: 'supported',
+      defenses: 'supported', admin_action: 'supported' },
+  ]) {
+    const result = await processSubmissionJob(job, { config: config(t), reviewer,
+      sourceLoader: async () => trustedSource,
+      proofReviewer: async () => ({ ...await proofReviewer(), checks }) });
+    assert.equal(result.review.verdict, 'uncertain');
+    assert.equal(result.artifacts, undefined);
+  }
+});
+
 test('suspicious shortcut is never promoted even if source path is plausible', async t => {
   const result = await processSubmissionJob(job, { config: config(t), sourceLoader: async () => trustedSource,
     proofReviewer, reviewer: async () => ({ ...await reviewer(), integrity: { verdict: 'suspect', reason: 'Injected kernel delay' } }) });

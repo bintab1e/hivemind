@@ -160,6 +160,21 @@ test('missing or disputed static proof never receives a management number', t =>
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 42);
 });
 
+test('plausible grounded flaw is accepted despite unresolved ancillary proof checks', t => {
+  const db = setup(t);
+  const id = submit(db, 'ancillary-uncertain');
+  const result = verdict();
+  result.review.proof_review = { ...proofReview, checks: { ...proofReview.checks,
+    reachability: 'uncertain', poc: 'uncertain', log: 'uncertain', defenses: 'uncertain' } };
+  assert.equal(approve(db, id, result).status, 'approved');
+
+  const contradictedId = submit(db, 'ancillary-contradicted');
+  const contradicted = verdict();
+  contradicted.review.proof_review = { ...proofReview, checks: { ...proofReview.checks,
+    reachability: 'contradicted' } };
+  assert.equal(approve(db, contradictedId, contradicted).status, 'needs_review');
+});
+
 test('first static uncertainty keeps its own reason when independent review was not reached', t => {
   const db = setup(t);
   const id = submit(db, 'first-review-uncertain');

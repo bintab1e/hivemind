@@ -379,14 +379,14 @@ test('both static reviews distinguish a reserved client source port from target 
   assert.equal(confirmedProof.admin_trigger.operation, 'exportfs');
 });
 
-test('independent proof review only supports when every static check includes an unprivileged trigger', async t => {
+test('independent proof review supports a grounded flaw despite ancillary uncertainty', async t => {
   const first = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
     log: 'supported', defenses: 'supported', admin_action: 'supported' };
   const confirmed = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'supports', reason: 'All submitted claims match the shown source.', admin_action_required: false,
       admin_trigger: null, checks },
-    { type: 'turn.completed' }, 0, '<first-review>')));
+    { type: 'turn.completed' }, 0, ['<first-review>', 'confirmed artificial trigger is indispensable'])));
   assert.deepEqual(confirmed, { verdict: 'supports', reason: 'All submitted claims match the shown source.',
     admin_action_required: false, admin_trigger: null, checks });
   const ordinarySetup = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
@@ -394,13 +394,16 @@ test('independent proof review only supports when every static check includes an
       admin_action_required: false, admin_trigger: null, checks },
     { type: 'turn.completed' }, 0, 'QEMU VM preparation, network namespaces, Soft-RoCE/RDMA device setup')));
   assert.equal(ordinarySetup.admin_action_required, false);
-  const conflicting = { verdict: 'supports', reason: 'Unresolved guard.', checks: { ...checks, defenses: 'uncertain' } };
-  await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, conflicting,
-    { type: 'turn.completed' }, 0, '<first-review>'))),
-  error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'proof_review');
+  const ancillaryUncertainty = { verdict: 'supports', reason: 'Faulty operation is visible; other limits remain.',
+    admin_action_required: false, admin_trigger: null,
+    checks: { ...checks, reachability: 'uncertain', log: 'uncertain', defenses: 'uncertain' } };
+  const limited = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t, ancillaryUncertainty,
+    { type: 'turn.completed' }, 0, '<first-review>')));
+  assert.equal(limited.verdict, 'supports');
+  assert.equal(limited.checks.defenses, 'uncertain');
   const uncertain = await reviewStaticProofWithCodex(submission, first, options(fakeCli(t,
     { verdict: 'uncertain', reason: 'Missing guard context.', admin_action_required: false,
-      admin_trigger: null, checks: conflicting.checks },
+      admin_trigger: null, checks: ancillaryUncertainty.checks },
     { type: 'turn.completed' }, 0, '<first-review>')));
   assert.equal(uncertain.verdict, 'uncertain');
   const mountSubmission = { ...submission, files: submission.files.map((file, index) => index === 1
@@ -426,6 +429,10 @@ test('independent proof review only supports when every static check includes an
     { verdict: 'supports', reason: 'Missing assessment.', admin_action_required: false,
       admin_trigger: null, checks: { ...checks, admin_action: 'uncertain' } },
     { verdict: 'supports', reason: 'Missing flag.', admin_trigger: null, checks },
+    { verdict: 'supports', reason: 'The base flaw is not established.', admin_action_required: false,
+      admin_trigger: null, checks: { ...checks, flaw: 'uncertain' } },
+    { verdict: 'supports', reason: 'A guard defeats the flaw.', admin_action_required: false,
+      admin_trigger: null, checks: { ...checks, defenses: 'contradicted' } },
   ]) {
     await assert.rejects(reviewStaticProofWithCodex(submission, first, options(fakeCli(t, invalid,
       { type: 'turn.completed' }, 0, '<first-review>'))),
@@ -569,7 +576,7 @@ if (count === 1) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify
   const retryPrompt = fs.readFileSync(path.join(dir, 'prompt-2'), 'utf8');
   assert.doesNotMatch(firstPrompt, /previous draft failed local validation/i);
   assert.match(retryPrompt, /pre_auth claim requires source_path and source_line exactly in trusted source_evidence, poc_line in the original C PoC, and nfs_version=null/);
-  assert.match(retryPrompt, /return uncertain rather than claiming likely/);
+  assert.match(retryPrompt, /set pre_auth=null and assess the narrower base flaw on its own/);
   assert.doesNotMatch(retryPrompt, /PRIVATE_EVIDENCE/);
 });
 

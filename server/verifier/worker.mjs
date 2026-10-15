@@ -197,9 +197,11 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       review.reason = 'Independent review could not rule out a required administrator action';
       return { review, reproduction: notRun };
     }
+    const checks = review.proof_review?.checks;
     if (review.proof_review?.verdict !== 'supports' ||
-        !['reachability', 'flaw', 'poc', 'log', 'defenses', 'admin_action']
-          .every(name => review.proof_review.checks?.[name] === 'supported')) {
+        checks?.flaw !== 'supported' || checks?.admin_action !== 'supported' ||
+        !['reachability', 'poc', 'log', 'defenses']
+          .every(name => ['supported', 'uncertain'].includes(checks?.[name]))) {
       review.verdict = 'uncertain';
       review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`.slice(0, 1000);
       return { review, reproduction: notRun };
