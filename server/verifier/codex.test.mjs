@@ -479,6 +479,14 @@ test('canonicalizes common permission and NFS version aliases, rejecting ambiguo
     error => error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'report_format');
 });
 
+test('normalizes a grounded access-control bypass without changing its authentication requirement', async t => {
+  const bypass = structuredClone(answer);
+  bypass.normalized.vulnerability_type = 'Access Control Bypass';
+  const reviewed = await reviewSubmissionWithCodex(submission, options(fakeCli(t, bypass)));
+  assert.equal(reviewed.normalized.vulnerability_type, 'Authorization Bypass');
+  assert.equal(reviewed.normalized.permission, 'AUTH_SYS');
+});
+
 test('keeps build settings and concise NFS features out of option prose', async t => {
   const build = structuredClone(answer);
   build.normalized.options = 'CONFIG_NFSD=y, CONFIG_NFSD_V4=y, CONFIG_SUNRPC_XPRT_RDMA=y; iWARP listener on TCP port 20049';

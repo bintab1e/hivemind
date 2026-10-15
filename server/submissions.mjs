@@ -449,9 +449,10 @@ function checkedPoc(db, submissionId, normalized) {
 
 function supportedStaticProof(db, submissionId, review, poc) {
   const checks = review.proof_review?.checks;
-  if (review.proof_review?.verdict !== 'supports' || !checks ||
+  if (!['supports', 'uncertain'].includes(review.proof_review?.verdict) || !checks ||
       checks.flaw !== 'supported' || checks.admin_action !== 'supported' ||
-      !['reachability', 'poc', 'log', 'defenses']
+      checks.poc !== 'supported' || checks.log !== 'supported' ||
+      !['reachability', 'defenses']
         .every(name => ['supported', 'uncertain'].includes(checks[name]))) return false;
   const proof = review.proof;
   const evidence = review.grounding?.evidence;
@@ -526,12 +527,13 @@ function canonicalVulnerabilityType(input) {
     ['out of bounds read', 'OOB Read'], ['oob write', 'OOB Write'], ['out of bounds write', 'OOB Write'],
     ['uninitialized read', 'Uninitialized Read'], ['integer overflow', 'Integer Overflow'],
     ['resource leak', 'Resource Leak'], ['memory leak', 'Resource Leak'], ['logical', 'Logical'],
+    ['authorization bypass', 'Authorization Bypass'], ['access control bypass', 'Authorization Bypass'],
     ['double free', 'Double Free'], ['null dereference', 'NULL Dereference'], ['type confusion', 'Type Confusion'],
   ]);
   if (typeof input !== 'string') return null;
   const parts = input.split(',').map(part => aliases.get(part.trim().toLowerCase()));
   const order = ['Race', 'UAF', 'OOB Read', 'OOB Write', 'Uninitialized Read', 'Integer Overflow',
-    'Resource Leak', 'Logical', 'Double Free', 'NULL Dereference', 'Type Confusion'];
+    'Resource Leak', 'Logical', 'Authorization Bypass', 'Double Free', 'NULL Dereference', 'Type Confusion'];
   return parts.length && parts.length <= 4 && parts.every(Boolean)
     ? [...new Set(parts)].sort((left, right) => order.indexOf(left) - order.indexOf(right)).join(', ') : null;
 }
@@ -828,16 +830,21 @@ export function completeSubmission(db, id, result, leaseToken) {
       db.exec('COMMIT'); return out;
     }
     const nfsVersion = canonicalNfsVersion(normalized.nfs_version);
-    const submittedVersion = metadata.nfs_version == null ? null : canonicalNfsVersion(metadata.nfs_version);
     const preAuth = normalized.pre_auth;
-    const preAuthMode = preAuth != null && normalized.nfs_version == null && submittedVersion === null;
-    const versionedMode = preAuth == null && nfsVersion && (metadata.nfs_version == null || submittedVersion === nfsVersion);
+    const preAuthMode = preAuth != null && normalized.nfs_version == null;
+    const versionedMode = preAuth == null && !!nfsVersion;
     const privilege = canonicalPermission(normalized.permission);
     const vulnerabilityType = canonicalVulnerabilityType(normalized.vulnerability_type);
-    if (!title || !filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..') ||
-        !preAuthMode && !versionedMode || !privilege || !vulnerabilityType ||
-        preAuthMode && privilege !== 'Pre-auth' || versionedMode && privilege === 'Pre-auth') {
-      const out = mark(db, id, 'needs_review', 'Static finding lacks consistent title, source path, NFS version, permission or vulnerability type', summary);
+    const metadataIssues = [];
+    if (!title) metadataIssues.push('title');
+    if (!filePath || !nfsPath.test(filePath) || filePath.split('/').includes('..')) metadataIssues.push('source path');
+    if (!preAuthMode && !versionedMode) metadataIssues.push('NFS version or pre-auth reachability');
+    if (!privilege || preAuthMode && privilege !== 'Pre-auth' || versionedMode && privilege === 'Pre-auth') {
+      metadataIssues.push('permission');
+    }
+    if (!vulnerabilityType) metadataIssues.push('vulnerability type');
+    if (metadataIssues.length) {
+      const out = mark(db, id, 'needs_review', `Static finding metadata needs correction: ${metadataIssues.join(', ')}`, summary);
       db.exec('COMMIT'); return out;
     }
     let poc;

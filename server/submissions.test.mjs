@@ -99,6 +99,57 @@ test('static-screened submission receives a number only after duplicate review, 
   assert.deepEqual(data.code_refs, ['fs/nfsd/nfs4proc.c:42']);
 });
 
+test('grounded review corrects submitted NFS version and preserves a proven pre-auth path', t => {
+  const db = setup(t);
+  const corrected = approve(db, submit(db, 'corrected-version', { nfs_version: '3' }));
+  assert.equal(corrected.status, 'approved');
+  assert.equal(listRegistry(db).find(row => row.management_id === corrected.management_id).nfs_version, '4.2');
+
+  const id = submit(db, 'pre-auth', { nfs_version: '4.2' });
+  const result = verdict();
+  result.review.normalized.nfs_version = null;
+  result.review.normalized.permission = 'Pre-auth';
+  result.review.normalized.pre_auth = { source_path: 'fs/nfsd/nfs4proc.c', source_line: 41, poc_line: 1 };
+  const accepted = approve(db, id, result);
+  assert.equal(accepted.status, 'approved');
+  const row = listRegistry(db).find(item => item.management_id === accepted.management_id);
+  assert.equal(row.privilege, 'Pre-auth');
+  assert.equal(row.nfs_version, null);
+});
+
+test('authorization bypass is a supported finding type while unknown types get a specific hold reason', t => {
+  const db = setup(t);
+  const valid = verdict();
+  valid.review.normalized.vulnerability_type = 'Access Control Bypass';
+  const accepted = approve(db, submit(db, 'authz-bypass'), valid);
+  assert.equal(accepted.status, 'approved');
+  assert.equal(listRegistry(db).find(row => row.management_id === accepted.management_id).vulnerability_type,
+    'Authorization Bypass');
+
+  const invalid = verdict();
+  invalid.review.normalized.vulnerability_type = 'Unknown Bypass';
+  const held = approve(db, submit(db, 'unknown-type'), invalid);
+  assert.equal(held.status, 'needs_review');
+  assert.match(held.reason, /vulnerability type/);
+  assert.doesNotMatch(held.reason, /title|source path|permission/);
+});
+
+test('static metadata hold names only the unresolved fields', t => {
+  const db = setup(t);
+  for (const [label, change, expected] of [
+    ['title', finding => { finding.normalized.title = 'short'; }, /title/],
+    ['NFS version', finding => { finding.normalized.nfs_version = null; }, /NFS version or pre-auth reachability/],
+    ['permission', finding => { finding.normalized.permission = null; }, /permission/],
+  ]) {
+    const result = verdict();
+    change(result.review);
+    const held = approve(db, submit(db, `bad-${label.replaceAll(' ', '-')}`), result);
+    assert.equal(held.status, 'needs_review');
+    assert.match(held.reason, expected);
+    assert.doesNotMatch(held.reason, /vulnerability type|source path/);
+  }
+});
+
 test('static screening stages evidence without registering or numbering the finding', t => {
   const db = setup(t);
   const id = submit(db, 'staged');
@@ -197,9 +248,14 @@ test('plausible grounded flaw is accepted despite unresolved ancillary proof che
   const db = setup(t);
   const id = submit(db, 'ancillary-uncertain');
   const result = verdict();
-  result.review.proof_review = { ...proofReview, checks: { ...proofReview.checks,
-    reachability: 'uncertain', poc: 'uncertain', log: 'uncertain', defenses: 'uncertain' } };
+  result.review.proof_review = { ...proofReview, verdict: 'uncertain', checks: { ...proofReview.checks,
+    reachability: 'uncertain', defenses: 'uncertain' } };
   assert.equal(approve(db, id, result).status, 'approved');
+
+  const uncertainLog = verdict();
+  uncertainLog.review.proof_review = { ...proofReview, verdict: 'uncertain', checks: { ...proofReview.checks,
+    log: 'uncertain' } };
+  assert.equal(approve(db, submit(db, 'uncertain-log'), uncertainLog).status, 'needs_review');
 
   const contradictedId = submit(db, 'ancillary-contradicted');
   const contradicted = verdict();

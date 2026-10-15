@@ -48,6 +48,33 @@ function causalSection(report) {
   return (next ? rest.slice(0, next.index) : rest).trim();
 }
 
+function sourcePaths(row) {
+  return [row.file_path, ...row.code_refs].flatMap(value => {
+    const match = /^([A-Za-z0-9_./+-]+\.[ch])(?::\d+(?::\d+)?)?$/.exec(value || '');
+    return match ? [match[1].replace(/^\.\//, '')] : [];
+  });
+}
+
+function causeIdentifiers(report) {
+  if (!/^#{1,4}\s+(?:Root cause|근본 원인|취약점 원인|원인 분석)\s*$/im.test(report)) return [];
+  return [...causalSection(report).matchAll(/`([a-z][A-Za-z0-9]*_[A-Za-z0-9_]+)`|\b([a-z][A-Za-z0-9]*_[A-Za-z0-9_]+)\s*\(/g)]
+    .map(match => match[1] || match[2]);
+}
+
+function materialUncertainty(candidate, reference) {
+  if (reference.target !== candidate.target) return false;
+  if (reference.management_id === candidate.requested_management_id) return true;
+  const paths = new Set(sourcePaths(candidate));
+  if (sourcePaths(reference).some(value => paths.has(value))) return true;
+  const identifiers = new Set(causeIdentifiers(candidate.report_excerpt));
+  return causeIdentifiers(reference.report_excerpt).some(value => identifiers.has(value));
+}
+
+function holdReason(prefix, rows) {
+  const details = rows.slice(0, 3).map(row => `${row.management_id}: ${row.reason.slice(0, 120)}`);
+  return `${prefix} ${details.join(' / ')}${rows.length > 3 ? ` / 외 ${rows.length - 3}건` : ''}`;
+}
+
 function comparisonGrounded(comparison, candidate, reference) {
   const keys = ['reachable_path', 'faulty_operation', 'violated_invariant', 'defenses',
     'candidate_quote', 'reference_quote'];
@@ -82,10 +109,12 @@ export function validateDuplicateBatch(result, candidate, references) {
         row.verdict === 'uncertain' && row.comparison !== null) throw new Error('invalid_duplicate_review');
     seen.add(row.management_id);
     const reference = byId.get(row.management_id);
+    const ungrounded = row.verdict !== 'uncertain' &&
+      !comparisonGrounded(row.comparison, candidate, reference);
     reviews.push({ management_id: row.management_id,
-      verdict: row.verdict !== 'uncertain' && !comparisonGrounded(row.comparison, candidate, reference)
-        ? 'uncertain' : row.verdict,
-      reason: row.reason.trim().replace(/\s+/g, ' ') });
+      verdict: ungrounded ? 'uncertain' : row.verdict,
+      reason: ungrounded ? '양쪽 보고서의 원인 인용 또는 도달 경로 비교 근거가 일치하지 않습니다.'
+        : row.reason.trim().replace(/\s+/g, ' ') });
   }
   return reviews;
 }
@@ -99,7 +128,7 @@ export async function reviewSubmittedDuplicateWithCodex(candidateInput, referenc
     reason: '검증된 분석 보고서가 없어 기존 취약점과 근본 원인을 대조할 수 없습니다.' };
   if (candidate.requested_management_id && !references.some(row => row.management_id === candidate.requested_management_id)) {
     return { verdict: 'uncertain', matched_management_id: null,
-      reason: '제출된 보강 대상 취약점을 현재 등록 목록에서 찾을 수 없습니다.' };
+      reason: `${candidate.requested_management_id}: 제출된 보강 대상 취약점을 현재 등록 목록에서 찾을 수 없습니다.` };
   }
   const runner = options.runner ?? runStructuredCodex;
   const reviews = [];
@@ -121,19 +150,26 @@ export async function reviewSubmittedDuplicateWithCodex(candidateInput, referenc
       workRoot: options.workRoot, timeoutMs: 180_000 });
     reviews.push(...validateDuplicateBatch(response, candidate, available));
   }
-  const same = reviews.filter(row => row.verdict === 'same');
-  const uncertain = reviews.filter(row => row.verdict === 'uncertain');
+  const byId = new Map(references.map(row => [row.management_id, row]));
+  const same = reviews.filter(row => row.verdict === 'same' &&
+    byId.get(row.management_id).target === candidate.target);
+  const uncertain = reviews.filter(row => row.verdict === 'uncertain' &&
+    materialUncertainty(candidate, byId.get(row.management_id)));
   if (same.length === 1 && !uncertain.length) {
-    const match = references.find(row => row.management_id === same[0].management_id);
-    if (match.target === candidate.target && !['중복', '철회'].includes(match.report_status)) {
+    const match = byId.get(same[0].management_id);
+    if (!['중복', '철회'].includes(match.report_status)) {
       return { verdict: 'duplicate', matched_management_id: match.management_id,
         reason: `기존 ${match.management_id}과 도달 경로, 잘못된 동작, 깨진 조건이 일치합니다. ${same[0].reason}`.slice(0, 1800) };
     }
   }
-  if (same.length || uncertain.length) return { verdict: 'uncertain', matched_management_id: null,
-    reason: same.length > 1 ? '동일 원인 후보가 여럿이어서 병합 대상을 확정할 수 없습니다.' :
-      same.length ? '다른 프로젝트 또는 비활성 기록과의 동일 원인 가능성은 수동 확인이 필요합니다.' :
-        '일부 기존 취약점의 원인·도달 경로를 대조할 근거가 부족합니다.' };
+  if (same.length || uncertain.length) {
+    const blockers = [...same.map(row => ['중복', '철회'].includes(byId.get(row.management_id).report_status)
+      ? { ...row, reason: '중복·철회 상태의 기록으로 자동 병합할 수 없습니다.' } : row), ...uncertain];
+    return { verdict: 'uncertain', matched_management_id: null,
+      reason: holdReason(same.length > 1 ? '동일 원인 후보가 여러 건입니다.' :
+        same.length ? '병합 대상 또는 추가 원인 비교가 불확실합니다.' :
+          '관련 기존 취약점의 원인 비교가 불확실합니다.', blockers) };
+  }
   return { verdict: 'new', matched_management_id: null,
-    reason: '등록된 A/B/C 취약점의 도달 경로, 잘못된 동작, 깨진 조건을 각각 대조했으며 동일 원인을 확인하지 못했습니다.' };
+    reason: '비교 가능한 기존 knfsd 취약점에서 동일한 도달 경로와 근본 원인을 확인하지 못했습니다.' };
 }

@@ -187,9 +187,10 @@ export async function processSubmissionJob(job, { config, reviewer = reviewSubmi
       return { review, reproduction: notRun };
     }
     const checks = review.proof_review?.checks;
-    if (review.proof_review?.verdict !== 'supports' ||
+    if (!['supports', 'uncertain'].includes(review.proof_review?.verdict) ||
         checks?.flaw !== 'supported' || checks?.admin_action !== 'supported' ||
-        !['reachability', 'poc', 'log', 'defenses']
+        checks?.poc !== 'supported' || checks?.log !== 'supported' ||
+        !['reachability', 'defenses']
           .every(name => ['supported', 'uncertain'].includes(checks?.[name]))) {
       review.verdict = 'uncertain';
       review.reason = `Independent static challenge did not confirm the claim: ${review.proof_review?.reason || 'insufficient evidence'}`;
