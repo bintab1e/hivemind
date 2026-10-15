@@ -196,11 +196,9 @@ footer a{color:#b9a8fb}
 .detail-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 #queue-detail[open]{overflow:auto}
 #queue-detail .dialog-top,#queue-detail .detail-summary{flex:none}
-#detail .dialog-top{flex:none;max-height:22vh;overflow-y:auto}
-#detail .detail-summary{flex:none;max-height:36vh;overflow-y:auto}
-#detail .detail-revision-controls,#detail .detail-tabs{flex:none}
+#detail[open]{display:block;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;scrollbar-color:#4d5265 #11151e}
 #detail .detail-tabs{overflow-x:auto;overflow-y:hidden}
-#detail .detail-content{flex:1 1 auto;min-height:0}
+#detail .detail-content{overflow:visible;min-height:auto}
 .dialog-top{display:flex;justify-content:space-between;gap:15px;padding:22px 24px 16px}
 .dialog-top h2{font-size:20px;line-height:1.35;margin-bottom:7px}
 .dialog-top .icon-button{flex:none}

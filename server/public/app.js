@@ -814,7 +814,6 @@ function openFinding(finding, tab = 'report') {
   const displayDate = finding.origin === 'history' ? finding.found_date || '—' : when(finding.created_at || finding.found_date);
   $('detail-subtitle').textContent = `${[finding.vulnerability_id, finding.management_id].filter(Boolean).join(' · ') || '취약점 ID 미부여'} · ${finding.target || '대상 미지정'} · ${displayDate}`;
   clear($('detail-summary'));
-  $('detail-summary').scrollTop = 0;
   if (finding.vulnerability_id) $('detail-summary').append(detailFact('취약점 ID', finding.vulnerability_id));
   if (finding.vulnerability_aliases?.length) $('detail-summary').append(
     detailFact('병합된 접수 ID', finding.vulnerability_aliases.join(', ')));
@@ -841,6 +840,7 @@ function openFinding(finding, tab = 'report') {
     }
     appendDuplicateReviews(finding);
     if (!$('detail').open) $('detail').showModal();
+    $('detail').scrollTop = 0;
     showDetailTab();
     return;
   }
@@ -874,6 +874,7 @@ function openFinding(finding, tab = 'report') {
   }
   appendDuplicateReviews(finding);
   if (!$('detail').open) $('detail').showModal();
+  $('detail').scrollTop = 0;
   showDetailTab();
 }
 
@@ -929,7 +930,6 @@ async function showDetailTab() {
     else button.removeAttribute('aria-current');
   }
   const content = $('detail-content');
-  content.scrollTop = 0;
   clear(content);
   content.append(element('p', '', '자료를 불러오는 중…'));
   try {
