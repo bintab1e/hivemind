@@ -388,6 +388,75 @@ test('both static reviews distinguish a reserved client source port from target 
   assert.equal(confirmedProof.admin_trigger.operation, 'exportfs');
 });
 
+test('first review retries twice for malformed administrator anchors before accepting the grounded finding', async t => {
+  const labMount = { ...submission,
+    report: 'The client is already mounted; victim-init.sh mounts it only to prepare the VM lab.',
+    files: submission.files.map((file, index) => index === 1
+      ? { ...file, content: 'int main(void) { return bind(3, 0, 0); }\n' } : file)
+      .concat({ name: 'victim-init.sh', content: 'mount -t nfs server:/ /mnt\n' }) };
+  const malformed = structuredClone(answer);
+  malformed.verdict = 'unlikely';
+  malformed.integrity = { verdict: 'suspect', reason: 'PRIVATE_EVIDENCE: client bind requires root.',
+    admin_action_required: true, admin_trigger: { file_index: 1, line: 1, operation: 'bind' } };
+  malformed.proof = null;
+  const cli = fakeCli(t, answer);
+  const dir = path.dirname(cli);
+  fs.appendFileSync(cli, `
+const countPath = ${JSON.stringify(path.join(dir, 'admin-attempts'))};
+const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+fs.writeFileSync(${JSON.stringify(path.join(dir, 'admin-prompt-'))} + count, prompt);
+if (count < 3) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(malformed))});
+`);
+  const reviewed = await reviewSubmissionWithCodex(labMount, options(cli));
+  assert.equal(reviewed.verdict, 'likely');
+  assert.equal(reviewed.integrity.admin_action_required, false);
+  assert.equal(fs.readFileSync(path.join(dir, 'admin-attempts'), 'utf8'), '3');
+  const firstPrompt = fs.readFileSync(path.join(dir, 'admin-prompt-1'), 'utf8');
+  const finalPrompt = fs.readFileSync(path.join(dir, 'admin-prompt-3'), 'utf8');
+  assert.match(firstPrompt, /already-mounted/i);
+  assert.match(firstPrompt, /fresh privileged victim mount/i);
+  assert.match(finalPrompt, /previous draft failed local validation/i);
+  assert.match(finalPrompt, /client.*(?:bind|source.port)/i);
+  assert.doesNotMatch(finalPrompt, /PRIVATE_EVIDENCE/);
+});
+
+test('independent proof retries a malformed administrator anchor and preserves the lab-mount distinction', async t => {
+  const labMount = { ...submission,
+    report: 'The client is already mounted; victim-init.sh mounts it only to prepare the VM lab.',
+    files: submission.files.map((file, index) => index === 1
+      ? { ...file, content: 'int main(void) { return bind(3, 0, 0); }\n' } : file)
+      .concat({ name: 'victim-init.sh', content: 'mount -t nfs server:/ /mnt\n' }) };
+  const first = await reviewSubmissionWithCodex(labMount, options(fakeCli(t, answer)));
+  const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
+    log: 'supported', defenses: 'supported', admin_action: 'supported' };
+  const valid = { verdict: 'supports', reason: 'The only privileged mount prepares an already-mounted lab client.',
+    admin_action_required: false, admin_trigger: null, checks };
+  const malformed = { verdict: 'refutes', reason: 'PRIVATE_EVIDENCE: client bind requires root.',
+    admin_action_required: true, admin_trigger: { file_index: 1, line: 1, operation: 'bind' },
+    checks: { ...checks, admin_action: 'contradicted' } };
+  const cli = fakeCli(t, valid, { type: 'turn.completed' }, 0, '<first-review>');
+  const dir = path.dirname(cli);
+  fs.appendFileSync(cli, `
+const countPath = ${JSON.stringify(path.join(dir, 'proof-admin-attempts'))};
+const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+fs.writeFileSync(${JSON.stringify(path.join(dir, 'proof-admin-prompt-'))} + count, prompt);
+if (count === 1) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(malformed))});
+`);
+  const result = await reviewStaticProofWithCodex(labMount, first, options(cli));
+  assert.equal(result.verdict, 'supports');
+  assert.equal(result.admin_action_required, false);
+  assert.equal(fs.readFileSync(path.join(dir, 'proof-admin-attempts'), 'utf8'), '2');
+  const firstPrompt = fs.readFileSync(path.join(dir, 'proof-admin-prompt-1'), 'utf8');
+  const retryPrompt = fs.readFileSync(path.join(dir, 'proof-admin-prompt-2'), 'utf8');
+  assert.match(firstPrompt, /already-mounted/i);
+  assert.match(firstPrompt, /fresh privileged victim mount/i);
+  assert.match(retryPrompt, /previous draft cited an invalid administrator trigger/i);
+  assert.match(retryPrompt, /client.*(?:bind|source.port)/i);
+  assert.doesNotMatch(retryPrompt, /PRIVATE_EVIDENCE/);
+});
+
 test('independent proof review supports a grounded flaw despite ancillary uncertainty', async t => {
   const first = await reviewSubmissionWithCodex(submission, options(fakeCli(t, answer)));
   const checks = { reachability: 'supported', flaw: 'supported', poc: 'supported',
