@@ -116,11 +116,43 @@ export async function loadTrustedKernelSource(sourceDir, expectedCommit, submiss
     ({ stdout: status } = await git('git', ['-C', root, 'status', '--porcelain', '--untracked-files=all'], { timeout: 30_000, maxBuffer: 1_000_000 }));
   } catch { throw new CodexReviewError('source_unavailable'); }
   if (head.trim() !== expectedCommit || status.trim()) throw new CodexReviewError('source_commit_or_cleanliness_mismatch');
-  const references = [submission.metadata?.file_path, ...(Array.isArray(submission.metadata?.code_refs) ? submission.metadata.code_refs : []),
-    submission.report, ...(Array.isArray(submission.files) ? submission.files.map(file => file.content) : [])]
-    .filter(value => typeof value === 'string');
-  const names = [...new Set(references.flatMap(value => [...value.matchAll(sourcePathPattern)].map(match => match[0])))]
-    .filter(name => name.split('/').every(part => part && part !== '.' && part !== '..')).slice(0, maxTrustedSourceFiles);
+  const codeRefs = Array.isArray(submission.metadata?.code_refs) ? submission.metadata.code_refs : [];
+  const attachedFiles = Array.isArray(submission.files) ? submission.files : [];
+  const reports = [submission.report, ...attachedFiles
+    .filter(file => file.kind === 'report' || /\.md$/i.test(file.name || ''))
+    .map(file => file.content)].filter(value => typeof value === 'string');
+  const references = [submission.metadata?.file_path, ...codeRefs, submission.report,
+    ...attachedFiles.map(file => file.content)].filter(value => typeof value === 'string');
+  // Select the most relevant pinned source files before applying the excerpt limit.
+  const ranked = new Map();
+  const addPaths = (value, priority, countCodeRef = false) => {
+    if (typeof value !== 'string') return;
+    for (const match of value.matchAll(sourcePathPattern)) {
+      const name = match[0];
+      if (!name.split('/').every(part => part && part !== '.' && part !== '..')) continue;
+      const citedLine = /^:\d{1,7}\b/.test(value.slice(match.index + name.length));
+      const entry = ranked.get(name) || { priority: 0, codeRefs: new Set(), order: ranked.size };
+      entry.priority = Math.max(entry.priority, priority + (citedLine ? 1 : 0));
+      if (countCodeRef) entry.codeRefs.add(value);
+      ranked.set(name, entry);
+    }
+  };
+  for (const ref of references) addPaths(ref, 1);
+  for (const ref of codeRefs) addPaths(ref, 3, true);
+  for (const report of reports) {
+    addPaths(report, 4);
+    const heading = /^##[ \t]+Root cause[ \t]*$/gmi.exec(report);
+    if (heading) {
+      const rest = report.slice(heading.index + heading[0].length);
+      const next = /^##[ \t]+/m.exec(rest);
+      addPaths(next ? rest.slice(0, next.index) : rest, 5);
+    }
+  }
+  addPaths(submission.metadata?.file_path, 6);
+  const names = [...ranked.entries()]
+    .sort((a, b) => b[1].priority - a[1].priority ||
+      Math.min(b[1].codeRefs.size, 4) - Math.min(a[1].codeRefs.size, 4) || a[1].order - b[1].order)
+    .slice(0, maxTrustedSourceFiles).map(([name]) => name);
   if (!names.length) throw new CodexReviewError('source_reference_missing');
   const files = [];
   for (const name of names) {

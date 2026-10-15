@@ -955,6 +955,38 @@ test('loads pinned NFS and RDMA driver files across a multi-file call path', asy
   assert.equal(reviewed.grounding.evidence[1].text, 'int flaw(void) { return 1; }');
 });
 
+test('keeps a later root-cause source citation when more than eight files are referenced', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-root-cause-priority-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const entry = 'net/sunrpc/xprtrdma/svc_rdma_transport.c';
+  const earlier = Array.from({ length: 8 }, (_, index) => `net/sunrpc/xprtrdma/helper_${index + 1}.c`);
+  const flaw = 'net/sunrpc/xprtrdma/svc_rdma_rw.c';
+  for (const name of [entry, ...earlier, flaw]) {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, name === flaw
+      ? Array.from({ length: 600 }, (_, index) => `int source_line_${index + 1};`).join('\n')
+      : 'int entry(void) { return 0; }\n');
+  }
+  const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  run('init', '-q');
+  run('config', 'user.name', 'Test');
+  run('config', 'user.email', 'test@example.invalid');
+  run('add', '.');
+  run('commit', '-qm', 'fixture');
+  const commit = run('rev-parse', 'HEAD');
+  const source = await loadTrustedKernelSource(dir, commit, {
+    metadata: { file_path: `${entry}:1`, code_refs: earlier.map(name => `${name}:1`) },
+    report: `## Root cause\nThe faulty operation is at ${flaw}:512.`,
+  });
+  assert.ok(source.files.length <= 8);
+  assert.ok(source.files.some(file => file.path === entry));
+  const excerpt = source.files.find(file => file.path === flaw);
+  assert.ok(excerpt, `missing root-cause file ${flaw}`);
+  assert.deepEqual(excerpt.lines.find(line => line.number === 512),
+    { number: 512, text: 'int source_line_512;' });
+});
+
 test('static likely verdict cannot cite a source line that is absent from the trusted checkout', async t => {
   const ungrounded = structuredClone(answer);
   ungrounded.normalized.source_evidence[0].line = 99;
