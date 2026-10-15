@@ -21,7 +21,7 @@ const accessLabels = {
   authenticated_client: '인증된 클라이언트', malicious_server: '악성 서버',
   local_user: '로컬 사용자', local_privileged: '로컬 관리자',
 };
-const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1, 'duplicate-pending': 1, 'duplicate-active': 1, 'duplicate-errors': 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, detailId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
+const state = { data: null, registry: null, queue: null, queueError: null, queueRequestId: 0, queuePages: { pending: 1, active: 1, blocked: 1 }, coverage: null, coverageAgent: '', coveragePage: 1, coverageSortKey: 'unread', coverageSortDir: 'desc', findingPage: 1, findingSortKey: 'management_id', findingSortDir: 'asc', finding: null, detailTab: 'report', detailRevision: '', detailRevisionRequestId: 0, refreshId: 0, editMode: false, editingFindingId: null, editingDraft: null, editSaving: false, editError: null };
 const agentName = id => {
   const profile = (state.data?.agent_profiles || []).find(item => item.agent_id === id);
   return [profile?.client_name || id, profile?.model_id].filter(Boolean).join(' · ');
@@ -1082,16 +1082,13 @@ function renderQueueList(id, rows, emptyMessage) {
 }
 
 function renderVerificationQueue() {
-  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked',
-    'queue-duplicate-pending', 'queue-duplicate-active', 'queue-duplicate-errors']) clear($(id));
+  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked']) clear($(id));
   if (state.queueError) {
-    for (const id of ['queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination',
-      'queue-duplicate-pending-pagination', 'queue-duplicate-active-pagination', 'queue-duplicate-errors-pagination']) $(id).hidden = true;
+    for (const id of ['queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination']) $(id).hidden = true;
     if ($('queue-detail').open) $('queue-detail').close();
     $('queue-updated').textContent = '조회 실패';
     $('queue-worker-count').textContent = '';
     for (const id of ['queue-active-count', 'queue-pending-count', 'queue-blocked-count']) $(id).textContent = '';
-    for (const id of ['queue-duplicate-count', 'queue-duplicate-pending-count', 'queue-duplicate-active-count', 'queue-duplicate-errors-count']) $(id).textContent = '';
     const message = element('div', 'table-empty queue-error', `검증 큐를 불러오지 못했습니다: ${state.queueError.message}`);
     message.setAttribute('role', 'alert');
     $('queue-active').append(message);
@@ -1100,19 +1097,22 @@ function renderVerificationQueue() {
   const queue = state.queue;
   if (!queue) return;
   const duplicate = queue.duplicate || { pending: [], active: [], errors: [], counts: { pending: 0, processing: 0, error: 0 } };
+  const pending = [...queue.pending, ...duplicate.pending];
+  const active = [...queue.active, ...duplicate.active];
+  const blocked = [...queue.blocked, ...duplicate.errors];
   $('queue-updated').textContent = `마지막 확인 ${when(queue.fetched_at)}`;
   for (const [label, count, tone] of [
-    ['검증 중', queue.counts.processing, 'accent'],
-    ['검증 대기', queue.counts.pending, ''],
-    ['반려 · 보완 · 오류', queue.counts.blocked, ''],
+    ['검증 중', queue.counts.processing + duplicate.counts.processing, 'accent'],
+    ['검증 대기', queue.counts.pending + duplicate.counts.pending, ''],
+    ['반려 · 보완 · 오류', queue.counts.blocked + duplicate.counts.error, ''],
   ]) {
     const item = element('div', `strip-stat ${tone}`);
     item.append(element('span', '', label), element('strong', '', number(count)));
     $('queue-stats').append(item);
   }
   $('queue-worker-count').textContent = `${number(queue.workers.length)}개`;
-  for (const [id, count] of [['queue-active-count', queue.active.length], ['queue-pending-count', queue.pending.length], ['queue-blocked-count', queue.blocked.length]]) $(id).textContent = `${number(count)}건`;
-  if (queue.blocked_has_more) $('queue-blocked-count').textContent = `최근 ${number(queue.blocked.length)}건 · 전체 ${number(queue.counts.blocked)}건`;
+  for (const [id, count] of [['queue-active-count', active.length], ['queue-pending-count', pending.length], ['queue-blocked-count', blocked.length]]) $(id).textContent = `${number(count)}건`;
+  if (queue.blocked_has_more) $('queue-blocked-count').textContent = `최근 ${number(blocked.length)}건 · 전체 ${number(queue.counts.blocked + duplicate.counts.error)}건`;
   if (!queue.workers.length) $('queue-workers').append(element('p', 'coverage-agent-empty', '연결된 검증 에이전트가 없습니다.'));
   for (const worker of queue.workers) {
     const card = element('div', 'queue-worker-card');
@@ -1163,19 +1163,11 @@ function renderVerificationQueue() {
     board.append(columns);
     $('queue-workers').append(board);
   }
-  $('queue-duplicate-count').textContent = `${number(duplicate.counts.pending + duplicate.counts.processing + duplicate.counts.error)}건`;
-  for (const [id, count] of [['pending', duplicate.counts.pending], ['active', duplicate.counts.processing], ['errors', duplicate.counts.error]]) {
-    $(`queue-duplicate-${id}-count`).textContent = `${number(count)}건`;
-  }
-  renderQueueList('queue-duplicate-pending', duplicate.pending, '중복 검토를 기다리는 신규 제출이 없습니다.');
-  renderQueueList('queue-duplicate-active', duplicate.active, '현재 중복 검토 중인 신규 제출이 없습니다.');
-  renderQueueList('queue-duplicate-errors', duplicate.errors, '중복 검토 오류가 발생한 신규 제출이 없습니다.');
-  renderQueueList('queue-active', queue.active, '현재 검증 중인 신규 제출이 없습니다.');
-  renderQueueList('queue-pending', queue.pending, '검증을 기다리는 신규 제출이 없습니다.');
-  renderQueueList('queue-blocked', queue.blocked, '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
+  renderQueueList('queue-active', active, '현재 검증 중인 신규 제출이 없습니다.');
+  renderQueueList('queue-pending', pending, '검증을 기다리는 신규 제출이 없습니다.');
+  renderQueueList('queue-blocked', blocked, '반려되거나 보완·재시도가 필요한 신규 제출이 없습니다.');
   if ($('queue-detail').open) {
-    const current = [...queue.active, ...queue.pending, ...queue.blocked,
-      ...duplicate.active, ...duplicate.pending, ...duplicate.errors]
+    const current = [...active, ...pending, ...blocked]
       .find(row => row.submission_id === queueDetailSubmissionId);
     if (current) renderQueueDetail(current);
     else $('queue-detail').close();

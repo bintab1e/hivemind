@@ -12,7 +12,9 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.ok(start > 0 && end > start);
   assert.match(html, /data-view="queue"/);
   assert.match(html, /<dialog id="queue-detail"[^>]*aria-labelledby="queue-detail-title"/);
-  for (const name of ['pending', 'active', 'blocked', 'duplicate-pending', 'duplicate-active', 'duplicate-errors']) assert.match(html, new RegExp(`id="queue-${name}-pagination"`));
+  for (const name of ['pending', 'active', 'blocked']) assert.match(html, new RegExp(`id="queue-${name}-pagination"`));
+  assert.equal((html.match(/class="queue-column"/g) || []).length, 3);
+  assert.doesNotMatch(html, /queue-duplicate-board|queue-duplicate-pending/);
   const elements = new Map();
   const makeElement = tagName => ({
     tagName, className: '', textContent: '', children: [], open: false, dataset: {},
@@ -25,7 +27,7 @@ test('verification queue shows real worker and job stages, with empty and error 
     showModal() { if (this.open) throw new Error('dialog already open'); this.open = true; },
     close() { this.open = false; },
   });
-  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked', 'queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination', 'queue-updated', 'queue-worker-count', 'queue-active-count', 'queue-pending-count', 'queue-blocked-count', 'queue-detail', 'queue-detail-title', 'queue-detail-subtitle', 'queue-detail-facts', 'queue-duplicate-count', 'queue-duplicate-pending', 'queue-duplicate-active', 'queue-duplicate-errors', 'queue-duplicate-pending-count', 'queue-duplicate-active-count', 'queue-duplicate-errors-count', 'queue-duplicate-pending-pagination', 'queue-duplicate-active-pagination', 'queue-duplicate-errors-pagination']) elements.set(id, makeElement('div'));
+  for (const id of ['queue-stats', 'queue-workers', 'queue-active', 'queue-pending', 'queue-blocked', 'queue-active-pagination', 'queue-pending-pagination', 'queue-blocked-pagination', 'queue-updated', 'queue-worker-count', 'queue-active-count', 'queue-pending-count', 'queue-blocked-count', 'queue-detail', 'queue-detail-title', 'queue-detail-subtitle', 'queue-detail-facts']) elements.set(id, makeElement('div'));
   const state = {
     data: { tracks: [
       { track_id: 'rc', label: '최신 RC', version_id: '7.3-rc7', repo_commit: 'abc123' },
@@ -46,7 +48,7 @@ test('verification queue shows real worker and job stages, with empty and error 
         { submission_id: 'run-4', project: 'knfsd', title: 'rejected bug', agent_id: 'agent-4', status: 'rejected', reason: 'PoC 재현 실패', target_commit: 'abc123' },
       ],
       duplicate: {
-        counts: { pending: 2, processing: 1, error: 1 },
+        counts: { pending: 1, processing: 1, error: 1 },
         pending: [{ submission_id: 'run-6', project: 'knfsd', title: 'duplicate waiting', agent_id: 'agent-6', status: 'duplicate_pending' }],
         active: [{ submission_id: 'run-5', project: 'knfsd', title: 'duplicate in progress', agent_id: 'agent-5', status: 'duplicate_processing', matched_management_id: 'A-043' }],
         errors: [{ submission_id: 'run-7', project: 'knfsd', title: 'duplicate failed', agent_id: 'agent-7', status: 'duplicate_error', reason: 'comparison failed' }],
@@ -62,7 +64,7 @@ test('verification queue shows real worker and job stages, with empty and error 
       },
     },
     queueError: null,
-    queuePages: { pending: 1, active: 1, blocked: 1, 'duplicate-pending': 1, 'duplicate-active': 1, 'duplicate-errors': 1 },
+    queuePages: { pending: 1, active: 1, blocked: 1 },
   };
   const context = { document: { getElementById: id => elements.get(id), createElement: makeElement }, testState: state };
   vm.runInNewContext(
@@ -114,13 +116,17 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.match(text(elements.get('queue-blocked')), /blocked bug agent-3/);
   assert.doesNotMatch(text(elements.get('queue-blocked')), /KASAN 증거 부족|반려|PoC 재현 실패/);
   assert.match(text(elements.get('queue-stats')), /반려 · 보완 · 오류/);
-  assert.equal(elements.get('queue-duplicate-count').textContent, '4건');
-  assert.match(text(elements.get('queue-duplicate-pending')), /duplicate waiting agent-6/);
-  assert.match(text(elements.get('queue-duplicate-active')), /duplicate in progress agent-5/);
-  elements.get('queue-duplicate-active').children[0].click();
+  assert.deepEqual(elements.get('queue-stats').children.map(stat => stat.children[1].textContent), ['2', '2', '3']);
+  assert.equal(elements.get('queue-pending-count').textContent, '2건');
+  assert.equal(elements.get('queue-active-count').textContent, '2건');
+  assert.equal(elements.get('queue-blocked-count').textContent, '3건');
+  assert.match(text(elements.get('queue-pending')), /duplicate waiting agent-6/);
+  assert.match(text(elements.get('queue-active')), /duplicate in progress agent-5/);
+  assert.match(text(elements.get('queue-blocked')), /duplicate failed agent-7/);
+  elements.get('queue-active').children[1].click();
   assert.match(text(elements.get('queue-detail-facts')), /중복 검토 중|A-043/);
   elements.get('queue-detail').close();
-  elements.get('queue-duplicate-errors').children[0].click();
+  elements.get('queue-blocked').children[2].click();
   assert.match(text(elements.get('queue-detail-facts')), /중복 검토 오류|comparison failed/);
   elements.get('queue-detail').close();
   elements.get('queue-active').children[0].click();
@@ -160,21 +166,19 @@ test('verification queue shows real worker and job stages, with empty and error 
     assert.equal(elements.get(`queue-${name}`).children[0].dataset.submissionId, `${name}-1`);
     assert.equal(elements.get(`queue-${name}-pagination`).hidden, false);
   }
-  for (const name of ['duplicate-pending', 'duplicate-active', 'duplicate-errors']) {
-    assert.equal(elements.get(`queue-${name}`).children.length, 5);
-    assert.equal(elements.get(`queue-${name}-pagination`).hidden, false);
-  }
-  elements.get('queue-duplicate-pending-pagination').children.find(button => button.textContent === '다음').click();
-  assert.equal(elements.get('queue-duplicate-pending').children[0].dataset.submissionId, 'duplicate-pending-6');
-  assert.equal(elements.get('queue-duplicate-active').children[0].dataset.submissionId, 'duplicate-active-1');
-  assert.equal(elements.get('queue-pending').children[0].dataset.submissionId, 'pending-1');
   elements.get('queue-blocked-pagination').children.find(button => button.textContent === '다음').click();
   assert.equal(elements.get('queue-blocked').children[0].dataset.submissionId, 'blocked-6');
   assert.equal(elements.get('queue-pending').children[0].dataset.submissionId, 'pending-1');
+  elements.get('queue-pending-pagination').children.find(button => button.textContent === '다음').click();
   elements.get('queue-pending-pagination').children.find(button => button.textContent === '3').click();
-  assert.equal(elements.get('queue-pending').children.length, 2);
+  assert.equal(elements.get('queue-pending').children.length, 5);
   assert.equal(elements.get('queue-pending').children[0].dataset.submissionId, 'pending-11');
+  assert.equal(elements.get('queue-pending').children[2].dataset.submissionId, 'duplicate-pending-1');
   assert.equal(elements.get('queue-active').children[0].dataset.submissionId, 'active-1');
+  elements.get('queue-active-pagination').children.find(button => button.textContent === '다음').click();
+  elements.get('queue-active-pagination').children.find(button => button.textContent === '3').click();
+  assert.equal(elements.get('queue-active').children[2].dataset.submissionId, 'duplicate-active-1');
+  assert.equal(elements.get('queue-pending').children[0].dataset.submissionId, 'pending-11');
   elements.get('queue-blocked').children[0].click();
   assert.equal(elements.get('queue-detail-title').textContent, 'blocked bug 6');
   elements.get('queue-detail').close();
@@ -188,8 +192,6 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.equal(elements.get('queue-detail').open, false);
   assert.match(text(elements.get('queue-pending')), /검증을 기다리는 신규 제출이 없습니다/);
   assert.equal(state.queuePages.pending, 1);
-  assert.equal(state.queuePages['duplicate-pending'], 1);
-  assert.equal(elements.get('queue-duplicate-pending-pagination').hidden, true);
   assert.equal(elements.get('queue-pending-pagination').hidden, true);
   assert.doesNotMatch(text(elements.get('queue-workers')), /next candidate|review failed/);
   state.queueError = new Error('서비스 오류');
