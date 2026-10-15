@@ -67,7 +67,7 @@ function rootIdentifiers(report) {
 
 function strongSameRootSignal(candidate, reference) {
   if (candidate.target !== reference.target || !candidate.poc_excerpt?.trim() ||
-      candidate.poc_excerpt !== reference.poc_excerpt ||
+      candidate.poc_excerpt.trim() !== reference.poc_excerpt?.trim() ||
       Buffer.byteLength(candidate.poc_excerpt) >= maxPocBytes ||
       !candidate.report_excerpt.trim() || !reference.report_excerpt.trim()) return false;
   const primary = /^([A-Za-z0-9_./+-]+\.[ch])(?:$|:)/.exec(candidate.file_path ?? '')?.[1];

@@ -238,7 +238,7 @@ test('identical PoC and overlapping causal source anchors trigger a focused dupl
   const newFinding = { ...candidate, title: 'Read-list page count issue',
     file_path: 'net/sunrpc/xprtrdma/svc_rdma_rw.c',
     code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1148'],
-    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: `${poc}\n` };
   const old = { ...reference('A-044'), title: 'Read-segment page budget issue',
     file_path: newFinding.file_path,
     code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1147-1149'],
