@@ -14,7 +14,7 @@ export function listApprovedRevisions(db, managementId) {
   if (!managementIdPattern.test(managementId)) invalid('Finding not found', 404);
   return db.prepare(`SELECT id AS submission_id, title, completed_at FROM submissions
     WHERE management_id = ? AND status = 'approved'
-    ORDER BY completed_at DESC, id DESC`).all(managementId);
+    ORDER BY submitted_at DESC, id DESC`).all(managementId);
 }
 
 export function listRevisionArtifacts(db, managementId, submissionId) {

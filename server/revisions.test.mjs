@@ -10,13 +10,13 @@ import { startServer } from './server.mjs';
 test('revision artifacts belong only to approved submissions of the selected management ID', () => {
   const db = new DatabaseSync(':memory:');
   const approved = 'a'.repeat(64), older = 'b'.repeat(64), rejected = 'c'.repeat(64), other = 'd'.repeat(64);
-  db.exec(`CREATE TABLE submissions (id TEXT, management_id TEXT, status TEXT, title TEXT, completed_at TEXT);
+  db.exec(`CREATE TABLE submissions (id TEXT, management_id TEXT, status TEXT, title TEXT, submitted_at TEXT, completed_at TEXT);
     CREATE TABLE submission_artifacts (submission_id TEXT, ordinal INTEGER, name TEXT, kind TEXT, sha256 TEXT, size INTEGER, content BLOB);`);
-  const insert = db.prepare('INSERT INTO submissions VALUES (?, ?, ?, ?, ?)');
-  insert.run(approved, 'A-005', 'approved', 'new', '2026-10-14T01:00:00Z');
-  insert.run(older, 'A-005', 'approved', 'old', '2026-10-13T01:00:00Z');
-  insert.run(rejected, 'A-005', 'rejected', 'unverified', '2026-10-14T02:00:00Z');
-  insert.run(other, 'A-006', 'approved', 'other finding', '2026-10-14T03:00:00Z');
+  const insert = db.prepare('INSERT INTO submissions VALUES (?, ?, ?, ?, ?, ?)');
+  insert.run(approved, 'A-005', 'approved', 'new', '2026-10-14T01:00:00Z', '2026-10-14T01:05:00Z');
+  insert.run(older, 'A-005', 'approved', 'old', '2026-10-13T01:00:00Z', '2026-10-15T01:05:00Z');
+  insert.run(rejected, 'A-005', 'rejected', 'unverified', '2026-10-14T02:00:00Z', '2026-10-14T02:05:00Z');
+  insert.run(other, 'A-006', 'approved', 'other finding', '2026-10-14T03:00:00Z', '2026-10-14T03:05:00Z');
   const file = db.prepare('INSERT INTO submission_artifacts VALUES (?, 1000, ?, ?, ?, ?, ?)');
   for (const [id, content] of [[approved, 'latest report'], [older, 'earlier report'], [rejected, 'rejected report'], [other, 'other report']]) {
     file.run(id, 'report.md', 'report', 'hash', content.length, Buffer.from(content));

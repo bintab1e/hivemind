@@ -232,6 +232,68 @@ test('a sparse report can still ground a same-root comparison in both PoCs', asy
   assert.equal(result.matched_management_id, 'A-001');
 });
 
+test('identical PoC and overlapping causal source anchors trigger a focused duplicate review', async () => {
+  const poc = 'int main(void) { /* Reproduce the Read-list page-budget omission. */ return run_read_chunks(); }';
+  const cause = 'svc_rdma_recvfrom omits inline bytes from the Read-list page budget, so rc_page_count exceeds rc_pages in svc_rdma_clear_rqst_pages.';
+  const newFinding = { ...candidate, title: 'Read-list page count issue',
+    file_path: 'net/sunrpc/xprtrdma/svc_rdma_rw.c',
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1148'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+  const old = { ...reference('A-044'), title: 'Read-segment page budget issue',
+    file_path: newFinding.file_path,
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1147-1149'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+  let calls = 0;
+  const result = await reviewSubmittedDuplicateWithCodex(newFinding, [old], {
+    runner: async prompt => {
+      calls++;
+      if (calls === 1) return { reviews: [review('A-044', 'uncertain')] };
+      assert.match(prompt, /byte-identical/);
+      return { reviews: [review('A-044', 'same', { ...comparison,
+        candidate_quote: cause, reference_quote: cause })] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.verdict, 'duplicate');
+  assert.equal(result.matched_management_id, 'A-044');
+});
+
+test('unresolved high-risk same-root signal does not silently register a new finding', async () => {
+  const poc = 'int main(void) { return run_read_chunks_and_check_rc_page_count(); }';
+  const cause = 'The Read-list budget omits inline bytes, then rc_page_count exceeds rc_pages before svc_rdma_clear_rqst_pages writes the pointers.';
+  const newFinding = { ...candidate, file_path: 'net/sunrpc/xprtrdma/svc_rdma_rw.c',
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1148'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+  const old = { ...reference('A-044'), file_path: newFinding.file_path,
+    code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:797', 'net/sunrpc/xprtrdma/svc_rdma_rw.c:1147-1149'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: poc };
+  let calls = 0;
+  const held = await reviewSubmittedDuplicateWithCodex(newFinding, [old], {
+    runner: async () => {
+      calls++;
+      return { reviews: [review('A-044', 'same', { ...comparison, defenses: 'none',
+        candidate_quote: cause, reference_quote: cause })] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(held.verdict, 'uncertain');
+  assert.match(held.reason, /A-044/);
+
+  const reusedPoc = await reviewSubmittedDuplicateWithCodex(newFinding,
+    [{ ...old, code_refs: ['net/sunrpc/xprtrdma/svc_rdma_rw.c:200',
+      'net/sunrpc/xprtrdma/svc_rdma_rw.c:300'] }], {
+      runner: async () => ({ reviews: [review('A-044', 'uncertain')] }),
+    });
+  assert.equal(reusedPoc.verdict, 'new');
+
+  const truncated = 'x'.repeat(12_000);
+  const clippedPoCs = await reviewSubmittedDuplicateWithCodex(
+    { ...newFinding, poc_excerpt: truncated }, [{ ...old, poc_excerpt: truncated }], {
+      runner: async () => ({ reviews: [review('A-044', 'uncertain')] }),
+    });
+  assert.equal(clippedPoCs.verdict, 'new');
+});
+
 test('submitter management-ID hint cannot force a merge', async () => {
   const result = await reviewSubmittedDuplicateWithCodex(
     { ...candidate, requested_management_id: 'A-001' }, [reference('A-001')], {
