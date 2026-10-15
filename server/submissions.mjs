@@ -451,8 +451,7 @@ function supportedStaticProof(db, submissionId, review, poc) {
   const checks = review.proof_review?.checks;
   if (!['supports', 'uncertain'].includes(review.proof_review?.verdict) || !checks ||
       checks.flaw !== 'supported' || checks.admin_action !== 'supported' ||
-      checks.poc !== 'supported' || checks.log !== 'supported' ||
-      !['reachability', 'defenses']
+      !['reachability', 'poc', 'log', 'defenses']
         .every(name => ['supported', 'uncertain'].includes(checks[name]))) return false;
   const proof = review.proof;
   const evidence = review.grounding?.evidence;

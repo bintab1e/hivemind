@@ -78,13 +78,13 @@ test('static screening preserves original C/log and never invokes a VM', async t
   assert.doesNotMatch(result.artifacts.report.content, /서버 VM에서.*관찰/);
 });
 
-test('grounded base flaw proceeds despite uncertain reachability or defenses when PoC and log are supported', async t => {
+test('grounded base flaw proceeds despite uncertain ancillary path or log correlation', async t => {
   const result = await processSubmissionJob(job, { config: config(t), reviewer,
     sourceLoader: async () => trustedSource,
     proofReviewer: async () => ({ ...await proofReviewer(),
       verdict: 'uncertain', reason: 'The core claim is supported; ancillary source paths remain unresolved.',
-      checks: { reachability: 'uncertain', flaw: 'supported', poc: 'supported',
-        log: 'supported', defenses: 'uncertain', admin_action: 'supported' } }) });
+      checks: { reachability: 'uncertain', flaw: 'supported', poc: 'uncertain',
+        log: 'uncertain', defenses: 'uncertain', admin_action: 'supported' } }) });
   assert.equal(result.review.verdict, 'likely');
   assert.equal(result.artifacts.log.content, log);
 });
@@ -93,9 +93,9 @@ test('independent core uncertainty or concrete contradiction still holds approva
   for (const [verdict, checks] of [
     ['uncertain', { reachability: 'supported', flaw: 'uncertain', poc: 'supported', log: 'supported',
       defenses: 'supported', admin_action: 'supported' }],
-    ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'uncertain', log: 'supported',
+    ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'contradicted', log: 'supported',
       defenses: 'supported', admin_action: 'supported' }],
-    ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'uncertain',
+    ['uncertain', { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'contradicted',
       defenses: 'supported', admin_action: 'supported' }],
     ['refutes', { reachability: 'supported', flaw: 'supported', poc: 'supported', log: 'supported',
       defenses: 'supported', admin_action: 'supported' }],

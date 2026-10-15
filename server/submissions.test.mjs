@@ -255,7 +255,7 @@ test('plausible grounded flaw is accepted despite unresolved ancillary proof che
   const uncertainLog = verdict();
   uncertainLog.review.proof_review = { ...proofReview, verdict: 'uncertain', checks: { ...proofReview.checks,
     log: 'uncertain' } };
-  assert.equal(approve(db, submit(db, 'uncertain-log'), uncertainLog).status, 'needs_review');
+  assert.equal(approve(db, submit(db, 'uncertain-log'), uncertainLog).status, 'approved');
 
   const contradictedId = submit(db, 'ancillary-contradicted');
   const contradicted = verdict();
