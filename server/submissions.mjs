@@ -742,6 +742,7 @@ export function claimPrimitiveReview(db, workerId, supportedCommits) {
       code_refs: Array.isArray(data.code_refs) ? data.code_refs : [],
       nfs_version: row.nfs_version, privilege: row.privilege,
       verified_impacts: Array.isArray(data.verified_impacts) ? data.verified_impacts : [],
+      claimed_impacts: Array.isArray(data.claimed_impacts) ? data.claimed_impacts : [],
       evidence_status: data.dynamic_status === 'not_run' ? 'submitted_static' : 'server_observed',
       report: Buffer.from(artifacts[0].content).toString('utf8'),
       poc_source: Buffer.from(artifacts[1].content).toString('utf8'),

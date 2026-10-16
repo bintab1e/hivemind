@@ -56,6 +56,7 @@ function checkedJob(job) {
       !Array.isArray(job.code_refs) || job.code_refs.length > 30 ||
       job.code_refs.some(ref => typeof ref !== 'string' || ref.length > 300) ||
       !Array.isArray(job.verified_impacts) || job.verified_impacts.length > 7 ||
+      job.claimed_impacts != null && (!Array.isArray(job.claimed_impacts) || job.claimed_impacts.length > 7) ||
       typeof job.report !== 'string' || Buffer.byteLength(job.report) > 1_000_000 ||
       typeof job.poc_source !== 'string' || Buffer.byteLength(job.poc_source) > 250_000 ||
       typeof job.kasan_log !== 'string' || Buffer.byteLength(job.kasan_log) > 600_000) {

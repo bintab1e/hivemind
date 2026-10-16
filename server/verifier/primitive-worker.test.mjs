@@ -14,7 +14,7 @@ const config = { socketPath: '/tmp/verifier.sock', cliPath: '/usr/bin/codex',
 const job = { finding_id: findingId, lease_token: leaseToken, management_id: 'A-043',
   title: 'NFSv4 boundary read', repo_commit: commit, file_path: 'fs/nfsd/nfs4proc.c',
   code_refs: ['fs/nfsd/nfs4proc.c:1'], nfs_version: '4.2', privilege: 'AUTH_SYS',
-  verified_impacts: ['kasan_read'], report: '## Summary\nA read was observed.',
+  verified_impacts: ['kasan_read'], claimed_impacts: ['kasan_read'], report: '## Summary\nA read was observed.',
   poc_source: 'int main(void) { return 0; }\n', kasan_log: 'BUG: KASAN: slab-out-of-bounds\nRead of size 4\n' };
 
 test('primitive worker configuration and identity are stable per service', () => {
@@ -82,6 +82,13 @@ test('primitive worker completes with no added opinion when no high-value direct
     sourceLoader: () => ({ commit, files: [] }), reviewer: () => ({ summary: null }) });
   assert.equal(calls.find(call => call.endpoint === '/primitive/complete').body.summary, null);
   assert.equal(calls.some(call => call.endpoint === '/primitive/fail'), false);
+});
+
+test('primitive worker rejects malformed claimed impacts in a claimed job', async () => {
+  await assert.rejects(runPrimitiveOnce({ config,
+    transport: async (_, endpoint) => endpoint === '/primitive/claim'
+      ? { job: { ...job, claimed_impacts: 'controlled_read' } } : {},
+    sourceDiscovery: () => new Map([[commit, '/trusted/kernel-rc']]) }), /invalid_primitive_job/);
 });
 
 test('primitive worker records review failure without exposing submitted evidence', async () => {

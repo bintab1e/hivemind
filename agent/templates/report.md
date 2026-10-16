@@ -20,4 +20,4 @@
 
 ## Impact analysis
 
-`kasan_read`, `kasan_write`, `controlled_read`, `controlled_write`, `lpe`, `rce`, `info_leak` 중 실제 관찰한 항목과 각각의 로그·실험 근거를 적는다. 한 취약점에서 여러 영향이 입증되면 모두 적고, 미확인·추정 항목은 별도 문장으로 구분한다. KASAN 또는 KCSAN 원본 `.log`를 한 개 이상 첨부하되 로그를 만들거나 다른 실행의 것을 재사용하지 않는다.
+`kasan_read`, `kasan_write`, `controlled_read`, `controlled_write`, `lpe`, `rce`, `info_leak` 중 실제 관찰한 항목과 각각의 로그·실험 근거를 적는다. Controlled Read/Write는 공격자가 제어하는 커널 메모리 접근을 뜻하며 일반 파일 읽기·쓰기나 share reservation 우회와 구분한다. 한 취약점에서 여러 영향이 입증되면 모두 적고, 미확인·추정 항목은 별도 문장으로 구분한다. KASAN 또는 KCSAN 원본 `.log`를 한 개 이상 첨부하되 로그를 만들거나 다른 실행의 것을 재사용하지 않는다.

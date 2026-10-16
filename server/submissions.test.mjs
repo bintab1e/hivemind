@@ -713,6 +713,7 @@ test('primitive follow-up sees submitted evidence as static-only and no verified
   assert.equal(job.management_id, approved.management_id);
   assert.equal(job.evidence_status, 'submitted_static');
   assert.deepEqual(job.verified_impacts, []);
+  assert.deepEqual(job.claimed_impacts, ['kasan_read']);
   assert.equal(job.kasan_log, log);
 });
 

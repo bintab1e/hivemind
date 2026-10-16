@@ -135,6 +135,7 @@ function populateFindingFilters(findings) {
 }
 
 const isRegistered = finding => !!finding.management_id && finding.registration_status === 'verified';
+const isStaticReport = finding => isRegistered(finding) && finding.dynamic_status === 'not_run';
 const needsVerification = finding => finding.origin !== 'history' && !isRegistered(finding) && finding.report_status !== '철회' && finding.review_verdict !== 'unlikely';
 const newFindingStarts = { A: 43, B: 22, C: 2 };
 const historicalNoOffset = { knfsd: 0, 'NFS-Ganesha': 42, libnfs: 63 };
@@ -182,7 +183,8 @@ const reviewLabel = finding => {
 const impactEvidence = (finding, key) => {
   if ((finding.verified_impacts || []).includes(key)) return isRegistered(finding)
     ? '서버 재현으로 확인된 기록' : '기존 기록에 기재됨 · 서버 독립 재현 없음';
-  if ((finding.claimed_impacts || []).includes(key)) return '제출 자료에 나타남 · 서버 독립 재현 없음';
+  if ((finding.claimed_impacts || []).includes(key)) return isStaticReport(finding)
+    ? '정적 검증 보고서에 기재됨 · 서버 독립 재현 없음' : '제출 자료에 나타남 · 서버 독립 재현 없음';
   return '기록 없음';
 };
 
@@ -244,7 +246,8 @@ const findingRowNumber = (finding, index) => finding.origin === 'history' && Num
   ? historicalNoOffset[finding.target] + finding.number
   : index + 1;
 const registryImpactMark = (finding, key) => (finding.verified_impacts || []).includes(key)
-  ? (isRegistered(finding) ? '✓' : '◇') : (finding.claimed_impacts || []).includes(key) ? '◇' : '—';
+  ? (isRegistered(finding) ? '✓' : '◇') : (finding.claimed_impacts || []).includes(key)
+    ? (isStaticReport(finding) ? '✓' : '◇') : '—';
 const registryCsvCell = value => {
   const text = String(value ?? '');
   const safe = /^[\s\uFEFF]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text) ? `'${text}` : text;

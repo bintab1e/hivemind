@@ -88,7 +88,7 @@ test('registry CSV preserves spreadsheet columns, Korean text, quoted data, and 
     {
       event_id: 'new', origin: 'agent', management_id: 'A-043', title: '검증된 UAF',
       target: 'knfsd', registration_status: 'verified',
-      verified_impacts: ['kasan_read', 'kasan_write', 'lpe'],
+      verified_impacts: ['kasan_read', 'kasan_write', 'lpe'], claimed_impacts: ['info_leak'],
     },
     {
       event_id: 'static', origin: 'agent', management_id: 'A-044', title: '정적 검토 후보',
@@ -113,7 +113,8 @@ test('registry CSV preserves spreadsheet columns, Korean text, quoted data, and 
   assert.equal(rows[2][index('KASAN Write')], '✓');
   assert.equal(rows[2][index('LPE')], '✓');
   assert.equal(rows[2][index('RCE')], '—');
-  assert.equal(rows[3][index('KASAN Read')], '◇', 'submitted evidence is distinct from server reproduction');
+  assert.equal(rows[2][index('Info Leak')], '◇', 'unchecked dynamic claim is not a static report conclusion');
+  assert.equal(rows[3][index('KASAN Read')], '✓', 'approved report claim is checked without claiming server reproduction');
   assert.equal(rows[3][index('LPE')], '—');
 });
 

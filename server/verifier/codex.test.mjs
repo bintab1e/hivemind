@@ -67,7 +67,8 @@ test('a short submitted report and basic original C PoC do not fail static norma
   const sparse = { ...submission, report: '입력 경계가 의심됩니다.' };
   const reviewed = await reviewSubmissionWithCodex(sparse, options(fakeCli(t, answer,
     { type: 'turn.completed' }, 0, ['A short report, basic original C PoC',
-      'natural Korean 음슴체', 'multiple short fenced C excerpts'])));
+      'natural Korean 음슴체', 'multiple short fenced C excerpts',
+      'Set claimed_impacts to exactly the categories described as observed'])));
   assert.equal(reviewed.verdict, 'likely');
   assert.equal(reviewed.normalized.poc.source, submission.files[1].content);
   assert.match(reviewed.normalized.report, /^## Summary/m);
@@ -95,7 +96,7 @@ process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});
 test('primitive review stays advisory and grounds each suggested direction in pinned source', async t => {
   const finding = {
     title: 'NFSv4 COMPOUND boundary read', file_path: 'fs/nfsd/nfs4proc.c',
-    nfs_version: '4.2', privilege: 'AUTH_SYS', verified_impacts: ['kasan_read'],
+    nfs_version: '4.2', privilege: 'AUTH_SYS', verified_impacts: ['kasan_read'], claimed_impacts: [],
     report: '## Summary\nA bounds read was observed.',
     poc_source: 'int main(void) { return 0; }\n',
     kasan_log: 'BUG: KASAN: slab-out-of-bounds\nRead of size 4\n',
@@ -104,13 +105,18 @@ test('primitive review stays advisory and grounds each suggested direction in pi
     candidates: [{ primitive: 'controlled_read', source_path: 'fs/nfsd/nfs4proc.c', source_line: 1,
       basis: '길이 인자에 따라 읽는 위치가 달라질 가능성이 있습니다.', missing_evidence: '읽기 주소의 제어 범위를 별도로 확인해야 합니다.' }],
   };
-  const cliPath = fakeCli(t, answer, { type: 'turn.completed' }, 0, '<primitive-evidence>');
+  const cliPath = fakeCli(t, answer, { type: 'turn.completed' }, 0,
+    ['<primitive-evidence>', 'Do not suggest a primitive already listed in claimed_impacts']);
   const result = await reviewPrimitiveWithCodex(finding, { cliPath, trustedSource });
   assert.match(result.summary, /Controlled Read 추가 가능성/);
   assert.doesNotMatch(result.summary, /미재현|불명확/);
   assert.match(result.summary, /fs\/nfsd\/nfs4proc\.c:1/);
   assert.equal(result.candidates.length, 1);
   assert.deepEqual(finding.verified_impacts, ['kasan_read']);
+  const alreadyClaimed = await reviewPrimitiveWithCodex({ ...finding, claimed_impacts: ['controlled_read'] },
+    { cliPath, trustedSource });
+  assert.equal(alreadyClaimed.summary, null);
+  assert.deepEqual(alreadyClaimed.candidates, []);
   const noCandidateCli = fakeCli(t, { candidates: [] }, { type: 'turn.completed' }, 0, '<primitive-evidence>');
   assert.equal((await reviewPrimitiveWithCodex(finding, { cliPath: noCandidateCli, trustedSource })).summary, null);
   const badCli = fakeCli(t, { ...answer, candidates: [{ ...answer.candidates[0], source_line: 99 }] }, { type: 'turn.completed' }, 0, '<primitive-evidence>');
