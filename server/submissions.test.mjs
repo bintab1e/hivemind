@@ -459,10 +459,17 @@ test('the same rooted enhancement retains one management ID and its earlier revi
   const second = submit(db, 'second', { existing_management_id: first.management_id });
   const next = approve(db, second, verdict(), sameFinding(first.management_id));
   assert.equal(next.management_id, first.management_id);
+  const resolved = listVerificationQueue(db).duplicate.resolved;
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].status, 'duplicate_merged');
+  assert.equal(resolved[0].matched_management_id, first.management_id);
+  assert.equal(resolved[0].duplicate_review_reason, 'Same source path, reachable call chain and faulty invariant');
   assert.equal(db.prepare("SELECT count(*) AS count FROM submissions WHERE management_id = ? AND status = 'approved'").get(first.management_id).count, 2);
   assert.equal(db.prepare('SELECT last_number FROM registry_sequences WHERE target = ?').get('knfsd').last_number, 43);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM finding_revision_audit WHERE management_id = ?').get(first.management_id).n, 1);
   assert.equal(getVerifiedArtifact(db, next.finding_id, 'report.md').toString(), report);
+  db.prepare('UPDATE submissions SET completed_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', second);
+  assert.equal(listVerificationQueue(db).duplicate.resolved.length, 0);
 });
 
 test('a first submission issues a lasting vulnerability ID for pending and purged follow-ups', t => {

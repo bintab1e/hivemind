@@ -48,10 +48,12 @@ test('verification queue shows real worker and job stages, with empty and error 
         { submission_id: 'run-4', project: 'knfsd', title: 'rejected bug', agent_id: 'agent-4', status: 'rejected', reason: 'PoC 재현 실패', target_commit: 'abc123' },
       ],
       duplicate: {
-        counts: { pending: 1, processing: 1, error: 1 },
+        counts: { pending: 1, processing: 1, error: 1, resolved: 1 },
         pending: [{ submission_id: 'run-6', project: 'knfsd', title: 'duplicate waiting', agent_id: 'agent-6', status: 'duplicate_pending' }],
         active: [{ submission_id: 'run-5', project: 'knfsd', title: 'duplicate in progress', agent_id: 'agent-5', status: 'duplicate_processing', matched_management_id: 'A-043' }],
         errors: [{ submission_id: 'run-7', project: 'knfsd', title: 'duplicate failed', agent_id: 'agent-7', status: 'duplicate_error', reason: 'comparison failed' }],
+        resolved: [{ submission_id: 'run-8', project: 'knfsd', title: 'duplicate merged', agent_id: 'agent-8', status: 'duplicate_merged',
+          matched_management_id: 'A-043', management_id: 'A-043', duplicate_review_reason: 'same root cause', completed_at: '2026-10-13T01:00:00Z' }],
       },
       primitive: {
         counts: { pending: 2, processing: 1, complete: 4, error: 1 },
@@ -110,18 +112,24 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.doesNotMatch(text(elements.get('queue-pending')), /def456|순서|V-000001/);
   assert.match(text(elements.get('queue-blocked')), /blocked bug agent-3/);
   assert.doesNotMatch(text(elements.get('queue-blocked')), /KASAN 증거 부족|반려|PoC 재현 실패/);
-  assert.match(text(elements.get('queue-stats')), /반려 · 보완 · 오류/);
-  assert.deepEqual(elements.get('queue-stats').children.map(stat => stat.children[1].textContent), ['2', '2', '3']);
+  assert.match(text(elements.get('queue-stats')), /반려 · 보완 · 오류 · 중복/);
+  assert.deepEqual(elements.get('queue-stats').children.map(stat => stat.children[1].textContent), ['2', '2', '4']);
   assert.equal(elements.get('queue-pending-count').textContent, '2건');
   assert.equal(elements.get('queue-active-count').textContent, '2건');
-  assert.equal(elements.get('queue-blocked-count').textContent, '3건');
+  assert.equal(elements.get('queue-blocked-count').textContent, '4건');
   assert.match(text(elements.get('queue-pending')), /duplicate waiting agent-6/);
   assert.match(text(elements.get('queue-active')), /duplicate in progress agent-5/);
   assert.match(text(elements.get('queue-blocked')), /duplicate failed agent-7/);
+  assert.match(text(elements.get('queue-blocked')), /duplicate merged agent-8 동일 취약점 A-043/);
+  elements.get('queue-blocked').children[0].click();
+  assert.match(text(elements.get('queue-detail-facts')), /중복 · 기존 취약점에 병합/);
+  assert.match(text(elements.get('queue-detail-facts')), /동일 취약점 관리번호 A-043/);
+  assert.match(text(elements.get('queue-detail-facts')), /중복 검토 의견 same root cause/);
+  elements.get('queue-detail').close();
   elements.get('queue-active').children[1].click();
   assert.match(text(elements.get('queue-detail-facts')), /중복 검토 중|A-043/);
   elements.get('queue-detail').close();
-  elements.get('queue-blocked').children[2].click();
+  elements.get('queue-blocked').children[3].click();
   assert.match(text(elements.get('queue-detail-facts')), /중복 검토 오류|comparison failed/);
   elements.get('queue-detail').close();
   elements.get('queue-active').children[0].click();
@@ -142,7 +150,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   assert.match(text(elements.get('queue-detail-facts')), /취약점 ID V-000001/);
   assert.match(text(elements.get('queue-detail-facts')), /보강 대상 취약점 ID V-000001/);
   elements.get('queue-detail').close();
-  elements.get('queue-blocked').children[0].click();
+  elements.get('queue-blocked').children[1].click();
   assert.match(text(elements.get('queue-detail-facts')), /KASAN 증거 부족|증거 보완 필요/);
   assert.equal(elements.get('queue-detail-facts').children.at(-1).children[1].textContent, longReason);
   elements.get('queue-detail').close();
@@ -158,6 +166,7 @@ test('verification queue shows real worker and job stages, with empty and error 
   for (const name of ['pending', 'active', 'errors']) {
     state.queue.duplicate[name] = Array.from({ length: 12 }, (_, index) => ({ submission_id: `duplicate-${name}-${index + 1}`, title: `duplicate ${name} ${index + 1}`, agent_id: `duplicate-${name}-agent`, status: `duplicate_${name === 'active' ? 'processing' : name === 'errors' ? 'error' : 'pending'}` }));
   }
+  state.queue.duplicate.resolved = [];
   context.renderQueue();
   for (const name of ['active', 'pending', 'blocked']) {
     assert.equal(elements.get(`queue-${name}`).children.length, 5);

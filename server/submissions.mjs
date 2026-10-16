@@ -225,6 +225,7 @@ export function listVerificationQueue(db) {
     json_extract(metadata_json, '$.existing_management_id') AS existing_management_id,
     json_extract(metadata_json, '$.existing_vulnerability_id') AS existing_vulnerability_id,
     json_extract(duplicate_review_json, '$.matched_management_id') AS matched_management_id,
+    json_extract(duplicate_review_json, '$.reason') AS duplicate_review_reason,
     phase, phase_updated_at,
     CASE WHEN duplicate_data_json IS NOT NULL THEN duplicate_last_activity_at ELSE last_activity_at END AS last_activity_at,
     json_extract(metadata_json, '$.repo_commit') AS target_commit`;
@@ -300,6 +301,15 @@ export function listVerificationQueue(db) {
     WHERE status IN ('duplicate_error', 'duplicate_needs_review')
     ORDER BY completed_at DESC, id DESC`).all().map(row =>
     ({ ...row, phase: 'duplicate_review', stale: false, position: null }));
+  const kstTime = Date.now() + 9 * 60 * 60_000;
+  const queueDayStart = new Date(kstTime);
+  queueDayStart.setUTCHours(6, 0, 0, 0);
+  if (queueDayStart.getTime() > kstTime) queueDayStart.setUTCDate(queueDayStart.getUTCDate() - 1);
+  const resolvedSince = new Date(queueDayStart.getTime() - 9 * 60 * 60_000).toISOString();
+  const duplicateResolved = db.prepare(`SELECT ${fields} FROM submissions
+    WHERE status = 'approved' AND json_extract(duplicate_review_json, '$.verdict') = 'duplicate'
+      AND completed_at >= ? ORDER BY completed_at DESC, id DESC`).all(resolvedSince).map(row =>
+    ({ ...row, status: 'duplicate_merged', phase: 'complete', stale: false, position: null }));
   const duplicateWorkerRows = db.prepare(`SELECT worker_id, current_submission_id, started_at, last_seen_at
     FROM duplicate_workers WHERE last_seen_at >= ? ORDER BY last_seen_at DESC, worker_id LIMIT 10`).all(recent);
   const anyDuplicateOnline = duplicateWorkerRows.some(row => Date.parse(row.last_seen_at) >= onlineCutoff);
@@ -317,8 +327,9 @@ export function listVerificationQueue(db) {
   return { counts: { processing: active.length, pending: pending.length, blocked: blockedCount },
     active, pending, blocked, blocked_has_more: false, workers,
     duplicate: { pending: duplicatePending, active: duplicateActive, errors: duplicateErrors,
+      resolved: duplicateResolved,
       counts: { pending: duplicatePending.length, processing: duplicateActive.length,
-        error: duplicateErrors.length } },
+        error: duplicateErrors.length, resolved: duplicateResolved.length } },
     primitive: { pending: primitivePending, active: primitiveActive, errors: primitiveErrors,
       counts: { pending: primitiveCounts.pending || 0, processing: primitiveCounts.processing || 0,
         complete: primitiveCounts.complete || 0, error: primitiveCounts.error || 0 } } };
