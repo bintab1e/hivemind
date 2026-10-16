@@ -40,6 +40,7 @@ test('every A/B/C reference is compared and a grounded A match is selected', asy
   assert.equal(prompts.length, 1);
   for (const id of ['A-001', 'B-001', 'C-001']) assert.match(prompts[0], new RegExp(id));
   assert.match(prompts[0], /faulty operation, violated invariant/);
+  assert.match(prompts[0], /path-specific operation that first fails to retain or release ownership/);
 });
 
 test('title alone or invented causal quote cannot confirm a duplicate', () => {
@@ -114,6 +115,7 @@ test('uncertain comparisons do not block registration, but multiple proven match
   assert.equal(multiple.verdict, 'uncertain');
   assert.match(multiple.reason, /A-001/);
   assert.match(multiple.reason, /A-002/);
+  assert.match(multiple.reason, /비교 후보\(중복 확정 아님\)/);
   const missing = await reviewSubmittedDuplicateWithCodex(candidate,
     [{ ...reference('A-001'), report_excerpt: '' }],
     { runner: async () => { throw new Error('not called'); } });
