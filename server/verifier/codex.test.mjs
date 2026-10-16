@@ -106,7 +106,9 @@ test('primitive review stays advisory and grounds each suggested direction in pi
       basis: '길이 인자에 따라 읽는 위치가 달라질 가능성이 있습니다.', missing_evidence: '읽기 주소의 제어 범위를 별도로 확인해야 합니다.' }],
   };
   const cliPath = fakeCli(t, answer, { type: 'turn.completed' }, 0,
-    ['<primitive-evidence>', 'Do not suggest a primitive already listed in claimed_impacts']);
+    ['<primitive-evidence>', 'Do not suggest a primitive already listed in claimed_impacts',
+      'Start from candidates=[]', 'ordinary NFS file-data access',
+      'A server debug log unavailable to the attacker is not an Info Leak']);
   const result = await reviewPrimitiveWithCodex(finding, { cliPath, trustedSource });
   assert.match(result.summary, /Controlled Read 추가 가능성/);
   assert.doesNotMatch(result.summary, /미재현|불명확/);
