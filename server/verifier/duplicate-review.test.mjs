@@ -234,7 +234,7 @@ test('a sparse report can still ground a same-root comparison in both PoCs', asy
   assert.equal(result.matched_management_id, 'A-001');
 });
 
-test('identical PoC and overlapping causal source anchors trigger a focused duplicate review', async () => {
+test('overlapping causal source anchors trigger a focused duplicate review', async () => {
   const poc = 'int main(void) { /* Reproduce the Read-list page-budget omission. */ return run_read_chunks(); }';
   const cause = 'svc_rdma_recvfrom omits inline bytes from the Read-list page budget, so rc_page_count exceeds rc_pages in svc_rdma_clear_rqst_pages.';
   const newFinding = { ...candidate, title: 'Read-list page count issue',
@@ -250,7 +250,7 @@ test('identical PoC and overlapping causal source anchors trigger a focused dupl
     runner: async prompt => {
       calls++;
       if (calls === 1) return { reviews: [review('A-044', 'uncertain')] };
-      assert.match(prompt, /byte-identical/);
+      assert.match(prompt, /overlapping source-line references/);
       return { reviews: [review('A-044', 'same', { ...comparison,
         candidate_quote: cause, reference_quote: cause })] };
     },
@@ -258,6 +258,31 @@ test('identical PoC and overlapping causal source anchors trigger a focused dupl
   assert.equal(calls, 2);
   assert.equal(result.verdict, 'duplicate');
   assert.equal(result.matched_management_id, 'A-044');
+});
+
+test('an enhanced PoC with the same faulty operation gets a focused review and merges', async () => {
+  const cause = 'nfsd4_encode_listxattrs calls xdr_reserve_space before nfserr_toosmall exits without writing the reserved cookie and count.';
+  const newer = { ...candidate, title: 'LISTXATTRS session impact',
+    file_path: 'fs/nfsd/nfs4xdr.c',
+    code_refs: ['fs/nfsd/nfs4xdr.c:6389', 'fs/nfsd/nfs4xdr.c:6420'],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: 'C PoC with a session follow-up' };
+  const older = { ...reference('A-047'), title: 'LISTXATTRS information disclosure',
+    file_path: newer.file_path, code_refs: [...newer.code_refs],
+    report_excerpt: `## Root cause\n${cause}`, poc_excerpt: 'C PoC with a disclosure check' };
+  let calls = 0;
+  const result = await reviewSubmittedDuplicateWithCodex(newer, [older], {
+    runner: async prompt => {
+      calls++;
+      if (calls === 1) return { reviews: [review('A-047', 'different', { ...comparison,
+        candidate_quote: cause, reference_quote: cause })] };
+      assert.match(prompt, /PoCs may differ/);
+      return { reviews: [review('A-047', 'same', { ...comparison,
+        candidate_quote: cause, reference_quote: cause })] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.verdict, 'duplicate');
+  assert.equal(result.matched_management_id, 'A-047');
 });
 
 test('a grounded same-root verdict survives a model paraphrase of its causal quotes', async () => {
@@ -321,7 +346,7 @@ test('unresolved high-risk same-root signal does not silently register a new fin
     { ...newFinding, poc_excerpt: truncated }, [{ ...old, poc_excerpt: truncated }], {
       runner: async () => ({ reviews: [review('A-044', 'uncertain')] }),
     });
-  assert.equal(clippedPoCs.verdict, 'new');
+  assert.equal(clippedPoCs.verdict, 'uncertain');
 });
 
 test('submitter management-ID hint cannot force a merge', async () => {
