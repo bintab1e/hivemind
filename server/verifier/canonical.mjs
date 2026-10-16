@@ -26,7 +26,7 @@ export function canonicalArtifacts({ review, trustedSource, poc, kernelCommit })
     .sort((a, b) => a.number - b.number).map(line => line.text).join('\n');
   if (!normalized.report.includes(anchor.text.trim()) || !snippet.trim()) return null;
   const report = normalized.report.replace(/^## Reproduction environment\s*$/m,
-    '## Reproduction environment\n\n서버 검증은 제출 자료의 정적 검토만 수행했습니다. PoC와 로그를 서버에서 실행하거나 재현하지 않았습니다.');
+    '## Reproduction environment\n\n서버에서는 제출 자료만 정적으로 검토함. PoC를 실행하거나 제출 로그를 재현하지 않음.');
   const reproduction = [
     '# Reproduction', '',
     `Submitted kernel commit: \`${kernelCommit}\`.`,

@@ -5,7 +5,7 @@ import { canonicalArtifacts } from './canonical.mjs';
 const commit = 'a'.repeat(40);
 const line = 'if (count > available) return -EINVAL;';
 const source = { commit, files: [{ path: 'fs/nfsd/nfs4proc.c', lines: [{ number: 42, text: line }] }] };
-const report = `## Summary\n요청 길이 검사 후보입니다.\n\n## Root cause\nfs/nfsd/nfs4proc.c:42\n\n\`\`\`c\n${line}\n\`\`\`\n\n## Reproduction environment\n제출 환경입니다.\n\n## PoC\n원본 C 요청을 설명합니다.\n\n## Impact analysis\n제출 로그는 미재현 주장입니다.`;
+const report = `## Summary\n요청 길이 검사 후보임.\n\n## Root cause\nfs/nfsd/nfs4proc.c:42 코드에서 경계를 확인함.\n\n\`\`\`c\n${line}\n\`\`\`\n\n## Reproduction environment\n제출 환경임.\n\n## PoC\n원본 C 요청을 설명함.\n\n## Impact analysis\n제출 로그는 재현 주장에 해당함.`;
 const poc = { filename: 'poc.c', original_name: 'client.c', source_index: 1, language: 'c', source: 'int main(void) { return 0; }\n' };
 const review = { verdict: 'likely', integrity: { verdict: 'clear', reason: 'No shortcuts' },
   grounding: { source_commit: commit, evidence: [{ path: 'fs/nfsd/nfs4proc.c', line: 42, text: line }] },
@@ -18,7 +18,8 @@ test('canonical artifacts preserve submitted C and log and explicitly label stat
   assert.equal(artifacts.poc.source, poc.source);
   assert.equal(artifacts.log.filename, 'evidence.log');
   assert.equal(artifacts.log.content, review.normalized.logs[0].content);
-  assert.match(artifacts.report.content, /서버에서 실행하거나 재현하지 않았습니다/);
+  assert.match(artifacts.report.content, /서버에서는 제출 자료만 정적으로 검토함/);
+  assert.doesNotMatch(artifacts.report.content, /습니다|입니다/);
   assert.doesNotMatch(artifacts.report.content, /서버 VM에서.*관찰/);
   assert.match(artifacts.reproduction.content, /No server VM or PoC execution occurred/);
 });

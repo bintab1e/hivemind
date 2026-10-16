@@ -66,7 +66,8 @@ const answer = {
 test('a short submitted report and basic original C PoC do not fail static normalization', async t => {
   const sparse = { ...submission, report: '입력 경계가 의심됩니다.' };
   const reviewed = await reviewSubmissionWithCodex(sparse, options(fakeCli(t, answer,
-    { type: 'turn.completed' }, 0, 'A short report, basic original C PoC')));
+    { type: 'turn.completed' }, 0, ['A short report, basic original C PoC',
+      'natural Korean 음슴체', 'multiple short fenced C excerpts'])));
   assert.equal(reviewed.verdict, 'likely');
   assert.equal(reviewed.normalized.poc.source, submission.files[1].content);
   assert.match(reviewed.normalized.report, /^## Summary/m);
