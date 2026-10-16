@@ -66,6 +66,15 @@ export async function backfillClaude(config) {
   if (stdout.trim()) console.log(stdout.trim());
 }
 
+export async function backfillCodex(config) {
+  const { stdout } = await run(agentcovPython(config.agentcov_bin), [
+    path.join(agentDirectory, 'agentcov-codex-backfill.py'),
+    '--root', config.repo_root,
+    '--state', path.join(config.home, `codex-backfill-state-${config.agent_id}.json`),
+  ], { cwd: config.repo_root });
+  if (stdout.trim()) console.log(stdout.trim());
+}
+
 export function validateConfig(config) {
   if (!config || typeof config !== 'object') throw new Error('Invalid agent config');
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(config.agent_id || '')) throw new Error('Invalid agent_id');
@@ -288,6 +297,7 @@ export async function startSyncAgent(configInput, token) {
     if (telemetryBusy) return;
     telemetryBusy = true;
     try { await backfillClaude(config); } catch (error) { console.error(`Claude Code backfill: ${error.message}`); }
+    try { await backfillCodex(config); } catch (error) { console.error(`Codex backfill: ${error.message}`); }
     try {
       const health = await syncHealth(config, token);
       await syncTelemetry(config, token, { gzip: supportsGzipTelemetry(health) });

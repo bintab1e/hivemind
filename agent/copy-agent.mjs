@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const agentSourceFiles = [
-    'agentcov-claude-backfill.py', 'agentcov-scope-report.py', 'agentcov-windows-hook.py',
+    'agentcov-claude-backfill.py', 'agentcov-codex-backfill.py', 'agentcov-scope-report.py', 'agentcov-windows-hook.py',
     'contract.mjs', 'coverage-scope.mjs', 'mcp-headers.mjs', 'mcp-agent.mjs', 'submissions.mjs',
     'sync-agent.mjs', 'setup.mjs', 'copy-agent.mjs', 'install.sh', 'setup.sh',
     'requirements.txt', 'knfsd-AGENTS.md',
