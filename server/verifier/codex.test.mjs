@@ -677,6 +677,27 @@ test('rejects unsupported Python selection when a C PoC exists and invalid model
     error => error instanceof CodexReviewError && error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'logs');
 });
 
+test('gives malformed log selections one more bounded correction attempt', async t => {
+  const wrongIndex = structuredClone(answer);
+  wrongIndex.normalized.log_file_indexes = [99];
+  const cli = fakeCli(t, answer);
+  const dir = path.dirname(cli);
+  const attempts = path.join(dir, 'attempts');
+  fs.appendFileSync(cli, `
+const count = Number(fs.existsSync(${JSON.stringify(attempts)}) ? fs.readFileSync(${JSON.stringify(attempts)}, 'utf8') : 0) + 1;
+fs.writeFileSync(${JSON.stringify(attempts)}, String(count));
+if (count < 3) fs.writeFileSync(args[args.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(wrongIndex))});
+`);
+  assert.equal((await reviewSubmissionWithCodex(submission, options(cli))).verdict, 'likely');
+  assert.equal(fs.readFileSync(attempts, 'utf8'), '3');
+
+  const noKasanEvent = { ...submission, files: [
+    ...submission.files.slice(0, 2), { name: 'serial.log', content: 'Linux KASAN kernel booted\nNo sanitizer event\n' },
+  ] };
+  await assert.rejects(reviewSubmissionWithCodex(noKasanEvent, options(fakeCli(t, answer))),
+    error => error instanceof CodexReviewError && error.code === 'invalid_output' && error.diagnostic?.validation_stage === 'logs');
+});
+
 test('rejects incomplete or failed Codex turns even if a result file exists', async t => {
   await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'turn.failed' }))), error => error instanceof CodexReviewError && error.code === 'turn_failed');
   await assert.rejects(reviewSubmissionWithCodex(submission, options(fakeCli(t, answer, { type: 'item.completed' }))), error => error instanceof CodexReviewError && error.code === 'turn_incomplete');

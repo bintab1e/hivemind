@@ -42,7 +42,7 @@ const staticRetryHints = {
   report_source: 'For likely, quote at least one exact nonempty trusted source_evidence line from the selected file_path in the Root cause report section. If no such source line supports the flaw, return uncertain.',
   metadata: 'Use only supported metadata values; set uncertain or unsupported fields to null.',
   poc: 'Select a valid original C PoC with main(), using its zero-based submission file index.',
-  logs: 'Select valid original log indexes, and claim KASAN Read or Write only when the first selected log contains that observation.',
+  logs: 'Use distinct zero-based indexes of actual submitted log files (at most five). A KASAN-enabled kernel name is not a KASAN event: include kasan_read or kasan_write only if the first selected log contains BUG: KASAN: and the matching Read or Write of size line. Otherwise omit those impacts.',
   likely_grounding: 'Return likely only with a grounded title, report, original C PoC, file_path, and matching trusted source_evidence.',
   proof: 'For likely, anchor the visible entry and faulty operation in trusted source, and cite original C PoC and submitted log lines. Explain limits of impact and defenses rather than inventing proof.',
   pre_auth: 'A pre_auth claim requires source_path and source_line exactly in trusted source_evidence, poc_line in the original C PoC, and nfs_version=null. If pre-auth is not established, set pre_auth=null and assess the narrower base flaw on its own.',
@@ -627,7 +627,7 @@ Decision rule: this is a plausibility and integrity screen, not a demand for a p
       return { ...validateResult(parsed, submission, trustedSource), model };
     } catch (error) {
       const stage = error.diagnostic?.validation_stage;
-      if (attempt === 2 || attempt === 1 && stage !== 'admin_trigger' ||
+      if (attempt === 2 || attempt === 1 && !['admin_trigger', 'logs'].includes(stage) ||
           !(error instanceof CodexReviewError) ||
           !['invalid_output', 'ungrounded_output'].includes(error.code)) throw error;
       retryHint = Object.hasOwn(staticRetryHints, stage) ? staticRetryHints[stage] : null;
